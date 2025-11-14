@@ -51,7 +51,7 @@ External consumers depend on this single crate:
 
 ```toml
 [dependencies]
-ryvus = { git = "https://github.com/your-org/ryvus" }
+ryvus = { git = "https://github.com/ryvus/ryvus" }
 ```
 
 It re-exports:
