@@ -9,13 +9,11 @@ At its core, Ryvus provides:
 * Strong **typing**, **async safety**, and **deterministic behavior**
 * A lightweight and ergonomic development experience
 
-Ryvus focuses on core orchestration and execution mechanics. Cloud services and CLI tools are not yet part of this repository and will be introduced in future phases.
-
----
+Ryvus focuses on core orchestration and execution mechanics.
 
 ## 🚀 Vision
 
-Ryvus aims to make automation and workflow orchestration accessible, predictable, and powerful—without unnecessary complexity.
+Ryvus aims to make automation and workflow orchestration accessible, predictable, and powerful,without unnecessary complexity.
 
 Key principles guiding the project:
 
@@ -25,9 +23,7 @@ Key principles guiding the project:
 * **Scalability by design**: Data structures and architecture built for future distributed execution.
 * **Ecosystem-ready**: Foundation designed to evolve without breaking stability.
 
-Plugins, cloud orchestration, distributed runners, and advanced integrations will be layered on top once the foundations are fully stable.
-
----
+Plugins and advanced integrations will be layered on top once the foundations are fully stable.
 
 ## 📦 Repository Structure
 
@@ -61,8 +57,6 @@ It re-exports:
 * `ryvus::flow`
 
 This keeps the external API clean and stable, independent of internal crate layout.
-
----
 
 ## 🔧 Crate Overview
 
@@ -104,8 +98,6 @@ The flow crate sits above the engine, turning low-level execution into structure
 
 A convenience entrypoint that unifies all internal crates under one public-facing facade.
 
----
-
 ## 🧪 Example: Simple `steps.json`
 
 Below is a minimal example of a Ryvus flow defined in JSON. This demonstrates how a simple pipeline with two steps might look:
@@ -135,12 +127,10 @@ Below is a minimal example of a Ryvus flow defined in JSON. This demonstrates ho
 
 This example shows two steps:
 
-* **fetch_user** — Calls an HTTP GET endpoint.
-* **process_user** — Extracts the user's name using a JSON selection.
+* **fetch_user** , Calls an HTTP GET endpoint.
+* **process_user** , Extracts the user's name using a JSON selection.
 
 More complex routing, conditions, and branching will be built on top of this structure as the project evolves.
-
----
 
 ## 🛠 Development
 
@@ -168,34 +158,28 @@ cargo fmt --all
 cargo clippy --workspace --all-targets
 ```
 
----
-
 ## 🌱 Roadmap Foundation
 
-(Future features—**not yet implemented**—but guiding the architecture)
+(Future features , not yet implemented, but guiding the architecture)
 
 * Expanded flow control patterns
 * Stronger execution reporting and introspection
 * Local runner improvements
 * Configurable serialization and storage strategies
 
-Cloud execution, distributed runners, and CLI tooling will be introduced only after the core engine and flow layers reach maturity.
+## 📘 Documentation
 
----
+A dedicated documentation site will be introduced in the future. Until then, each crate's `examples/` directory serves as a practical collection of how‑tos and reference implementations.
 
 ## 🤝 Contributing
 
-Contributions of any size are welcome. Whether improving documentation, refining APIs, or adding tests—every addition helps.
+Contributions of any size are welcome. Whether improving documentation, refining APIs, or adding tests,every addition helps.
 
 For large changes, please open an issue first to discuss alignment with project direction.
-
----
 
 ## 📄 License
 
 Ryvus is licensed under the MIT License.
-
----
 
 ## ❤️ Acknowledgements
 
