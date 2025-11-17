@@ -7,3 +7,4 @@ edition = "2021"
 ryvus-core = { workspace = true }
 ryvus-engine = { workspace = true }
 ryvus-flow = { workspace = true }
+ryvus-utils = { workspace = true }

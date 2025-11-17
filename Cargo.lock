@@ -472,6 +472,7 @@ dependencies = [
  "ryvus-core",
  "ryvus-engine",
  "ryvus-flow",
+ "ryvus-utils",
 ]
 
 [[package]]
@@ -513,6 +514,15 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+]
+
+[[package]]
+name = "ryvus-utils"
+version = "0.1.0"
+dependencies = [
+ "ryvus-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
