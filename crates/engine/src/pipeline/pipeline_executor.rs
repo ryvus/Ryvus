@@ -5,7 +5,10 @@ use crate::{
     hook_resolver::ActionHookResolver,
     mapper::mapper::Mapper,
     pipeline::action_executor::ActionExecutor,
-    utils::jsonpath_resolver::{build_jsonpath_context, resolve_jsonpaths},
+    utils::{
+        json::deep_merge,
+        jsonpath_resolver::{build_jsonpath_context, resolve_jsonpaths},
+    },
 };
 
 use ryvus_core::{
@@ -179,6 +182,18 @@ where
                     .await
                     .map_err(|e| EngineError::Other(e.to_string()))?;
 
+                let mut mapped_runtime = ctx
+                    .data
+                    .get("payload")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+
+                // allow jsonpaths inside runtime input too
+                let ctx_json = build_jsonpath_context(ctx);
+                resolve_jsonpaths(&mut mapped_runtime, &ctx_json);
+
+                let merged_params = deep_merge(step.params.clone(), mapped_runtime);
+
                 let executor = ActionExecutor::new(
                     step.key.clone(),
                     action,
@@ -186,7 +201,7 @@ where
                     self.hook_resolver,
                     self.mapper.clone(),
                     self.cancel_token.clone(),
-                    step.params.clone(),
+                    merged_params,
                 );
 
                 executor.execute(ctx).await

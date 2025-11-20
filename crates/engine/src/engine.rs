@@ -23,7 +23,6 @@ use tracing::debug;
 /// ------------------------------------------------------
 /// Engine definition with ActionResolver support
 /// ------------------------------------------------------
-
 pub struct Engine<
     M = DefaultMapper,
     HR = DefaultActionHookResolver,
@@ -248,7 +247,7 @@ where
     }
 
     /// ------------------------------------------------------
-    /// 🧩 Developer-friendly `run()` method:
+    /// Developer-friendly `run()` method:
     /// Executes all registered Actions sequentially without requiring a Pipeline.
     /// ------------------------------------------------------
     pub async fn run(&self, input: Value) -> Result<()> {
@@ -339,7 +338,6 @@ where
 /// ------------------------------------------------------
 /// Dedicated impl for the default engine configuration.
 /// ------------------------------------------------------
-
 impl
     Engine<
         DefaultMapper,

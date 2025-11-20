@@ -19,7 +19,7 @@ struct LogAction {
 impl Action for LogAction {
     async fn execute(&self, ctx: &mut ActionContext) -> Result<ActionResult, Error> {
         let message = ctx
-            .params
+            .input
             .as_ref()
             .and_then(|p| p.get("message"))
             .and_then(|v| v.as_str())

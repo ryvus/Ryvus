@@ -5,7 +5,7 @@ pub struct ActionContext {
     pub id: String,
     pub input: Option<Value>,
     pub result: Option<Value>,
-    pub params: Option<Value>,
+    pub config: Option<Value>,
 }
 
 impl ActionContext {
@@ -14,7 +14,7 @@ impl ActionContext {
             id: id.into(),
             input: Some(input),
             result: None,
-            params: None,
+            config: None,
         }
     }
 

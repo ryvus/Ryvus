@@ -23,7 +23,7 @@ impl Action for SlowAction {
 
         // Read delay from context parameters (injected by engine)
         let delay_ms = ctx
-            .params
+            .input
             .clone()
             .unwrap()
             .get("delay_ms")

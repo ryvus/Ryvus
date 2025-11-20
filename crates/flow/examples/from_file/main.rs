@@ -12,7 +12,7 @@ struct LogAction {
 #[async_trait]
 impl Action for LogAction {
     async fn execute(&self, ctx: &mut ActionContext) -> Result<ActionResult, Error> {
-        let params = ctx.params.clone().unwrap();
+        let params = ctx.input.clone().unwrap();
 
         let message = params
             .get("message")

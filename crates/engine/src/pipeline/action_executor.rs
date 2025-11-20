@@ -21,7 +21,7 @@ pub struct ActionExecutor<'a, M: Mapper, HR: ActionHookResolver> {
     pub hook_resolver: &'a HR,
     pub mapper: Arc<M>,
     pub cancel_token: CancellationToken,
-    pub config: Value,
+    pub params: Value,
 }
 
 impl<'a, M: Mapper, HR: ActionHookResolver> ActionExecutor<'a, M, HR> {
@@ -32,7 +32,7 @@ impl<'a, M: Mapper, HR: ActionHookResolver> ActionExecutor<'a, M, HR> {
         hook_resolver: &'a HR,
         mapper: Arc<M>,
         cancel_token: CancellationToken,
-        config: Value,
+        params: Value,
     ) -> Self {
         Self {
             key,
@@ -41,7 +41,7 @@ impl<'a, M: Mapper, HR: ActionHookResolver> ActionExecutor<'a, M, HR> {
             hook_resolver,
             mapper,
             cancel_token,
-            config,
+            params,
         }
     }
 
@@ -56,15 +56,8 @@ impl<'a, M: Mapper, HR: ActionHookResolver> ActionExecutor<'a, M, HR> {
         let mut hooks = self.global_hooks.clone();
         hooks.extend(self.hook_resolver.resolve(self.action.key()));
         // Prepare input
-        let mapped_input = self
-            .mapper
-            .map_input(&self.key, exec_ctx)
-            .await
-            .map_err(|e| EngineError::Action(format!("Mapping failed: {}", e)))?;
 
-        let mut ctx = ActionContext::new(&self.key, mapped_input);
-
-        ctx.params = Some(self.config.clone());
+        let mut ctx = ActionContext::new(&self.key, self.params.clone());
 
         for hook in &hooks {
             hook.before(&mut ctx).await;
