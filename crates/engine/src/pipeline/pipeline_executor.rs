@@ -9,7 +9,6 @@ use crate::{
         json::deep_merge,
         jsonpath_resolver::{build_jsonpath_context, resolve_jsonpaths},
     },
-    Engine,
 };
 
 use ryvus_core::{
