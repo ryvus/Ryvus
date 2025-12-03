@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 use ryvus_core::error::Error;
 use ryvus_core::prelude::{Action, ActionContext, ActionResult};
+use tracing::debug;
+
+use crate::error::EngineError;
 
 /// Retries an Action up to `max_retries` times when it fails.
 #[derive(Clone)]
@@ -22,6 +25,7 @@ where
 {
     async fn execute(&self, ctx: &mut ActionContext) -> Result<ActionResult, Error> {
         let mut attempts = 0;
+        debug!("RetryableAction exec {attempts}");
         loop {
             match self.inner.execute(ctx).await {
                 Ok(res) => return Ok(res),

@@ -9,6 +9,7 @@ use crate::{
         json::deep_merge,
         jsonpath_resolver::{build_jsonpath_context, resolve_jsonpaths},
     },
+    Engine,
 };
 
 use ryvus_core::{
@@ -93,7 +94,7 @@ where
             debug!("Check for cancellation:  {}", current_key);
 
             if self.cancel_token.is_cancelled() {
-                debug!("Cancaling:  {}", current_key);
+                debug!("Cancelling:  {}", current_key);
 
                 for hook in &self.global_pipeline_hooks {
                     hook.canceled(&mut exec_ctx).await;
@@ -110,10 +111,8 @@ where
                 .ok_or_else(|| EngineError::Other(format!("Step '{}' not found", current_key)))?;
 
             debug!("Resolved step:  {}", step.key);
-
             // Execute current step
             let result = self.execute_action_step(step, &mut exec_ctx).await;
-            debug!("Step: {} result {:?}", step.key, result);
 
             match result {
                 Ok(action_result) => {
@@ -151,6 +150,7 @@ where
                 Err(e) => {
                     // existing error handling remains
                     exec_ctx.error = Some(e.to_string());
+                    break;
                 }
             }
         }
@@ -168,7 +168,6 @@ where
         ctx: &mut ExecutionContext,
     ) -> Result<ActionResult> {
         debug!("Executing step");
-
         match self.action_resolver.resolve(&step.action).await {
             Some(mut action) => {
                 ctx.current_step = Some(step.clone());
@@ -180,7 +179,7 @@ where
                 action
                     .configure(step_config)
                     .await
-                    .map_err(|e| EngineError::Other(e.to_string()))?;
+                    .map_err(|e| EngineError::Config(e.to_string()))?;
 
                 let mapped_runtime = ctx
                     .data

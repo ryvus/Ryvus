@@ -6,6 +6,8 @@ pub enum EngineError {
     Action(String),
     #[error("Pipeline canceled")]
     Canceled,
+    #[error("There was an issue configuring the Action {0}")]
+    Config(String),
     #[error("Other error: {0}")]
     Other(String),
 }

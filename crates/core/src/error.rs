@@ -6,6 +6,9 @@ pub enum Error {
     #[error("Action error: {0}")]
     Action(String),
 
+    #[error("Config error: {0}")]
+    Config(String),
+
     #[error("Pipeline error: {0}")]
     Pipeline(String),
 
