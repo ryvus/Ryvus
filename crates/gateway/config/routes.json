@@ -1,0 +1,17 @@
+{
+  "routes": [
+    {
+      "name": "import_products",
+      "method": "POST",
+      "path": "/products/import",
+      "action": "product.import",
+      "contract": "./contracts/product-import.json"
+    },
+    {
+      "name": "export_orders",
+      "method": "POST",
+      "path": "/orders/export",
+      "action": "order.export"
+    }
+  ]
+}

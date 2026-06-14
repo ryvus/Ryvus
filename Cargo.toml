@@ -12,6 +12,9 @@ members = [
   "crates/execution",
   "crates/persistence",
   "crates/execution-service",
+  "crates/gateway",
+
+  # Examples
   "examples/actions/rust-echo",
 ]
 
@@ -34,6 +37,7 @@ ryvus-protocol = { path = "crates/protocol" }
 ryvus-execution = { path = "crates/execution" }
 ryvus-persistence = { path = "crates/persistence" }
 ryvus-execution-service = { path = "crates/execution-service" }
+ryvus-gateway = { path = "crates/ryvus-gateway" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
@@ -45,3 +49,8 @@ tracing-subscriber = "0.3"
 uuid = { version = "1", features = ["v4"] }
 # Useful shared testing tools
 rstest = "0.18"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+axum = "0.8"
+
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
