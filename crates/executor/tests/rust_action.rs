@@ -24,12 +24,13 @@ fn invokes_rust_action() {
         .invoke(&target, &request)
         .expect("rust action should succeed");
 
-    assert_eq!(result.status, InvocationStatus::Success);
+    assert_eq!(result.invocation_result.status, InvocationStatus::Success);
     assert_eq!(
-        result.output,
+        result.invocation_result.output,
         Some(json!({
             "received": { "message": "hello" },
             "handled_by": "rust"
         }))
     );
+    assert_eq!(result.exit_code, Some(0));
 }

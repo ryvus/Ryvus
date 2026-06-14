@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use ryvus_execution::ExecutionResult;
 use ryvus_protocol::{InvocationRequest, InvocationResult, PROTOCOL_VERSION};
 
 use crate::error::{ExecutorError, ExecutorResult};
@@ -21,7 +22,13 @@ impl Executor for LocalProcessExecutor {
         &self,
         target: &ProcessTarget,
         request: &InvocationRequest,
-    ) -> ExecutorResult<InvocationResult> {
+    ) -> ExecutorResult<ExecutionResult> {
+        use std::time::Instant;
+
+        let started = Instant::now();
+
+        // execute process
+
         if request.protocol_version != PROTOCOL_VERSION {
             return Err(ExecutorError::InvalidProtocolVersion {
                 expected: PROTOCOL_VERSION.to_string(),
@@ -66,8 +73,17 @@ impl Executor for LocalProcessExecutor {
                 actual: result.protocol_version,
             });
         }
+        let invocation_result: InvocationResult = serde_json::from_slice(&output.stdout)?;
 
-        Ok(result)
+        let duration = started.elapsed();
+
+        Ok(ExecutionResult {
+            invocation_result,
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            duration,
+            exit_code: output.status.code(),
+        })
     }
 }
 
@@ -86,9 +102,9 @@ mod tests {
         let request = InvocationRequest::new(json!({ "message": "hello" }));
 
         let target = ProcessTarget::new("sh").args([
-            "-c",
-            "cat >/dev/null && echo '{\"protocol_version\":\"ryvus.invoke.v1\",\"invocation_id\":\"inv_test\",\"status\":\"success\",\"output\":{\"ok\":true},\"error\":null}'",
-        ]);
+        "-c",
+        "cat >/dev/null && echo '{\"protocol_version\":\"ryvus.invoke.v1\",\"invocation_id\":\"inv_test\",\"status\":\"success\",\"output\":{\"ok\":true},\"error\":null}'",
+    ]);
 
         let executor = LocalProcessExecutor::new();
 
@@ -96,8 +112,9 @@ mod tests {
             .invoke(&target, &request)
             .expect("process should succeed");
 
-        assert_eq!(result.invocation_id, "inv_test");
-        assert_eq!(result.status, InvocationStatus::Success);
-        assert_eq!(result.output, Some(json!({ "ok": true })));
+        assert_eq!(result.invocation_result.invocation_id, "inv_test");
+        assert_eq!(result.invocation_result.status, InvocationStatus::Success);
+        assert_eq!(result.invocation_result.output, Some(json!({ "ok": true })));
+        assert_eq!(result.exit_code, Some(0));
     }
 }

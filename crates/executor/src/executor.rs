@@ -1,4 +1,5 @@
-use ryvus_protocol::{InvocationRequest, InvocationResult};
+use ryvus_execution::ExecutionResult;
+use ryvus_protocol::InvocationRequest;
 
 use crate::error::ExecutorResult;
 use crate::target::ProcessTarget;
@@ -7,5 +8,5 @@ pub trait Executor {
         &self,
         target: &ProcessTarget,
         request: &InvocationRequest,
-    ) -> ExecutorResult<InvocationResult>;
+    ) -> ExecutorResult<ExecutionResult>;
 }

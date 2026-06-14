@@ -1,0 +1,16 @@
+[package]
+name = "ryvus-execution-service"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+ryvus-execution = { workspace = true }
+ryvus-executor = { workspace = true }
+ryvus-persistence = { workspace = true }
+ryvus-protocol = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

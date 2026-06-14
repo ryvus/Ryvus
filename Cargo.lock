@@ -614,9 +614,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryvus-execution"
+version = "0.1.0"
+dependencies = [
+ "ryvus-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ryvus-execution-service"
+version = "0.1.0"
+dependencies = [
+ "ryvus-execution",
+ "ryvus-executor",
+ "ryvus-persistence",
+ "ryvus-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "ryvus-executor"
 version = "0.1.0"
 dependencies = [
+ "ryvus-execution",
  "ryvus-protocol",
  "serde",
  "serde_json",
@@ -639,6 +662,18 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "ryvus-persistence"
+version = "0.1.0"
+dependencies = [
+ "ryvus-execution",
+ "ryvus-executor",
+ "ryvus-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

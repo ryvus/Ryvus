@@ -1,0 +1,51 @@
+{
+  "invocation_id": "d6317c97-59aa-46f1-8bdd-80134b3a86a2",
+  "request": {
+    "protocol_version": "ryvus.invoke.v1",
+    "invocation_id": "d6317c97-59aa-46f1-8bdd-80134b3a86a2",
+    "event": {
+      "message": "hello"
+    },
+    "context": {
+      "metadata": null
+    }
+  },
+  "target": {
+    "Process": {
+      "command": "node",
+      "args": [
+        "../../examples/actions/node-echo/handler.js"
+      ],
+      "working_dir": null
+    }
+  },
+  "result": {
+    "invocation_result": {
+      "protocol_version": "ryvus.invoke.v1",
+      "invocation_id": "d6317c97-59aa-46f1-8bdd-80134b3a86a2",
+      "status": "success",
+      "output": {
+        "handled_by": "node",
+        "received": {
+          "message": "hello"
+        }
+      },
+      "error": null
+    },
+    "stdout": "{\"protocol_version\":\"ryvus.invoke.v1\",\"invocation_id\":\"d6317c97-59aa-46f1-8bdd-80134b3a86a2\",\"status\":\"success\",\"output\":{\"received\":{\"message\":\"hello\"},\"handled_by\":\"node\"},\"error\":null}",
+    "stderr": "",
+    "duration": {
+      "secs": 0,
+      "nanos": 20570237
+    },
+    "exit_code": 0
+  },
+  "started_at": {
+    "secs_since_epoch": 1781428430,
+    "nanos_since_epoch": 951460792
+  },
+  "finished_at": {
+    "secs_since_epoch": 1781428430,
+    "nanos_since_epoch": 972042761
+  }
+}

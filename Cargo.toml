@@ -9,8 +9,9 @@ members = [
   "crates/ryvus",
   "crates/executor",
   "crates/protocol",
-
-
+  "crates/execution",
+  "crates/persistence",
+  "crates/execution-service",
   "examples/actions/rust-echo",
 ]
 
@@ -30,6 +31,9 @@ ryvus-flow = { path = "crates/flow" }
 ryvus-utils = { path = "crates/utils" }
 ryvus-executor = { path = "crates/executor" }
 ryvus-protocol = { path = "crates/protocol" }
+ryvus-execution = { path = "crates/execution" }
+ryvus-persistence = { path = "crates/persistence" }
+ryvus-execution-service = { path = "crates/execution-service" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"

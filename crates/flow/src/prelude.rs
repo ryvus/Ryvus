@@ -1,5 +1,4 @@
 pub use crate::{
-    FlowPipelineManager, FlowContext, StateStore, FlowError,
-    store::InMemoryStateStore,
-    pipeline::PipelineDefinition,
+    pipeline::PipelineDefinition, store::InMemoryStateStore, FlowContext, FlowError,
+    FlowPipelineManager, StateStore,
 };
