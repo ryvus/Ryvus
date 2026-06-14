@@ -34,7 +34,6 @@ pub struct InvocationResult {
     pub status: InvocationStatus,
     pub output: Option<Value>,
     pub error: Option<InvocationError>,
-    pub metadata: Value,
 }
 
 impl InvocationResult {
@@ -45,7 +44,6 @@ impl InvocationResult {
             status: InvocationStatus::Success,
             output: Some(output),
             error: None,
-            metadata: Value::Object(Default::default()),
         }
     }
 
@@ -56,7 +54,6 @@ impl InvocationResult {
             status: InvocationStatus::Failed,
             output: None,
             error: Some(error),
-            metadata: Value::Object(Default::default()),
         }
     }
 }
