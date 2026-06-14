@@ -1,6 +1,11 @@
-use crate::contract::{InvocationRequest, InvocationResult};
-use crate::error::ExecutorResult;
+use ryvus_protocol::{InvocationRequest, InvocationResult};
 
+use crate::error::ExecutorResult;
+use crate::target::ProcessTarget;
 pub trait Executor {
-    fn invoke(&self, request: InvocationRequest) -> ExecutorResult<InvocationResult>;
+    fn invoke(
+        &self,
+        target: &ProcessTarget,
+        request: &InvocationRequest,
+    ) -> ExecutorResult<InvocationResult>;
 }

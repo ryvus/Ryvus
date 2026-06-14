@@ -1,48 +1,44 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use crate::contract::{InvocationRequest, InvocationResult, PROTOCOL_VERSION};
+use ryvus_protocol::{InvocationRequest, InvocationResult, PROTOCOL_VERSION};
+
 use crate::error::{ExecutorError, ExecutorResult};
 use crate::executor::Executor;
+use crate::target::ProcessTarget;
 
-#[derive(Debug, Clone)]
-pub struct LocalProcessExecutor {
-    command: String,
-    args: Vec<String>,
-}
+#[derive(Debug, Clone, Default)]
+pub struct LocalProcessExecutor;
 
 impl LocalProcessExecutor {
-    pub fn new(command: impl Into<String>) -> Self {
-        Self {
-            command: command.into(),
-            args: Vec::new(),
-        }
-    }
-
-    pub fn with_args(
-        command: impl Into<String>,
-        args: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
-        Self {
-            command: command.into(),
-            args: args.into_iter().map(Into::into).collect(),
-        }
+    pub fn new() -> Self {
+        Self
     }
 }
 
 impl Executor for LocalProcessExecutor {
-    fn invoke(&self, request: InvocationRequest) -> ExecutorResult<InvocationResult> {
+    fn invoke(
+        &self,
+        target: &ProcessTarget,
+        request: &InvocationRequest,
+    ) -> ExecutorResult<InvocationResult> {
         if request.protocol_version != PROTOCOL_VERSION {
             return Err(ExecutorError::InvalidProtocolVersion {
                 expected: PROTOCOL_VERSION.to_string(),
-                actual: request.protocol_version,
+                actual: request.protocol_version.clone(),
             });
         }
 
         let request_json = serde_json::to_vec(&request)?;
 
-        let mut child = Command::new(&self.command)
-            .args(&self.args)
+        let mut command = Command::new(&target.command);
+        command.args(&target.args);
+
+        if let Some(working_dir) = &target.working_dir {
+            command.current_dir(working_dir);
+        }
+
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -56,7 +52,7 @@ impl Executor for LocalProcessExecutor {
 
         if !output.status.success() {
             return Err(ExecutorError::ProcessFailed {
-                command: self.command.clone(),
+                command: target.command.clone(),
                 exit_code: output.status.code(),
                 stderr: String::from_utf8_lossy(&output.stderr).to_string(),
             });
@@ -79,20 +75,26 @@ impl Executor for LocalProcessExecutor {
 mod tests {
     use serde_json::json;
 
-    use crate::{Executor, InvocationRequest, InvocationStatus, LocalProcessExecutor};
+    use ryvus_protocol::{InvocationRequest, InvocationStatus};
+
+    use crate::executor::Executor;
+    use crate::local_process::LocalProcessExecutor;
+    use crate::target::ProcessTarget;
 
     #[test]
     fn invokes_process_that_returns_invocation_result() {
         let request = InvocationRequest::new(json!({ "message": "hello" }));
-        let executor = LocalProcessExecutor::with_args(
-            "sh",
-            [
-                "-c",
-                "cat >/dev/null && echo '{\"protocol_version\":\"ryvus.invoke.v1\",\"invocation_id\":\"inv_test\",\"status\":\"success\",\"output\":{\"ok\":true},\"error\":null,\"metadata\":{}}'",
-            ],
-        );
 
-        let result = executor.invoke(request).expect("process should succeed");
+        let target = ProcessTarget::new("sh").args([
+            "-c",
+            "cat >/dev/null && echo '{\"protocol_version\":\"ryvus.invoke.v1\",\"invocation_id\":\"inv_test\",\"status\":\"success\",\"output\":{\"ok\":true},\"error\":null}'",
+        ]);
+
+        let executor = LocalProcessExecutor::new();
+
+        let result = executor
+            .invoke(&target, &request)
+            .expect("process should succeed");
 
         assert_eq!(result.invocation_id, "inv_test");
         assert_eq!(result.status, InvocationStatus::Success);
