@@ -3,18 +3,26 @@ import json
 import sys
 import traceback
 from typing import Any, Callable
-from .events import ApiEvent
+
 from .context import Context
+from .events import ApiEvent
 
 
 Handler = Callable[..., dict[str, Any]]
 
-def run_api(handler):
 
+def run_api(handler: Handler) -> None:
     request = json.load(sys.stdin)
+    result = handle_api_request(request, handler)
+    json.dump(result, sys.stdout)
 
+
+def handle_api_request(
+    request: dict[str, Any],
+    handler: Handler,
+) -> dict[str, Any]:
     event = ApiEvent(
-        body=request.get("event") or {}
+        body=request.get("event") or {},
     )
 
     context = Context(
@@ -22,10 +30,11 @@ def run_api(handler):
         protocol_version=request["protocol_version"],
         metadata=request.get("metadata") or {},
     )
-    try:
-        output = _call_handler(handler, request.get("event") or {}, context)
 
-        result = {
+    try:
+        output = _call_handler(handler, event, context)
+
+        return {
             "protocol_version": request["protocol_version"],
             "invocation_id": request["invocation_id"],
             "status": "success",
@@ -34,7 +43,7 @@ def run_api(handler):
         }
 
     except Exception as exc:
-        result = {
+        return {
             "protocol_version": request["protocol_version"],
             "invocation_id": request["invocation_id"],
             "status": "error",
@@ -46,10 +55,12 @@ def run_api(handler):
             },
         }
 
-    json.dump(result, sys.stdout)
 
-
-def _call_handler(handler: Handler, event: dict[str, Any], context: Context) -> dict[str, Any]:
+def _call_handler(
+    handler: Handler,
+    event: ApiEvent,
+    context: Context,
+) -> dict[str, Any]:
     parameters = inspect.signature(handler).parameters
 
     if len(parameters) == 1:
@@ -58,4 +69,6 @@ def _call_handler(handler: Handler, event: dict[str, Any], context: Context) -> 
     if len(parameters) == 2:
         return handler(event, context)
 
-    raise TypeError("Ryvus action handler must accept either event or event, context")
+    raise TypeError(
+        "Ryvus action handler must accept either event or event, context"
+    )
