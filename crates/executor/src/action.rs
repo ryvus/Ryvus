@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::Deserialize;
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ActionDefinition {
     pub runtime: RuntimeKind,
     pub source: PathBuf,
@@ -21,7 +23,7 @@ impl ActionDefinition {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub enum RuntimeKind {
     Python,
     Node,

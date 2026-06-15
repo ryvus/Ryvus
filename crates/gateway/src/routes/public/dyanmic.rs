@@ -29,26 +29,74 @@ pub async fn handle_dynamic_route(
         }
     };
 
-    match state.route_registry.resolve(&method, &path) {
-        Some(route) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "matched",
-                "route": route.name,
-                "action": route.action,
-                "body_size": body.len(),
-            })),
-        )
-            .into_response(),
+    let route = match state.route_registry.resolve(&method, &path) {
+        Some(route) => route,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "route_not_configured",
+                    "method": method.to_string(),
+                    "path": path,
+                })),
+            )
+                .into_response();
+        }
+    };
 
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": "route_not_configured",
-                "method": method.to_string(),
-                "path": path,
-            })),
-        )
-            .into_response(),
-    }
+    let action = match state.action_service.resolve_action(&route.action) {
+        Ok(action) => action,
+        Err(error) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "action_not_found",
+                    "action": route.action,
+                    "message": error.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let input = if body.is_empty() {
+        serde_json::Value::Null
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_json_body",
+                        "message": error.to_string(),
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    let record = match state.execution_service.execute_event(action, input) {
+        Ok(record) => record,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "execution_failed",
+                    "action": route.action,
+                    "message": error.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let output = record
+        .result
+        .invocation_result
+        .output
+        .unwrap_or(serde_json::Value::Null);
+
+    Json(output).into_response()
 }

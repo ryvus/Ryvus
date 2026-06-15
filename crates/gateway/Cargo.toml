@@ -20,4 +20,7 @@ tracing-subscriber = { workspace = true }
 tower-http = { workspace = true }
 ryvus-protocol = { workspace = true }
 ryvus-execution-service = { workspace = true }
+ryvus-action-catalog = { workspace = true }
+ryvus-executor = { workspace = true }
+ryvus-persistence = { workspace = true }
 tokio = { workspace = true }

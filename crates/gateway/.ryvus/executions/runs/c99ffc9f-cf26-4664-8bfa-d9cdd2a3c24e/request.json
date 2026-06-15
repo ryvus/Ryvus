@@ -1,0 +1,10 @@
+{
+  "protocol_version": "ryvus.invoke.v1",
+  "invocation_id": "c99ffc9f-cf26-4664-8bfa-d9cdd2a3c24e",
+  "event": {
+    "test": true
+  },
+  "context": {
+    "metadata": null
+  }
+}

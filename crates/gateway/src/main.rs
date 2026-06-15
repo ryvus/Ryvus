@@ -1,6 +1,8 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::Router;
+use ryvus_action_catalog::{ActionService, FileActionCatalog};
+use ryvus_executor::{LocalProcessExecutor, LocalRuntimeResolver, RecordingExecutor};
 use ryvus_gateway::{
     config::routes::GatewayConfig,
     openapi::{public::build_public_openapi_json, system::ApiDoc},
@@ -8,6 +10,7 @@ use ryvus_gateway::{
     routes::{public::dyanmic::handle_dynamic_route, system::system_routes},
     state::AppState,
 };
+use ryvus_persistence::FilesystemExecutionPersistence;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -18,13 +21,24 @@ async fn main() {
         .with_target(false)
         .compact()
         .init();
+    let action_catalog =
+        FileActionCatalog::load("config/actions.json").expect("failed to load action catalog");
+
+    let action_service = Arc::new(ActionService::new(action_catalog));
 
     let config = GatewayConfig::load("config/routes.json").expect("failed to load gateway config");
 
     let public_openapi = build_public_openapi_json(&config);
 
+    let execution_service = Arc::new(ryvus_execution_service::ExecutionService::new(
+        LocalRuntimeResolver::new(),
+        RecordingExecutor::new(LocalProcessExecutor::new()),
+        FilesystemExecutionPersistence::new(".ryvus/executions"),
+    ));
     let state = AppState {
         route_registry: Arc::new(RouteRegistry::from_config(config)),
+        action_service,
+        execution_service,
     };
 
     //

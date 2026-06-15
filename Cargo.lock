@@ -1011,6 +1011,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryvus-action-catalog"
+version = "0.1.0"
+dependencies = [
+ "ryvus-executor",
+ "ryvus-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "ryvus-core"
 version = "0.1.0"
 dependencies = [
@@ -1094,7 +1105,10 @@ name = "ryvus-gateway"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "ryvus-action-catalog",
  "ryvus-execution-service",
+ "ryvus-executor",
+ "ryvus-persistence",
  "ryvus-protocol",
  "serde",
  "serde_json",

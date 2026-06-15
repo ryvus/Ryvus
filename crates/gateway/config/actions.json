@@ -1,0 +1,10 @@
+{
+  "actions": [
+    {
+      "name": "product.import",
+      "runtime": "Python",
+      "source": "/home/mbollemeijer/dev/ryvus/ryvus/examples/actions/python-echo",
+      "handler": "handler.py"
+    }
+  ]
+}

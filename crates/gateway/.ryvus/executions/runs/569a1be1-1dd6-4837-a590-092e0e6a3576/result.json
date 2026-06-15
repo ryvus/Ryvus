@@ -1,0 +1,21 @@
+{
+  "invocation_result": {
+    "protocol_version": "ryvus.invoke.v1",
+    "invocation_id": "569a1be1-1dd6-4837-a590-092e0e6a3576",
+    "status": "success",
+    "output": {
+      "handled_by": "python",
+      "received": {
+        "additionalProp1": {}
+      }
+    },
+    "error": null
+  },
+  "stdout": "{\"protocol_version\": \"ryvus.invoke.v1\", \"invocation_id\": \"569a1be1-1dd6-4837-a590-092e0e6a3576\", \"status\": \"success\", \"output\": {\"received\": {\"additionalProp1\": {}}, \"handled_by\": \"python\"}, \"error\": null}",
+  "stderr": "",
+  "duration": {
+    "secs": 0,
+    "nanos": 26776539
+  },
+  "exit_code": 0
+}

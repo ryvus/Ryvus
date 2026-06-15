@@ -1,0 +1,51 @@
+{
+  "invocation_id": "3ff1e3b9-4f00-4241-bc62-722f1aa11576",
+  "request": {
+    "protocol_version": "ryvus.invoke.v1",
+    "invocation_id": "3ff1e3b9-4f00-4241-bc62-722f1aa11576",
+    "event": {
+      "additionalProp1": {}
+    },
+    "context": {
+      "metadata": null
+    }
+  },
+  "target": {
+    "Process": {
+      "command": "python3",
+      "args": [
+        "/home/mbollemeijer/dev/ryvus/ryvus/examples/actions/python-echo/handler.py"
+      ],
+      "working_dir": null
+    }
+  },
+  "result": {
+    "invocation_result": {
+      "protocol_version": "ryvus.invoke.v1",
+      "invocation_id": "3ff1e3b9-4f00-4241-bc62-722f1aa11576",
+      "status": "success",
+      "output": {
+        "handled_by": "python",
+        "received": {
+          "additionalProp1": {}
+        }
+      },
+      "error": null
+    },
+    "stdout": "{\"protocol_version\": \"ryvus.invoke.v1\", \"invocation_id\": \"3ff1e3b9-4f00-4241-bc62-722f1aa11576\", \"status\": \"success\", \"output\": {\"received\": {\"additionalProp1\": {}}, \"handled_by\": \"python\"}, \"error\": null}",
+    "stderr": "",
+    "duration": {
+      "secs": 0,
+      "nanos": 24977086
+    },
+    "exit_code": 0
+  },
+  "started_at": {
+    "secs_since_epoch": 1781509297,
+    "nanos_since_epoch": 926084225
+  },
+  "finished_at": {
+    "secs_since_epoch": 1781509297,
+    "nanos_since_epoch": 951075297
+  }
+}
