@@ -119,4 +119,4 @@ coverage_html/
 ##############################
 # Ignore any accidental nested git repos
 **/.git/
-
+.ryvus/

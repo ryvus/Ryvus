@@ -14,8 +14,11 @@ members = [
   "crates/execution-service",
   "crates/gateway",
   "crates/action-catalog",
+  # sdk
+  "sdk/ryvus-sdk-generator",
   # Examples
   "examples/actions/rust-echo",
+
 ]
 
 exclude = []

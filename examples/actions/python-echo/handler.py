@@ -1,17 +1,8 @@
-import json
-import sys
+from ryvus import api_action
 
-request = json.load(sys.stdin)
 
-result = {
-    "protocol_version": request["protocol_version"],
-    "invocation_id": request["invocation_id"],
-    "status": "success",
-    "output": {
-        "received": request["event"],
-        "handled_by": "python"
-    },
-    "error": None
-}
-
-json.dump(result, sys.stdout)
+@api_action
+def handler(event):
+    return {
+        "message": "Hello, Ryvus python SDK!"
+    }
