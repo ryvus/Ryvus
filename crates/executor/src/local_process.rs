@@ -1,20 +1,40 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 
 use crate::error::{ExecutorError, ExecutorResult};
 use crate::executor::Executor;
 use crate::target::ProcessTarget;
+use crate::{ConsoleInvocationEventSink, InvocationEventSink};
 use ryvus_execution::ExecutionResult;
-use ryvus_protocol::{
-    InvocationEvent, InvocationMessage, InvocationRequest, InvocationResult, PROTOCOL_VERSION,
-};
+use ryvus_protocol::{InvocationMessage, InvocationRequest, InvocationResult, PROTOCOL_VERSION};
 
-#[derive(Debug, Clone, Default)]
-pub struct LocalProcessExecutor;
+#[derive(Clone)]
+pub struct LocalProcessExecutor {
+    event_sink: Arc<dyn InvocationEventSink>,
+}
+
+impl std::fmt::Debug for LocalProcessExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalProcessExecutor").finish()
+    }
+}
+
+impl Default for LocalProcessExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl LocalProcessExecutor {
     pub fn new() -> Self {
-        Self
+        Self {
+            event_sink: Arc::new(ConsoleInvocationEventSink),
+        }
+    }
+
+    pub fn with_event_sink(event_sink: Arc<dyn InvocationEventSink>) -> Self {
+        Self { event_sink }
     }
 }
 
@@ -77,24 +97,9 @@ impl Executor for LocalProcessExecutor {
             let message: InvocationMessage = serde_json::from_str(line)?;
 
             match message {
-                InvocationMessage::Event { event } => match event {
-                    InvocationEvent::Log(log) => {
-                        tracing::info!(
-                            invocation_id = %log.invocation_id,
-                            fields = %log.fields,
-                            "{}", log.message
-                        );
-                    }
-                    InvocationEvent::Metric(metric) => {
-                        tracing::info!(
-                            invocation_id = %metric.invocation_id,
-                            name = %metric.name,
-                            value = metric.value,
-                            unit = %metric.unit,
-                            "action metric"
-                        );
-                    }
-                },
+                InvocationMessage::Event { event } => {
+                    self.event_sink.record(&event);
+                }
                 InvocationMessage::Result { result } => {
                     invocation_result = Some(result);
                 }
