@@ -17,6 +17,9 @@ pub enum ExecutorError {
 
     #[error("invalid protocol version: expected={expected}, actual={actual}")]
     InvalidProtocolVersion { expected: String, actual: String },
+
+    #[error("process completed without emitting invocation result")]
+    MissingInvocationResult,
 }
 
 pub type ExecutorResult<T> = Result<T, ExecutorError>;

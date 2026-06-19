@@ -1,12 +1,13 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use ryvus_execution::ExecutionResult;
-use ryvus_protocol::{InvocationRequest, InvocationResult, PROTOCOL_VERSION};
-
 use crate::error::{ExecutorError, ExecutorResult};
 use crate::executor::Executor;
 use crate::target::ProcessTarget;
+use ryvus_execution::ExecutionResult;
+use ryvus_protocol::{
+    InvocationEvent, InvocationMessage, InvocationRequest, InvocationResult, PROTOCOL_VERSION,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalProcessExecutor;
@@ -26,8 +27,6 @@ impl Executor for LocalProcessExecutor {
         use std::time::Instant;
 
         let started = Instant::now();
-
-        // execute process
 
         if request.protocol_version != PROTOCOL_VERSION {
             return Err(ExecutorError::InvalidProtocolVersion {
@@ -65,21 +64,50 @@ impl Executor for LocalProcessExecutor {
             });
         }
 
-        let result: InvocationResult = serde_json::from_slice(&output.stdout)?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let mut invocation_result: Option<InvocationResult> = None;
 
-        if result.protocol_version != PROTOCOL_VERSION {
-            return Err(ExecutorError::InvalidProtocolVersion {
-                expected: PROTOCOL_VERSION.to_string(),
-                actual: result.protocol_version,
-            });
+        for line in stdout.lines() {
+            let line = line.trim();
+
+            if line.is_empty() {
+                continue;
+            }
+
+            let message: InvocationMessage = serde_json::from_str(line)?;
+
+            match message {
+                InvocationMessage::Event { event } => match event {
+                    InvocationEvent::Log(log) => {
+                        tracing::info!(
+                            invocation_id = %log.invocation_id,
+                            fields = %log.fields,
+                            "{}", log.message
+                        );
+                    }
+                    InvocationEvent::Metric(metric) => {
+                        tracing::info!(
+                            invocation_id = %metric.invocation_id,
+                            name = %metric.name,
+                            value = metric.value,
+                            unit = %metric.unit,
+                            "action metric"
+                        );
+                    }
+                },
+                InvocationMessage::Result { result } => {
+                    invocation_result = Some(result);
+                }
+            }
         }
-        let invocation_result: InvocationResult = serde_json::from_slice(&output.stdout)?;
+
+        let invocation_result = invocation_result.ok_or(ExecutorError::MissingInvocationResult)?;
 
         let duration = started.elapsed();
 
         Ok(ExecutionResult {
             invocation_result,
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stdout,
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
             duration,
             exit_code: output.status.code(),
@@ -102,9 +130,32 @@ mod tests {
         let request = InvocationRequest::new(json!({ "message": "hello" }));
 
         let target = ProcessTarget::new("sh").args([
-        "-c",
-        "cat >/dev/null && echo '{\"protocol_version\":\"ryvus.invoke.v1\",\"invocation_id\":\"inv_test\",\"status\":\"success\",\"output\":{\"ok\":true},\"error\":null}'",
-    ]);
+            "-c",
+            "cat >/dev/null && echo '{\"type\":\"result\",\"result\":{\"protocol_version\":\"ryvus.invoke.v1\",\"invocation_id\":\"inv_test\",\"status\":\"success\",\"output\":{\"ok\":true},\"error\":null}}'",
+        ]);
+
+        let executor = LocalProcessExecutor::new();
+
+        let result = executor
+            .invoke(&target, &request)
+            .expect("process should succeed");
+
+        assert_eq!(result.invocation_result.invocation_id, "inv_test");
+        assert_eq!(result.invocation_result.status, InvocationStatus::Success);
+        assert_eq!(result.invocation_result.output, Some(json!({ "ok": true })));
+        assert_eq!(result.exit_code, Some(0));
+    }
+
+    #[test]
+    fn invokes_process_that_emits_log_event_then_result() {
+        let request = InvocationRequest::new(json!({ "message": "hello" }));
+
+        let target = ProcessTarget::new("sh").args([
+            "-c",
+            "cat >/dev/null && \
+             echo '{\"type\":\"event\",\"event\":{\"type\":\"log\",\"invocation_id\":\"inv_test\",\"level\":\"info\",\"message\":\"hello log\",\"fields\":{}}}' && \
+             echo '{\"type\":\"result\",\"result\":{\"protocol_version\":\"ryvus.invoke.v1\",\"invocation_id\":\"inv_test\",\"status\":\"success\",\"output\":{\"ok\":true},\"error\":null}}'",
+        ]);
 
         let executor = LocalProcessExecutor::new();
 

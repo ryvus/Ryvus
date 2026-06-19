@@ -17,10 +17,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .compact()
-        .init();
+    tracing_subscriber::fmt().with_target(true).compact().init();
     let action_catalog =
         FileActionCatalog::load("config/actions.json").expect("failed to load action catalog");
 

@@ -7,5 +7,4 @@ def handler(event, context):
 
     return {
         "message": "Hello, Ryvus python SDK!",
-        "invocation_id": context.invocation_id,
     }

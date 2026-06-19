@@ -116,3 +116,10 @@ pub struct MetricEvent {
     pub value: f64,
     pub unit: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InvocationMessage {
+    Event { event: InvocationEvent },
+    Result { result: InvocationResult },
+}
