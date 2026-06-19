@@ -1144,10 +1144,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ryvus-sdk-generator"
-version = "0.1.0"
-
-[[package]]
 name = "ryvus-utils"
 version = "0.1.0"
 dependencies = [

@@ -2,7 +2,10 @@ from ryvus import api_action
 
 
 @api_action
-def handler(event):
+def handler(event, context):
+    print("Received context:", context)
+
     return {
-        "message": "Hello, Ryvus python SDK!"
+        "message": "Hello, Ryvus python SDK!",
+        "invocation_id": context.invocation_id,
     }

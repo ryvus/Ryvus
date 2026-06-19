@@ -1,4 +1,6 @@
+import contextlib
 import inspect
+import io
 import json
 import sys
 import traceback
@@ -31,14 +33,18 @@ def handle_api_request(
         metadata=request.get("metadata") or {},
     )
 
+    captured_stdout = io.StringIO()
+
     try:
-        output = _call_handler(handler, event, context)
+        with contextlib.redirect_stdout(captured_stdout):
+            output = _call_handler(handler, event, context)
 
         return {
             "protocol_version": request["protocol_version"],
             "invocation_id": request["invocation_id"],
             "status": "success",
             "output": output,
+            "logs": captured_stdout.getvalue(),
             "error": None,
         }
 
@@ -48,6 +54,7 @@ def handle_api_request(
             "invocation_id": request["invocation_id"],
             "status": "error",
             "output": None,
+            "logs": captured_stdout.getvalue(),
             "error": {
                 "message": str(exc),
                 "type": exc.__class__.__name__,
