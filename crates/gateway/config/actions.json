@@ -1,10 +1,22 @@
 {
   "actions": [
     {
-      "name": "product.import",
+      "name": "python.echo",
       "runtime": "Python",
       "source": "/home/mbollemeijer/dev/ryvus/ryvus/examples/actions/python-echo",
       "handler": "handler.py"
+    },
+    {
+      "name": "node.echo",
+      "runtime": "Node",
+      "source": "/home/mbollemeijer/dev/ryvus/ryvus/examples/actions/node-echo",
+      "handler": "handler.js"
+    },
+    {
+      "name": "rust.echo",
+      "runtime": "Rust",
+      "source": "/home/mbollemeijer/dev/ryvus/ryvus/examples/actions/rust-echo",
+      "handler": "main.rs"
     }
   ]
 }

@@ -1,24 +1,10 @@
-let raw = "";
+// @ryvus-sdk/api
+import { apiAction } from "../../../sdk/node/dist/index.js";
 
-process.stdin.setEncoding("utf8");
+export default apiAction((event, context) => {
+  console.log("hello from node");
 
-process.stdin.on("data", (chunk) => {
-  raw += chunk;
-});
-
-process.stdin.on("end", () => {
-  const request = JSON.parse(raw);
-
-  const result = {
-    protocol_version: request.protocol_version,
-    invocation_id: request.invocation_id,
-    status: "success",
-    output: {
-      received: request.event,
-      handled_by: "node",
-    },
-    error: null,
+  return {
+    message: "Hello from Ryvus Node SDK",
   };
-
-  process.stdout.write(JSON.stringify(result));
 });

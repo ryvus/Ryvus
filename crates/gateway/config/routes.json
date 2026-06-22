@@ -1,17 +1,22 @@
 {
   "routes": [
     {
-      "name": "import_products",
+      "name": "echo node",
       "method": "POST",
-      "path": "/products/import",
-      "action": "product.import",
-      "contract": "./contracts/product-import.json"
+      "path": "/node/echo",
+      "action": "node.echo"
     },
     {
-      "name": "export_orders",
+      "name": "echo python",
       "method": "POST",
-      "path": "/orders/export",
-      "action": "order.export"
+      "path": "/python/echo",
+      "action": "python.echo"
+    },
+    {
+      "name": "echo rust",
+      "method": "POST",
+      "path": "/rust/echo",
+      "action": "rust.echo"
     }
   ]
 }
