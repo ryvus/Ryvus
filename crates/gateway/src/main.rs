@@ -2,22 +2,26 @@ use std::{net::SocketAddr, sync::Arc};
 
 use axum::Router;
 use ryvus_action_catalog::{ActionService, FileActionCatalog};
-use ryvus_executor::{LocalProcessExecutor, LocalRuntimeResolver, RecordingExecutor};
+use ryvus_executor::{
+    Executor, LocalProcessExecutor, LocalRuntimeResolver, RecordingExecutor, RuntimeResolver,
+};
 use ryvus_gateway::{
     config::routes::GatewayConfig,
     openapi::{public::build_public_openapi_json, system::ApiDoc},
     registry::route_registry::RouteRegistry,
     routes::{public::dyanmic::handle_dynamic_route, system::system_routes},
-    state::AppState,
+    state::{AppState, GatewayExecutionService},
 };
-use ryvus_persistence::FilesystemExecutionPersistence;
+use ryvus_persistence::{ConsoleExecutionPersistence, ExecutionPersistence};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt().with_target(true).compact().init();
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
     let action_catalog =
         FileActionCatalog::load("config/actions.json").expect("failed to load action catalog");
 
@@ -27,11 +31,12 @@ async fn main() {
 
     let public_openapi = build_public_openapi_json(&config);
 
-    let execution_service = Arc::new(ryvus_execution_service::ExecutionService::new(
-        LocalRuntimeResolver::new(),
-        RecordingExecutor::new(LocalProcessExecutor::new()),
-        FilesystemExecutionPersistence::new(".ryvus/executions"),
-    ));
+    let execution_service: Arc<GatewayExecutionService> =
+        Arc::new(ryvus_execution_service::ExecutionService::new(
+            Arc::new(LocalRuntimeResolver::new()) as Arc<dyn RuntimeResolver>,
+            Arc::new(LocalProcessExecutor::new()) as Arc<dyn Executor>,
+            Arc::new(ConsoleExecutionPersistence::default()) as Arc<dyn ExecutionPersistence>,
+        ));
     let state = AppState {
         route_registry: Arc::new(RouteRegistry::from_config(config)),
         action_service,

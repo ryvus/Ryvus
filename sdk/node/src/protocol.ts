@@ -38,7 +38,7 @@ export interface InvocationResult {
 export interface LogEvent {
   type: "log";
   invocation_id: string;
-  level: "debug" | "info" | "warn" | "error";
+  level: "debug" | "info" | "warn" | "error" | "trace";
   message: string;
   fields: JsonValue;
 }

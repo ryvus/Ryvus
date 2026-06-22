@@ -2,11 +2,11 @@
 resolver = "2"
 
 members = [
-  "crates/core",
-  "crates/engine",
-  "crates/flow",
-  "crates/utils",
-  "crates/ryvus",
+  # "crates/core",
+  # "crates/engine",
+  # "crates/flow",
+  # "crates/utils",
+  # "crates/ryvus",
   "crates/executor",
   "crates/protocol",
   "crates/execution",
@@ -30,10 +30,10 @@ authors = ["Ryvus Team <support@ryvus.dev>"]
 repository = "https://github.com/ryvus/ryvus"
 
 [workspace.dependencies]
-ryvus-engine = { path = "crates/engine" }
-ryvus-core = { path = "crates/core" }
-ryvus-flow = { path = "crates/flow" }
-ryvus-utils = { path = "crates/utils" }
+# ryvus-engine = { path = "crates/engine" }
+# ryvus-core = { path = "crates/core" }
+# ryvus-flow = { path = "crates/flow" }
+# ryvus-utils = { path = "crates/utils" }
 ryvus-executor = { path = "crates/executor" }
 ryvus-protocol = { path = "crates/protocol" }
 ryvus-execution = { path = "crates/execution" }
@@ -48,7 +48,7 @@ tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 bytes = "1"
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 # Useful shared testing tools
 rstest = "0.18"

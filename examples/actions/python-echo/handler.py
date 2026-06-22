@@ -1,15 +1,17 @@
-import logging as logger
+import logging
 from ryvus import api_action
 
+logger = logging.getLogger(__name__)
 
 @api_action
 def handler(event, context):
-    print("normal print statement")
-    logger.debug("debug message")
-    logger.info("info message")
-    logger.warning("warn message")
-    logger.error("error message")
+    print("hello from print")
+
+    logger.debug("debug from python")
+    logger.info("info from python")
+    logger.warning("warning from python")
+    logger.error("error from python")
 
     return {
-        "message": "Hello, Ryvus python SDK!",
+        "message": "Hello from Ryvus Python SDK"
     }

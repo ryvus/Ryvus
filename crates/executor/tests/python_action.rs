@@ -1,6 +1,6 @@
 use ryvus_executor::local_process::LocalProcessExecutor;
 use ryvus_executor::{executor::Executor, ActionDefinition};
-use ryvus_executor::{resolver, RuntimeKind};
+use ryvus_executor::{LocalRuntimeResolver, RuntimeKind, RuntimeResolver};
 use ryvus_protocol::contract::{InvocationRequest, InvocationStatus};
 use serde_json::json;
 #[test]
@@ -11,7 +11,7 @@ fn invokes_python_action() {
         "handler.py",
     );
 
-    let resolver = resolver::LocalRuntimeResolver::new();
+    let resolver = LocalRuntimeResolver::new();
     let target = resolver.resolve(&action).expect("action should resolve");
     let request = InvocationRequest::new(json!({
         "message": "hello"

@@ -1,6 +1,6 @@
 use ryvus_executor::local_process::LocalProcessExecutor;
 use ryvus_executor::{executor::Executor, ActionDefinition};
-use ryvus_executor::{LocalRuntimeResolver, RuntimeKind};
+use ryvus_executor::{LocalRuntimeResolver, RuntimeKind, RuntimeResolver};
 use ryvus_protocol::contract::{InvocationRequest, InvocationStatus};
 use serde_json::json;
 

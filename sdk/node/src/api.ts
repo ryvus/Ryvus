@@ -80,6 +80,10 @@ function installConsoleCapture(invocationId: string): void {
   console.debug = (...values: unknown[]) => {
     writeInvocationMessage(createLogMessage(invocationId, "debug", values));
   };
+
+  console.trace = (...values: unknown[]) => {
+    writeInvocationMessage(createLogMessage(invocationId, "trace", values));
+  };
 }
 
 async function readStdin(): Promise<string> {

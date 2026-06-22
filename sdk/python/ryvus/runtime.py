@@ -2,6 +2,7 @@ import contextlib
 import inspect
 import io
 import json
+import logging
 import sys
 import traceback
 from typing import Any, Callable
@@ -11,6 +12,29 @@ from .events import ApiEvent
 
 
 Handler = Callable[..., dict[str, Any]]
+
+
+class _InvocationLogHandler(logging.Handler):
+    def __init__(self, invocation_id: str) -> None:
+        super().__init__()
+        self.invocation_id = invocation_id
+        self.messages: list[dict[str, Any]] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(
+            {
+                "type": "event",
+                "event": {
+                    "type": "log",
+                    "invocation_id": self.invocation_id,
+                    "level": _map_python_log_level(record.levelno),
+                    "message": record.getMessage(),
+                    "fields": {
+                        "logger": record.name,
+                    },
+                },
+            }
+        )
 
 
 def run_api(handler: Handler) -> None:
@@ -38,12 +62,19 @@ def handle_api_request(
 ) -> list[dict[str, Any]]:
     captured_stdout = captured_stdout or io.StringIO()
 
+    invocation_id = request["invocation_id"]
+
+    log_handler = _InvocationLogHandler(invocation_id)
+
+    root_logger = logging.getLogger()
+    root_logger.addHandler(log_handler)
+
     event = ApiEvent(
         body=request.get("event") or {},
     )
 
     context = Context(
-        invocation_id=request["invocation_id"],
+        invocation_id=invocation_id,
         protocol_version=request["protocol_version"],
         metadata=request.get("metadata") or {},
     )
@@ -53,7 +84,7 @@ def handle_api_request(
 
         result = {
             "protocol_version": request["protocol_version"],
-            "invocation_id": request["invocation_id"],
+            "invocation_id": invocation_id,
             "status": "success",
             "output": output,
             "error": None,
@@ -62,8 +93,8 @@ def handle_api_request(
     except Exception as exc:
         result = {
             "protocol_version": request["protocol_version"],
-            "invocation_id": request["invocation_id"],
-            "status": "failed",
+            "invocation_id": invocation_id,
+            "status": "failure",
             "output": None,
             "error": {
                 "code": exc.__class__.__name__,
@@ -74,6 +105,9 @@ def handle_api_request(
                 },
             },
         }
+
+    finally:
+        root_logger.removeHandler(log_handler)
 
     messages: list[dict[str, Any]] = []
 
@@ -86,13 +120,17 @@ def handle_api_request(
                     "type": "event",
                     "event": {
                         "type": "log",
-                        "invocation_id": request["invocation_id"],
+                        "invocation_id": invocation_id,
                         "level": "info",
                         "message": line,
-                        "fields": {},
+                        "fields": {
+                            "source": "stdout",
+                        },
                     },
                 }
             )
+
+    messages.extend(log_handler.messages)
 
     messages.append(
         {
@@ -118,5 +156,18 @@ def _call_handler(
         return handler(event, context)
 
     raise TypeError(
-        "Ryvus action handler must accept either event or event, context"
+        "Action handler must accept either event or event, context"
     )
+
+
+def _map_python_log_level(level: int) -> str:
+    if level <= logging.DEBUG:
+        return "debug"
+
+    if level <= logging.INFO:
+        return "info"
+
+    if level <= logging.WARNING:
+        return "warn"
+
+    return "error"

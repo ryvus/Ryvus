@@ -1,29 +1,26 @@
 use ryvus_execution::ExecutionRecord;
-use ryvus_executor::{ActionDefinition, Executor, LocalRuntimeResolver, RecordingExecutor};
+use ryvus_executor::{ActionDefinition, Executor, RecordingExecutor, RuntimeResolver};
 use ryvus_persistence::ExecutionPersistence;
 use ryvus_protocol::InvocationRequest;
 
 use crate::error::ExecutionServiceResult;
 
-pub struct ExecutionService<E, P> {
-    resolver: LocalRuntimeResolver,
+pub struct ExecutionService<RR, E, EP> {
+    resolver: RR,
     executor: RecordingExecutor<E>,
-    persistence: P,
+    persistence: EP,
 }
 
-impl<E, P> ExecutionService<E, P>
+impl<RR, E, EP> ExecutionService<RR, E, EP>
 where
+    RR: RuntimeResolver,
     E: Executor,
-    P: ExecutionPersistence,
+    EP: ExecutionPersistence,
 {
-    pub fn new(
-        resolver: LocalRuntimeResolver,
-        executor: RecordingExecutor<E>,
-        persistence: P,
-    ) -> Self {
+    pub fn new(resolver: RR, executor: E, persistence: EP) -> Self {
         Self {
             resolver,
-            executor,
+            executor: RecordingExecutor::new(executor),
             persistence,
         }
     }

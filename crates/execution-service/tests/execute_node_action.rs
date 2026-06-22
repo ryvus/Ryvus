@@ -16,7 +16,7 @@ fn executes_records_and_persists_node_action() {
 
     let service = ExecutionService::new(
         LocalRuntimeResolver::new(),
-        RecordingExecutor::new(LocalProcessExecutor::new()),
+        LocalProcessExecutor::new(),
         FilesystemExecutionPersistence::new(".ryvus-service-test"),
     );
 

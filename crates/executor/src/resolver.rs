@@ -1,6 +1,21 @@
+use std::sync::Arc;
+
 use crate::action::{ActionDefinition, RuntimeKind};
 use crate::error::ExecutorResult;
 use crate::target::ProcessTarget;
+
+pub trait RuntimeResolver: Send + Sync {
+    fn resolve(&self, action: &ActionDefinition) -> ExecutorResult<ProcessTarget>;
+}
+
+impl<T> RuntimeResolver for Arc<T>
+where
+    T: RuntimeResolver + ?Sized,
+{
+    fn resolve(&self, action: &ActionDefinition) -> ExecutorResult<ProcessTarget> {
+        self.as_ref().resolve(action)
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalRuntimeResolver;
@@ -9,8 +24,10 @@ impl LocalRuntimeResolver {
     pub fn new() -> Self {
         Self
     }
+}
 
-    pub fn resolve(&self, action: &ActionDefinition) -> ExecutorResult<ProcessTarget> {
+impl RuntimeResolver for LocalRuntimeResolver {
+    fn resolve(&self, action: &ActionDefinition) -> ExecutorResult<ProcessTarget> {
         let handler_path = action.source.join(&action.handler);
 
         match action.runtime {
