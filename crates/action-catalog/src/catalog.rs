@@ -1,4 +1,4 @@
-use ryvus_executor::ActionDefinition;
+use ryvus_protocol::ActionDefinition;
 
 use crate::ActionCatalogResult;
 

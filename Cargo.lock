@@ -920,7 +920,11 @@ name = "ryvus-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ryvus-gateway",
+ "ryvus-protocol",
+ "serde_json",
  "thiserror",
+ "tokio",
  "tracing-subscriber",
 ]
 

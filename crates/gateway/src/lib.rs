@@ -4,4 +4,5 @@ pub mod error;
 pub mod openapi;
 pub mod registry;
 pub mod routes;
+pub mod server;
 pub mod state;

@@ -17,6 +17,7 @@ pub enum Command {
         #[arg(long, short, default_value = "python")]
         language: Language,
     },
+    Discover,
     Start,
     Validate,
 }

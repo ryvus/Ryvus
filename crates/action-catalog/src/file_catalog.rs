@@ -1,7 +1,6 @@
 use std::{collections::HashMap, fs, path::Path};
 
-use ryvus_executor::{ActionDefinition, RuntimeKind};
-use serde::Deserialize;
+use ryvus_protocol::{ActionDefinition, ActionManifest};
 
 use crate::{
     catalog::ActionCatalog,
@@ -23,27 +22,26 @@ impl FileActionCatalog {
                 source,
             })?;
 
-        let config: ActionCatalogConfig =
+        let manifest: ActionManifest =
             serde_json::from_str(&content).map_err(|source| ActionCatalogError::ParseFailed {
                 path: path.to_path_buf(),
                 source,
             })?;
 
-        let actions = config
+        let actions = manifest
             .actions
             .into_iter()
             .map(|action| {
-                let definition = ActionDefinition {
-                    runtime: action.runtime,
-                    source: action.source.into(),
-                    handler: action.handler,
-                };
-
-                (action.name, definition)
+                let key = action_key(&action);
+                (key, action)
             })
             .collect();
 
         Ok(Self { actions })
+    }
+
+    pub fn all(&self) -> impl Iterator<Item = &ActionDefinition> {
+        self.actions.values()
     }
 }
 
@@ -57,15 +55,6 @@ impl ActionCatalog for FileActionCatalog {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct ActionCatalogConfig {
-    actions: Vec<FileActionDefinition>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FileActionDefinition {
-    name: String,
-    runtime: RuntimeKind,
-    source: String,
-    handler: String,
+fn action_key(action: &ActionDefinition) -> String {
+    format!("{}::{}", action.source.display(), action.entrypoint)
 }

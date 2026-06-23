@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use crate::action::{ActionDefinition, RuntimeKind};
+use ryvus_protocol::{ActionDefinition, RuntimeKind};
+
 use crate::error::ExecutorResult;
 use crate::target::ProcessTarget;
 
@@ -28,26 +29,21 @@ impl LocalRuntimeResolver {
 
 impl RuntimeResolver for LocalRuntimeResolver {
     fn resolve(&self, action: &ActionDefinition) -> ExecutorResult<ProcessTarget> {
-        let handler_path = action.source.join(&action.handler);
+        let source_path = action.source.clone();
 
         match action.runtime {
-            RuntimeKind::Python => {
-                Ok(ProcessTarget::new("python3").arg(handler_path.to_string_lossy().to_string()))
-            }
+            RuntimeKind::Python => Ok(ProcessTarget::new(".venv/bin/python")
+                .arg(source_path.to_string_lossy().to_string())),
 
             RuntimeKind::Node => {
-                Ok(ProcessTarget::new("node").arg(handler_path.to_string_lossy().to_string()))
+                Ok(ProcessTarget::new("node").arg(source_path.to_string_lossy().to_string()))
             }
 
             RuntimeKind::Rust => Ok(ProcessTarget::new("cargo").args([
                 "run".to_string(),
                 "--quiet".to_string(),
                 "--manifest-path".to_string(),
-                action
-                    .source
-                    .join("Cargo.toml")
-                    .to_string_lossy()
-                    .to_string(),
+                source_path.join("Cargo.toml").to_string_lossy().to_string(),
             ])),
         }
     }

@@ -1,4 +1,3 @@
-pub mod action;
 pub mod error;
 pub mod executor;
 pub mod local_process;
@@ -7,7 +6,6 @@ pub mod resolver;
 
 pub mod event_sink;
 pub mod target;
-pub use action::*;
 pub use error::*;
 pub use event_sink::*;
 pub use executor::*;

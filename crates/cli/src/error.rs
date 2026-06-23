@@ -1,3 +1,5 @@
+use std::io;
+
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, CliError>;
@@ -33,4 +35,18 @@ pub enum CliError {
 
     #[error("Deployment failed: {0}")]
     Deploy(String),
+
+    #[error("Serialization failed")]
+    SerializationFailed,
+
+    #[error("Command failed: {0}")]
+    CommandFailed(io::Error),
+
+    #[error("Process failed: {command:?} with status {status:?}")]
+    ProcessFailed {
+        command: String,
+        status: std::process::ExitStatus,
+    },
+    #[error("gateway failed: {0}")]
+    Gateway(String),
 }

@@ -1,5 +1,9 @@
 use clap::Parser;
-use ryvus_cli::{commands::new, error::CliError, Cli, Command};
+use ryvus_cli::{
+    commands::{discover, new, start},
+    error::CliError,
+    Cli, Command,
+};
 
 fn main() {
     tracing_subscriber::fmt()
@@ -20,7 +24,9 @@ fn run(cli: Cli) -> Result<(), CliError> {
             language,
         } => new::run(project_name, language),
 
-        Command::Start => todo!(),
+        Command::Discover => discover::run(),
+
+        Command::Start => start::run(),
 
         Command::Validate => todo!(),
     }
