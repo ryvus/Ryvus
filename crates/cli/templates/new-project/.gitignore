@@ -1,0 +1,17 @@
+# Ryvus
+
+.ryvus/
+
+# IDEs
+
+.vscode/
+.idea/
+
+# OS
+
+.DS_Store
+Thumbs.db
+
+# Project
+
+.env

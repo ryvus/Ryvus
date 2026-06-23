@@ -1,0 +1,6 @@
+{
+  "schema_version": "1",
+  "name": "{{ project_name }}",
+  "version": "0.1.0",
+  "author": "<AUTHOR>"
+}

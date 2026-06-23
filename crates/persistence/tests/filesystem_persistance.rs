@@ -1,5 +1,6 @@
 use ryvus_executor::{
     ActionDefinition, LocalProcessExecutor, LocalRuntimeResolver, RecordingExecutor, RuntimeKind,
+    RuntimeResolver,
 };
 use ryvus_persistence::{ExecutionPersistence, FilesystemExecutionPersistence};
 use ryvus_protocol::InvocationRequest;

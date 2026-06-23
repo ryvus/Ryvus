@@ -14,6 +14,8 @@ members = [
   "crates/execution-service",
   "crates/gateway",
   "crates/action-catalog",
+  "crates/cli",
+
   # sdk
   # Examples
   "examples/actions/rust-echo",
@@ -57,3 +59,4 @@ axum = "0.8"
 
 utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
+clap = { version = "4", features = ["derive"] }

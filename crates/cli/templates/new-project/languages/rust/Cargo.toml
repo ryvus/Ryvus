@@ -1,0 +1,8 @@
+[package]
+name = "{{ project_name }}"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ryvus-sdk = "*"
+serde_json = "1"
