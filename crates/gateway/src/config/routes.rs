@@ -1,7 +1,7 @@
 use axum::http::Method;
 use serde::Deserialize;
 
-use std::{fs, path::Path};
+use std::{collections::HashMap, fs, path::Path};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GatewayConfig {
@@ -45,6 +45,12 @@ pub struct RouteDefinition {
     pub method: HttpMethod,
     pub path: String,
     pub action: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RouteMatch {
+    pub definition: RouteDefinition,
+    pub path_params: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]

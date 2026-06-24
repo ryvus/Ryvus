@@ -3,3 +3,4 @@ Name: ryvus
 Version: 0.1.0
 Summary: Ryvus Python SDK
 Requires-Python: >=3.10
+Requires-Dist: pydantic<3,>=2

@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use crate::error::{CliError, Result};
@@ -40,31 +41,33 @@ pub fn discover_project(project_root: impl AsRef<Path>) -> Result<ActionManifest
 
 fn discover_python_actions(
     project_root: &Path,
-    dir: &Path,
+    _dir: &Path,
     actions: &mut Vec<ActionDefinition>,
 ) -> Result<()> {
-    if !dir.exists() {
-        return Ok(());
+    let output = Command::new("python")
+        .args([
+            "-m",
+            "ryvus.discover",
+            "--project-root",
+            project_root.to_str().ok_or_else(|| {
+                CliError::Validation("project root is not valid UTF-8".to_string())
+            })?,
+        ])
+        .output()
+        .map_err(CliError::Io)?;
+
+    if !output.status.success() {
+        return Err(CliError::Validation(format!(
+            "Python discovery failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
     }
 
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
+    let manifest: ActionManifest = serde_json::from_slice(&output.stdout).map_err(|error| {
+        CliError::Validation(format!("failed to parse Python discovery output: {error}"))
+    })?;
 
-        if path.is_dir() {
-            discover_python_actions(project_root, &path, actions)?;
-            continue;
-        }
-
-        if path.extension().and_then(|ext| ext.to_str()) != Some("py") {
-            continue;
-        }
-
-        let content = fs::read_to_string(&path)?;
-        let discovered = discover_python_file(project_root, &path, &content)?;
-
-        actions.extend(discovered);
-    }
+    actions.extend(manifest.actions);
 
     Ok(())
 }
@@ -106,6 +109,8 @@ fn discover_python_file(
             kind: ActionKind::Api(ApiAction {
                 method,
                 path: route_path,
+                request_schema: todo!(),
+                response_schema: todo!(),
             }),
         });
     }

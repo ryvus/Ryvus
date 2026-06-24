@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from .context import Context
 from .events import ApiEvent
-
+from .resolver import resolve_handler_args
 
 Handler = Callable[..., dict[str, Any]]
 
@@ -69,8 +69,12 @@ def handle_api_request(
     root_logger = logging.getLogger()
     root_logger.addHandler(log_handler)
 
+    raw_event = request.get("event") or {}
+
     event = ApiEvent(
-        body=request.get("event") or {},
+        body=raw_event.get("body"),
+        query_params=raw_event.get("query_params") or {},
+        path_params=raw_event.get("path_params") or {},
     )
 
     context = Context(
@@ -80,7 +84,7 @@ def handle_api_request(
     )
 
     try:
-        output = _call_handler(handler, event, context)
+        output =_serialize_output(_call_handler(handler, event, context))
 
         result = {
             "protocol_version": request["protocol_version"],
@@ -94,7 +98,7 @@ def handle_api_request(
         result = {
             "protocol_version": request["protocol_version"],
             "invocation_id": invocation_id,
-            "status": "failure",
+            "status": "failed",
             "output": None,
             "error": {
                 "code": exc.__class__.__name__,
@@ -146,18 +150,9 @@ def _call_handler(
     handler: Handler,
     event: ApiEvent,
     context: Context,
-) -> dict[str, Any]:
-    parameters = inspect.signature(handler).parameters
-
-    if len(parameters) == 1:
-        return handler(event)
-
-    if len(parameters) == 2:
-        return handler(event, context)
-
-    raise TypeError(
-        "Action handler must accept either event or event, context"
-    )
+) -> Any:
+    args = resolve_handler_args(handler, event, context)
+    return handler(*args)
 
 
 def _map_python_log_level(level: int) -> str:
@@ -171,3 +166,12 @@ def _map_python_log_level(level: int) -> str:
         return "warn"
 
     return "error"
+
+def _serialize_output(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+
+    if hasattr(value, "dict"):
+        return value.dict()
+
+    return value

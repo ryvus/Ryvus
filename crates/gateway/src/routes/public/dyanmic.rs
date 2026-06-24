@@ -29,8 +29,8 @@ pub async fn handle_dynamic_route(
         }
     };
 
-    let route = match state.route_registry.resolve(&method, &path) {
-        Some(route) => route,
+    let route_match = match state.route_registry.resolve(&method, &path) {
+        Some(route_match) => route_match,
         None => {
             return (
                 StatusCode::NOT_FOUND,
@@ -43,6 +43,7 @@ pub async fn handle_dynamic_route(
                 .into_response();
         }
     };
+    let route = route_match.definition;
 
     let action = match state.action_service.resolve_action(&route.action) {
         Ok(action) => action,
@@ -76,8 +77,13 @@ pub async fn handle_dynamic_route(
             }
         }
     };
+    let event = serde_json::json!({
+        "body": input,
+        "path_params": route_match.path_params,
+        "query_params": {},
+    });
 
-    let record = match state.execution_service.execute_event(action, input) {
+    let record = match state.execution_service.execute_event(action, event) {
         Ok(record) => record,
         Err(error) => {
             return (

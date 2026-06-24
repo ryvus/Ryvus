@@ -8,5 +8,8 @@ version = "0.1.0"
 description = "Ryvus Python SDK"
 requires-python = ">=3.10"
 
+dependencies = ["pydantic>=2,<3"]
+
+
 [tool.setuptools]
 packages = ["ryvus"]

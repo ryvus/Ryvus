@@ -27,36 +27,17 @@ pub fn build_public_openapi_json_from_actions<'a>(
 
         path_object.insert(
             method,
-            json!({
-                "tags": ["public"],
-                "operationId": operation_name,
-                "summary": operation_name,
-                "description": format!("Routes to Ryvus action '{}'.", action_key),
-                "requestBody": {
-                    "required": false,
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "type": "object",
-                                "additionalProperties": true
-                            }
-                        }
-                    }
-                },
-                "responses": {
-                    "200": {
-                        "description": "Successful response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "type": "object",
-                                    "additionalProperties": true
-                                }
-                            }
-                        }
-                    }
-                }
-            }),
+            build_operation(
+                &operation_name,
+                &operation_name,
+                &format!("Routes to Ryvus action '{}'.", action_key),
+                &api.path,
+                &api.method,
+                api.request_schema.as_ref(),
+                api.response_schema.as_ref(),
+                "Successful response",
+                false,
+            ),
         );
     }
 
@@ -98,39 +79,17 @@ pub fn build_openapi_json_from_actions<'a>(
 
         path_object.insert(
             method,
-            json!({
-                "tags": ["public"],
-                "operationId": operation_name,
-                "summary": operation_name,
-                "description": format!("Routes to Ryvus action `{}`.", action_key),
-                "requestBody": {
-                    "required": false,
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "type": "object",
-                                "additionalProperties": true
-                            }
-                        }
-                    }
-                },
-                "responses": {
-                    "200": {
-                        "description": "Route matched",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "type": "object",
-                                    "additionalProperties": true
-                                }
-                            }
-                        }
-                    },
-                    "404": {
-                        "description": "Route not configured"
-                    }
-                }
-            }),
+            build_operation(
+                &operation_name,
+                &operation_name,
+                &format!("Routes to Ryvus action `{}`.", action_key),
+                &api.path,
+                &api.method,
+                api.request_schema.as_ref(),
+                api.response_schema.as_ref(),
+                "Route matched",
+                true,
+            ),
         );
     }
 
@@ -151,36 +110,17 @@ pub fn build_public_openapi_json(config: &GatewayConfig) -> Value {
 
         path_object.insert(
             method.to_string(),
-            json!({
-                "tags": ["public"],
-                "operationId": route.name,
-                "summary": route.name,
-                "description": format!("Routes to Ryvus action '{}'.", route.action),
-                "requestBody": {
-                    "required": false,
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "type": "object",
-                                "additionalProperties": true
-                            }
-                        }
-                    }
-                },
-                "responses": {
-                    "200": {
-                        "description": "Successful response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "type": "object",
-                                    "additionalProperties": true
-                                }
-                            }
-                        }
-                    }
-                }
-            }),
+            build_operation(
+                &route.name,
+                &route.name,
+                &format!("Routes to Ryvus action '{}'.", route.action),
+                &route.path,
+                method,
+                None,
+                None,
+                "Successful response",
+                false,
+            ),
         );
     }
 
@@ -213,43 +153,103 @@ pub fn build_openapi_json(config: &GatewayConfig, openapi: OpenApi) -> Value {
 
         path_object.insert(
             method.to_string(),
-            json!({
-                "tags": ["public"],
-                "operationId": route.name,
-                "summary": route.name,
-                "description": format!("Routes to Ryvus action `{}`.", route.action),
-                "requestBody": {
-                    "required": false,
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "type": "object",
-                                "additionalProperties": true
-                            }
-                        }
-                    }
-                },
-                "responses": {
-                    "200": {
-                        "description": "Route matched",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "type": "object",
-                                    "additionalProperties": true
-                                }
-                            }
-                        }
-                    },
-                    "404": {
-                        "description": "Route not configured"
-                    }
-                }
-            }),
+            build_operation(
+                &route.name,
+                &route.name,
+                &format!("Routes to Ryvus action `{}`.", route.action),
+                &route.path,
+                method,
+                None,
+                None,
+                "Route matched",
+                true,
+            ),
         );
     }
 
     value
+}
+
+fn build_operation(
+    operation_id: &str,
+    summary: &str,
+    description: &str,
+    path: &str,
+    method: &str,
+    request_schema: Option<&Value>,
+    response_schema: Option<&Value>,
+    success_description: &str,
+    include_404: bool,
+) -> Value {
+    let mut responses = json!({
+        "200": {
+            "description": success_description,
+            "content": {
+                "application/json": {
+                    "schema": response_schema
+                        .cloned()
+                        .unwrap_or_else(default_object_schema)
+                }
+            }
+        }
+    });
+
+    if include_404 {
+        responses
+            .as_object_mut()
+            .expect("responses should be an object")
+            .insert(
+                "404".to_string(),
+                json!({
+                    "description": "Route not configured"
+                }),
+            );
+    }
+
+    let mut operation = json!({
+        "tags": ["public"],
+        "operationId": operation_id,
+        "summary": summary,
+        "description": description,
+        "parameters": path_parameters(path),
+        "responses": responses
+    });
+
+    if method_allows_request_body(method) {
+        operation
+            .as_object_mut()
+            .expect("operation should be an object")
+            .insert(
+                "requestBody".to_string(),
+                request_body_schema(request_schema),
+            );
+    }
+
+    operation
+}
+
+fn request_body_schema(schema: Option<&Value>) -> Value {
+    json!({
+        "required": false,
+        "content": {
+            "application/json": {
+                "schema": schema
+                    .cloned()
+                    .unwrap_or_else(default_object_schema)
+            }
+        }
+    })
+}
+
+fn default_object_schema() -> Value {
+    json!({})
+}
+
+fn method_allows_request_body(method: &str) -> bool {
+    matches!(
+        method.to_ascii_uppercase().as_str(),
+        "POST" | "PUT" | "PATCH"
+    )
 }
 
 fn method_to_openapi_key(method: HttpMethod) -> &'static str {
@@ -264,4 +264,25 @@ fn method_to_openapi_key(method: HttpMethod) -> &'static str {
 
 fn action_key(action: &ActionDefinition) -> String {
     format!("{}::{}", action.source.display(), action.entrypoint)
+}
+
+fn path_parameters(path: &str) -> Vec<Value> {
+    path.split('/')
+        .filter_map(|part| {
+            if part.starts_with('{') && part.ends_with('}') {
+                let name = part.trim_start_matches('{').trim_end_matches('}');
+
+                Some(json!({
+                    "name": name,
+                    "in": "path",
+                    "required": true,
+                    "schema": {
+                        "type": "string"
+                    }
+                }))
+            } else {
+                None
+            }
+        })
+        .collect()
 }

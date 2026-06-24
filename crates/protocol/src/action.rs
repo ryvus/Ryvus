@@ -35,6 +35,12 @@ pub enum ActionKind {
 pub struct ApiAction {
     pub method: String,
     pub path: String,
+
+    #[serde(default)]
+    pub request_schema: Option<serde_json::Value>,
+
+    #[serde(default)]
+    pub response_schema: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

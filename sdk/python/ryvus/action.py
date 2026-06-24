@@ -21,19 +21,23 @@ def api_action(
     method: Optional[str] = None,
     path: Optional[str] = None,
 ):
-    if func is None and (method is None or path is None):
-        raise ValueError("api_action requires both 'method' and 'path' when used with options")
+    if func is None and ((method is None) != (path is None)):
+        raise ValueError(
+            "api_action requires both 'method' and 'path' when used with options"
+        )
 
     def decorate(inner: F) -> F:
-        metadata = {"type": "api"}
-
-        if method is not None and path is not None:
-            metadata["method"] = method
-            metadata["path"] = path
+        metadata = {
+            "type": "api",
+            "method": method or "GET",
+            "path": path or f"/{inner.__name__.replace('_', '-')}",
+        }
 
         setattr(inner, "__ryvus_action__", metadata)
 
-        if inner.__module__ == "__main__":
+        module_name = getattr(inner, "__module__", None)
+
+        if module_name == "__main__":
             run_api(inner)
 
         return inner

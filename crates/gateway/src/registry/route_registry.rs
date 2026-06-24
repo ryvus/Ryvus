@@ -5,14 +5,20 @@ use ryvus_protocol::{ActionDefinition, ActionKind};
 
 use crate::config::routes::{HttpMethod, RouteDefinition};
 
+#[derive(Debug, Clone)]
+pub struct RouteMatch {
+    pub definition: RouteDefinition,
+    pub path_params: HashMap<String, String>,
+}
+
 #[derive(Debug, Default)]
 pub struct RouteRegistry {
-    routes: HashMap<(HttpMethod, String), RouteDefinition>,
+    routes: Vec<RouteDefinition>,
 }
 
 impl RouteRegistry {
     pub fn from_actions<'a>(actions: impl IntoIterator<Item = &'a ActionDefinition>) -> Self {
-        let mut routes = HashMap::new();
+        let mut routes = Vec::new();
 
         for action in actions {
             if let ActionKind::Api(api) = &action.kind {
@@ -28,24 +34,58 @@ impl RouteRegistry {
                 let name = format!("{} {}", api.method, api.path);
                 let action_key = format!("{}::{}", action.source.display(), action.entrypoint);
 
-                let route = RouteDefinition {
+                routes.push(RouteDefinition {
                     name,
-                    method: method.clone(),
+                    method,
                     path: api.path.clone(),
                     action: action_key,
-                };
-                routes.insert((method, api.path.clone()), route);
+                });
             }
         }
 
         Self { routes }
     }
 
-    pub fn resolve(&self, method: &Method, path: &str) -> Option<&RouteDefinition> {
+    pub fn resolve(&self, method: &Method, path: &str) -> Option<RouteMatch> {
         let method = HttpMethod::from_axum(method)?;
 
-        self.routes.get(&(method, path.to_string()))
+        self.routes.iter().find_map(|route| {
+            if route.method != method {
+                return None;
+            }
+
+            match_path(&route.path, path).map(|path_params| RouteMatch {
+                definition: route.clone(),
+                path_params,
+            })
+        })
     }
+}
+
+fn match_path(template: &str, path: &str) -> Option<HashMap<String, String>> {
+    let template_parts: Vec<_> = template.trim_matches('/').split('/').collect();
+    let path_parts: Vec<_> = path.trim_matches('/').split('/').collect();
+
+    if template_parts.len() != path_parts.len() {
+        return None;
+    }
+
+    let mut params = HashMap::new();
+
+    for (template_part, path_part) in template_parts.iter().zip(path_parts.iter()) {
+        if template_part.starts_with('{') && template_part.ends_with('}') {
+            let param_name = template_part.trim_start_matches('{').trim_end_matches('}');
+
+            params.insert(param_name.to_string(), path_part.to_string());
+            continue;
+        }
+
+        if template_part != path_part {
+            return None;
+        }
+    }
+
+    Some(params)
 }
 
 impl HttpMethod {

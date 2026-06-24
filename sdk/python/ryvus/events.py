@@ -1,7 +1,9 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
 @dataclass(frozen=True)
 class ApiEvent:
-    body: dict[str, Any]
+    body: Any = None
+    query_params: dict[str, Any] = field(default_factory=dict)
+    path_params: dict[str, Any] = field(default_factory=dict)
