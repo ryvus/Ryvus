@@ -5,6 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use std::collections::HashMap;
 
 use crate::state::AppState;
 
@@ -13,7 +14,13 @@ pub async fn handle_dynamic_route(
     request: Request<Body>,
 ) -> Response {
     let method = request.method().clone();
-    let path = request.uri().path().to_string();
+    let uri = request.uri().clone();
+    let path = uri.path().to_string();
+
+    let query_params: HashMap<String, String> =
+        url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes())
+            .into_owned()
+            .collect();
 
     let body = match to_bytes(request.into_body(), usize::MAX).await {
         Ok(body) => body,
@@ -77,10 +84,11 @@ pub async fn handle_dynamic_route(
             }
         }
     };
+
     let event = serde_json::json!({
         "body": input,
         "path_params": route_match.path_params,
-        "query_params": {},
+        "query_params": query_params,
     });
 
     let record = match state.execution_service.execute_event(action, event) {

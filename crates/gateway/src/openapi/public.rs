@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use utoipa::openapi::OpenApi;
 
-use ryvus_protocol::{ActionDefinition, ActionKind};
+use ryvus_protocol::{ActionDefinition, ActionKind, ApiQueryParam};
 
 use crate::config::routes::{GatewayConfig, HttpMethod};
 
@@ -35,6 +35,7 @@ pub fn build_public_openapi_json_from_actions<'a>(
                 &api.method,
                 api.request_schema.as_ref(),
                 api.response_schema.as_ref(),
+                &api.query_params,
                 "Successful response",
                 false,
             ),
@@ -87,6 +88,7 @@ pub fn build_openapi_json_from_actions<'a>(
                 &api.method,
                 api.request_schema.as_ref(),
                 api.response_schema.as_ref(),
+                &api.query_params,
                 "Route matched",
                 true,
             ),
@@ -118,6 +120,7 @@ pub fn build_public_openapi_json(config: &GatewayConfig) -> Value {
                 method,
                 None,
                 None,
+                &[],
                 "Successful response",
                 false,
             ),
@@ -161,6 +164,7 @@ pub fn build_openapi_json(config: &GatewayConfig, openapi: OpenApi) -> Value {
                 method,
                 None,
                 None,
+                &[],
                 "Route matched",
                 true,
             ),
@@ -178,9 +182,13 @@ fn build_operation(
     method: &str,
     request_schema: Option<&Value>,
     response_schema: Option<&Value>,
+    query_params: &[ApiQueryParam],
     success_description: &str,
     include_404: bool,
 ) -> Value {
+    let mut parameters = path_parameters(path);
+    parameters.extend(query_parameters(query_params));
+
     let mut responses = json!({
         "200": {
             "description": success_description,
@@ -211,7 +219,7 @@ fn build_operation(
         "operationId": operation_id,
         "summary": summary,
         "description": description,
-        "parameters": path_parameters(path),
+        "parameters": parameters,
         "responses": responses
     });
 
@@ -283,6 +291,20 @@ fn path_parameters(path: &str) -> Vec<Value> {
             } else {
                 None
             }
+        })
+        .collect()
+}
+
+fn query_parameters(query_params: &[ApiQueryParam]) -> Vec<Value> {
+    query_params
+        .iter()
+        .map(|param| {
+            json!({
+                "name": param.name,
+                "in": "query",
+                "required": param.required,
+                "schema": param.schema,
+            })
         })
         .collect()
 }

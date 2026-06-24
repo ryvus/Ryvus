@@ -2,6 +2,7 @@ import argparse
 import importlib.util
 import inspect
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -11,6 +12,14 @@ try:
     from pydantic import BaseModel
 except ImportError:
     BaseModel = None
+
+
+SCALAR_TYPES = {
+    str: "string",
+    int: "integer",
+    float: "number",
+    bool: "boolean",
+}
 
 
 def main() -> None:
@@ -50,6 +59,7 @@ def discover_actions(project_root: Path, source_root: Path) -> list[dict[str, An
             api_config: dict[str, Any] = {
                 "method": metadata["method"],
                 "path": metadata["path"],
+                "query_params": query_params_from_handler(obj, metadata["path"]),
             }
 
             if request_schema is not None:
@@ -105,17 +115,79 @@ def schemas_from_handler(handler) -> tuple[Optional[dict[str, Any]], Optional[di
     return request_schema, response_schema
 
 
+def query_params_from_handler(handler, path: str) -> list[dict[str, Any]]:
+    signature = inspect.signature(handler)
+    path_param_names = set(extract_path_param_names(path))
+
+    query_params: list[dict[str, Any]] = []
+
+    for parameter in signature.parameters.values():
+        name = parameter.name
+        annotation = parameter.annotation
+
+        if name in path_param_names:
+            continue
+
+        if is_context_annotation(annotation):
+            continue
+
+        if is_pydantic_model(annotation):
+            continue
+
+        schema = scalar_schema_from_annotation(annotation)
+
+        if schema is None:
+            continue
+
+        if name in ("event", "context"):
+            continue
+
+        query_params.append(
+            {
+                "name": name,
+                "required": parameter.default is inspect.Signature.empty,
+                "schema": schema,
+            }
+        )
+
+    return query_params
+
+
+def extract_path_param_names(path: str) -> list[str]:
+    return re.findall(r"{([^}]+)}", path)
+
+
 def schema_from_annotation(annotation) -> Optional[dict[str, Any]]:
     if annotation is inspect.Signature.empty:
         return None
 
-    if BaseModel is None:
-        return None
-
-    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+    if is_pydantic_model(annotation):
         return annotation.model_json_schema()
 
     return None
+
+
+def is_pydantic_model(annotation) -> bool:
+    if BaseModel is None:
+        return False
+
+    return isinstance(annotation, type) and issubclass(annotation, BaseModel)
+
+
+def is_context_annotation(annotation) -> bool:
+    return getattr(annotation, "__name__", None) == "Context"
+
+
+def scalar_schema_from_annotation(annotation) -> Optional[dict[str, Any]]:
+    if annotation is inspect.Signature.empty:
+        return {"type": "string"}
+
+    openapi_type = SCALAR_TYPES.get(annotation)
+
+    if openapi_type is None:
+        return None
+
+    return {"type": openapi_type}
 
 
 if __name__ == "__main__":

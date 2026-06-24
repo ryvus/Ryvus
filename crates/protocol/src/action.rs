@@ -1,5 +1,3 @@
-// ryvus-protocol/src/action.rs
-
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -41,6 +39,16 @@ pub struct ApiAction {
 
     #[serde(default)]
     pub response_schema: Option<serde_json::Value>,
+
+    #[serde(default)]
+    pub query_params: Vec<ApiQueryParam>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiQueryParam {
+    pub name: String,
+    pub required: bool,
+    pub schema: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

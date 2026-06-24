@@ -60,3 +60,4 @@ axum = "0.8"
 utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 clap = { version = "4", features = ["derive"] }
+url = "2"

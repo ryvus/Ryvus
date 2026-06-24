@@ -3,13 +3,7 @@ use std::collections::HashMap;
 use axum::http::Method;
 use ryvus_protocol::{ActionDefinition, ActionKind};
 
-use crate::config::routes::{HttpMethod, RouteDefinition};
-
-#[derive(Debug, Clone)]
-pub struct RouteMatch {
-    pub definition: RouteDefinition,
-    pub path_params: HashMap<String, String>,
-}
+use crate::config::routes::{HttpMethod, RouteDefinition, RouteMatch};
 
 #[derive(Debug, Default)]
 pub struct RouteRegistry {
