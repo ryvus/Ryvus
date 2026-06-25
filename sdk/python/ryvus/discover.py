@@ -5,8 +5,8 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Optional
-
+from typing import Any, Optional, Union, get_args, get_origin
+import types
 
 try:
     from pydantic import BaseModel
@@ -114,7 +114,6 @@ def schemas_from_handler(handler) -> tuple[Optional[dict[str, Any]], Optional[di
 
     return request_schema, response_schema
 
-
 def query_params_from_handler(handler, path: str) -> list[dict[str, Any]]:
     signature = inspect.signature(handler)
     path_param_names = set(extract_path_param_names(path))
@@ -124,6 +123,9 @@ def query_params_from_handler(handler, path: str) -> list[dict[str, Any]]:
     for parameter in signature.parameters.values():
         name = parameter.name
         annotation = parameter.annotation
+
+        if name in ("event", "context"):
+            continue
 
         if name in path_param_names:
             continue
@@ -139,19 +141,21 @@ def query_params_from_handler(handler, path: str) -> list[dict[str, Any]]:
         if schema is None:
             continue
 
-        if name in ("event", "context"):
-            continue
+        param_config = {
+            "name": name,
+            "required": parameter.default is inspect.Signature.empty,
+            "schema": schema,
+        }
 
-        query_params.append(
-            {
-                "name": name,
-                "required": parameter.default is inspect.Signature.empty,
-                "schema": schema,
-            }
-        )
+        if (
+            parameter.default is not inspect.Signature.empty
+            and parameter.default is not None
+        ):
+            param_config["schema"]["default"] = parameter.default
+
+        query_params.append(param_config)
 
     return query_params
-
 
 def extract_path_param_names(path: str) -> list[str]:
     return re.findall(r"{([^}]+)}", path)
@@ -182,13 +186,37 @@ def scalar_schema_from_annotation(annotation) -> Optional[dict[str, Any]]:
     if annotation is inspect.Signature.empty:
         return {"type": "string"}
 
+    annotation, nullable = unwrap_optional(annotation)
+
     openapi_type = SCALAR_TYPES.get(annotation)
 
     if openapi_type is None:
         return None
 
-    return {"type": openapi_type}
+    schema = {"type": openapi_type}
 
+    if nullable:
+        schema["nullable"] = True
+
+    return schema
+
+def unwrap_optional(annotation):
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+
+    if origin is Union:
+        non_none = [arg for arg in args if arg is not type(None)]
+
+        if len(non_none) == 1 and len(non_none) != len(args):
+            return non_none[0], True
+
+    if origin is types.UnionType:
+        non_none = [arg for arg in args if arg is not type(None)]
+
+        if len(non_none) == 1 and len(non_none) != len(args):
+            return non_none[0], True
+
+    return annotation, False
 
 if __name__ == "__main__":
     main()

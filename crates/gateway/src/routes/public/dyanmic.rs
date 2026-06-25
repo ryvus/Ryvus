@@ -7,6 +7,8 @@ use axum::{
 };
 use std::collections::HashMap;
 
+use ryvus_protocol::InvocationStatus;
+
 use crate::state::AppState;
 
 pub async fn handle_dynamic_route(
@@ -106,11 +108,21 @@ pub async fn handle_dynamic_route(
         }
     };
 
-    let output = record
-        .result
-        .invocation_result
-        .output
-        .unwrap_or(serde_json::Value::Null);
+    let invocation_result = record.result.invocation_result;
+
+    if invocation_result.status != InvocationStatus::Success {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "action_failed",
+                "action": route.action,
+                "details": invocation_result.error,
+            })),
+        )
+            .into_response();
+    }
+
+    let output = invocation_result.output.unwrap_or(serde_json::Value::Null);
 
     Json(output).into_response()
 }

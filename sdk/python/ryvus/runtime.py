@@ -151,8 +151,8 @@ def _call_handler(
     event: ApiEvent,
     context: Context,
 ) -> Any:
-    args = resolve_handler_args(handler, event, context)
-    return handler(*args)
+    kwargs = resolve_handler_args(handler, event, context)
+    return handler(**kwargs)
 
 
 def _map_python_log_level(level: int) -> str:
