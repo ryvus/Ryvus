@@ -63,7 +63,7 @@ pub fn build_app(config: &GatewayServerConfig) -> Result<Router, Box<dyn std::er
                 config.project_root.clone(),
             )) as Arc<dyn RuntimeResolver>,
             Arc::new(LocalProcessExecutor::new()) as Arc<dyn Executor>,
-            Arc::new(ConsoleExecutionPersistence::default()) as Arc<dyn ExecutionPersistence>,
+            Arc::new(ConsoleExecutionPersistence) as Arc<dyn ExecutionPersistence>,
         ));
 
     let state = AppState {

@@ -174,6 +174,7 @@ pub fn build_openapi_json(config: &GatewayConfig, openapi: OpenApi) -> Value {
     value
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_operation(
     operation_id: &str,
     summary: &str,

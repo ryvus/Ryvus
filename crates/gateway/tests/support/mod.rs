@@ -112,7 +112,7 @@ pub async fn raw_request(
     let bytes = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body should read");
-    let body = serde_json::from_slice(&bytes).unwrap_or_else(|_| json!(null));
+    let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
 
     TestResponse { status, body }
 }
