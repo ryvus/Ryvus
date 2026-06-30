@@ -1,6 +1,6 @@
 use clap::Parser;
 use ryvus_cli::{
-    commands::{discover, new, start},
+    commands::{discover, new, start, validate},
     error::CliError,
     Cli, Command,
 };
@@ -28,6 +28,6 @@ fn run(cli: Cli) -> Result<(), CliError> {
 
         Command::Start => start::run(),
 
-        Command::Validate => todo!(),
+        Command::Validate => validate::run(),
     }
 }

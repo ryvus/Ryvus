@@ -5,7 +5,6 @@ use crate::{
 
 pub fn run() -> Result<()> {
     project::configure_python_path();
-
     discover::run()?;
 
     let config = project::gateway_config()?;
@@ -13,14 +12,6 @@ pub fn run() -> Result<()> {
         .map_err(|err| CliError::Validation(err.to_string()))?;
 
     project::print_validation(&validation);
-    println!("Server: http://{}", config.addr);
-    println!("Docs:   http://{}/docs", config.addr);
-
-    let runtime = tokio::runtime::Runtime::new().map_err(CliError::Io)?;
-
-    runtime
-        .block_on(async { ryvus_gateway::server::serve(config).await })
-        .map_err(|err| CliError::Gateway(err.to_string()))?;
 
     Ok(())
 }

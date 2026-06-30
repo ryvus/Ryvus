@@ -4,6 +4,7 @@ use axum::Router;
 use ryvus_action_catalog::{ActionService, FileActionCatalog};
 use ryvus_executor::{Executor, LocalProcessExecutor, LocalRuntimeResolver, RuntimeResolver};
 use ryvus_persistence::{ConsoleExecutionPersistence, ExecutionPersistence};
+use ryvus_protocol::{ActionDefinition, ActionKind};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -11,7 +12,7 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::{
     openapi::{public::build_public_openapi_json_from_actions, system::ApiDoc},
     registry::route_registry::RouteRegistry,
-    routes::{public::dyanmic::handle_dynamic_route, system::system_routes},
+    routes::{public::dynamic::handle_dynamic_route, system::system_routes},
     state::{AppState, GatewayExecutionService},
 };
 
@@ -20,6 +21,19 @@ pub struct GatewayServerConfig {
     pub project_root: PathBuf,
     pub manifest_path: PathBuf,
     pub addr: SocketAddr,
+}
+
+#[derive(Debug, Clone)]
+pub struct GatewayValidation {
+    pub action_count: usize,
+    pub routes: Vec<RouteSummary>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RouteSummary {
+    pub method: String,
+    pub path: String,
+    pub action: String,
 }
 
 impl GatewayServerConfig {
@@ -37,6 +51,7 @@ pub fn build_app(config: &GatewayServerConfig) -> Result<Router, Box<dyn std::er
 
     let action_catalog = FileActionCatalog::load(&manifest_path)?;
 
+    validate_action_schemas(action_catalog.all())?;
     let public_openapi = build_public_openapi_json_from_actions(action_catalog.all());
     let route_registry = RouteRegistry::from_actions(action_catalog.all())?;
 
@@ -75,6 +90,21 @@ pub fn build_app(config: &GatewayServerConfig) -> Result<Router, Box<dyn std::er
         .with_state(state))
 }
 
+pub fn validate_config(
+    config: &GatewayServerConfig,
+) -> Result<GatewayValidation, Box<dyn std::error::Error>> {
+    let action_catalog = FileActionCatalog::load(config.manifest_path())?;
+    let actions = action_catalog.all().collect::<Vec<_>>();
+
+    validate_action_schemas(actions.iter().copied())?;
+    RouteRegistry::from_actions(actions.iter().copied())?;
+
+    Ok(GatewayValidation {
+        action_count: actions.len(),
+        routes: route_summaries(actions.iter().copied()),
+    })
+}
+
 pub async fn serve(config: GatewayServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     let app = build_app(&config)?;
 
@@ -90,4 +120,72 @@ pub async fn serve(config: GatewayServerConfig) -> Result<(), Box<dyn std::error
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+fn validate_action_schemas<'a>(
+    actions: impl IntoIterator<Item = &'a ActionDefinition>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for action in actions {
+        let ActionKind::Api(api) = &action.kind else {
+            continue;
+        };
+
+        if let Some(schema) = &api.request_schema {
+            jsonschema::validator_for(schema).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "invalid request schema for {}::{}: {}",
+                        action.source.display(),
+                        action.entrypoint,
+                        error
+                    ),
+                )
+            })?;
+        }
+
+        if let Some(schema) = &api.response_schema {
+            jsonschema::validator_for(schema).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "invalid response schema for {}::{}: {}",
+                        action.source.display(),
+                        action.entrypoint,
+                        error
+                    ),
+                )
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn route_summaries<'a>(
+    actions: impl IntoIterator<Item = &'a ActionDefinition>,
+) -> Vec<RouteSummary> {
+    let mut routes = actions
+        .into_iter()
+        .filter_map(|action| {
+            let ActionKind::Api(api) = &action.kind else {
+                return None;
+            };
+
+            Some(RouteSummary {
+                method: api.method.clone(),
+                path: api.path.clone(),
+                action: format!("{}::{}", action.source.display(), action.entrypoint),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    routes.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.method.cmp(&right.method))
+            .then_with(|| left.action.cmp(&right.action))
+    });
+
+    routes
 }

@@ -255,8 +255,9 @@ fn error_response(description: &str) -> Value {
             "application/json": {
                 "schema": {
                     "type": "object",
-                    "required": ["error", "message"],
+                    "required": ["invocation_id", "error", "message"],
                     "properties": {
+                        "invocation_id": { "type": "string" },
                         "error": { "type": "string" },
                         "message": { "type": "string" }
                     }

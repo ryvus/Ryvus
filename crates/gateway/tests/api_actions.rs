@@ -1,19 +1,11 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
-};
+mod support;
 
-use axum::{
-    body::{to_bytes, Body},
-    http::{Method, Request, StatusCode},
-};
-use ryvus_gateway::{
-    openapi::public::build_public_openapi_json_from_actions, server, server::GatewayServerConfig,
-};
-use ryvus_protocol::{ActionDefinition, ActionKind, ApiAction, RuntimeKind};
-use serde_json::{json, Value};
-use tower::ServiceExt;
+use axum::http::{Method, StatusCode};
+use ryvus_gateway::{openapi::public::build_public_openapi_json_from_actions, server};
+use ryvus_protocol::ActionKind;
+use serde_json::json;
+
+use support::*;
 
 #[tokio::test]
 async fn invokes_get_api_action() {
@@ -129,29 +121,30 @@ def needs(required: str):
         action("GET", "/needs", "src/needs.py", "needs"),
     ]);
 
-    assert_eq!(
-        request(&project, Method::GET, "/missing", None)
-            .await
-            .status,
-        StatusCode::NOT_FOUND
+    assert_public_error(
+        request(&project, Method::GET, "/missing", None).await,
+        StatusCode::NOT_FOUND,
+        "route_not_configured",
     );
-    assert_eq!(
-        request(&project, Method::POST, "/hello", None).await.status,
-        StatusCode::METHOD_NOT_ALLOWED
+    assert_public_error(
+        request(&project, Method::POST, "/hello", None).await,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method_not_allowed",
     );
-    assert_eq!(
-        raw_request(&project, Method::POST, "/post", "{")
-            .await
-            .status,
-        StatusCode::BAD_REQUEST
+    assert_public_error(
+        raw_request(&project, Method::POST, "/post", "{").await,
+        StatusCode::BAD_REQUEST,
+        "invalid_json_body",
     );
-    assert_eq!(
-        request(&project, Method::GET, "/needs", None).await.status,
-        StatusCode::BAD_REQUEST
+    assert_public_error(
+        request(&project, Method::GET, "/needs", None).await,
+        StatusCode::BAD_REQUEST,
+        "action_failed",
     );
-    assert_eq!(
-        request(&project, Method::GET, "/fails", None).await.status,
-        StatusCode::INTERNAL_SERVER_ERROR
+    assert_public_error(
+        request(&project, Method::GET, "/fails", None).await,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "action_failed",
     );
 }
 
@@ -221,6 +214,7 @@ def create_pet(name: str, age: int):
         missing_query.body["error"],
         json!("request_validation_failed")
     );
+    assert!(missing_query.body["invocation_id"].is_string());
 
     let invalid_query = request(&project, Method::GET, "/search?limit=nope", None).await;
     assert_eq!(invalid_query.status, StatusCode::BAD_REQUEST);
@@ -332,6 +326,11 @@ fn openapi_uses_discovered_routes_and_stable_operation_ids() {
     );
     assert_eq!(
         openapi["paths"]["/hello"]["post"]["responses"]["400"]["content"]["application/json"]
+            ["schema"]["properties"]["invocation_id"]["type"],
+        json!("string")
+    );
+    assert_eq!(
+        openapi["paths"]["/hello"]["post"]["responses"]["400"]["content"]["application/json"]
             ["schema"]["properties"]["message"]["type"],
         json!("string")
     );
@@ -345,126 +344,4 @@ fn openapi_uses_discovered_routes_and_stable_operation_ids() {
             ["schema"]["properties"]["pets"]["items"]["properties"]["id"]["type"],
         json!("string")
     );
-}
-
-struct TestProject {
-    root: PathBuf,
-}
-
-impl TestProject {
-    fn new(name: &str) -> Self {
-        let id = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be after unix epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("ryvus-api-action-{name}-{id}"));
-
-        fs::create_dir_all(root.join("src")).expect("test project should be created");
-        fs::create_dir_all(root.join(".ryvus")).expect("ryvus dir should be created");
-
-        Self { root }
-    }
-
-    fn add_action(&self, file: &str, body: &str) {
-        let sdk_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../sdk/python")
-            .canonicalize()
-            .expect("python SDK path should resolve");
-        let content = format!(
-            r#"import sys
-sys.path.insert(0, {sdk_path:?})
-from ryvus import api_action
-{body}
-"#,
-            sdk_path = sdk_path.to_string_lossy().to_string(),
-            body = body,
-        );
-
-        fs::write(self.root.join("src").join(file), content).expect("action should be written");
-    }
-
-    fn write_manifest(&self, actions: &[Value]) {
-        fs::write(
-            self.root.join(".ryvus/action-manifest.json"),
-            serde_json::to_string_pretty(&json!({ "actions": actions }))
-                .expect("manifest should serialize"),
-        )
-        .expect("manifest should be written");
-    }
-
-    fn config(&self) -> GatewayServerConfig {
-        GatewayServerConfig {
-            project_root: self.root.clone(),
-            manifest_path: ".ryvus/action-manifest.json".into(),
-            addr: ([127, 0, 0, 1], 0).into(),
-        }
-    }
-}
-
-struct TestResponse {
-    status: StatusCode,
-    body: Value,
-}
-
-async fn request(
-    project: &TestProject,
-    method: Method,
-    uri: &str,
-    body: Option<Value>,
-) -> TestResponse {
-    let raw_body = body.map(|body| body.to_string()).unwrap_or_default();
-    raw_request(project, method, uri, &raw_body).await
-}
-
-async fn raw_request(project: &TestProject, method: Method, uri: &str, body: &str) -> TestResponse {
-    let app = server::build_app(&project.config()).expect("gateway app should build");
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(method)
-                .uri(uri)
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should be handled");
-
-    let status = response.status();
-    let bytes = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body should read");
-    let body = serde_json::from_slice(&bytes).unwrap_or_else(|_| json!(null));
-
-    TestResponse { status, body }
-}
-
-fn action(method: &str, path: &str, source: &str, entrypoint: &str) -> Value {
-    json!({
-        "runtime": "Python",
-        "kind": {
-            "Api": {
-                "method": method,
-                "path": path,
-                "query_params": []
-            }
-        },
-        "source": source,
-        "entrypoint": entrypoint
-    })
-}
-
-fn api_definition(method: &str, path: &str, source: &str, entrypoint: &str) -> ActionDefinition {
-    ActionDefinition {
-        runtime: RuntimeKind::Python,
-        kind: ActionKind::Api(ApiAction {
-            method: method.to_string(),
-            path: path.to_string(),
-            request_schema: None,
-            response_schema: None,
-            query_params: Vec::new(),
-        }),
-        source: source.into(),
-        entrypoint: entrypoint.to_string(),
-    }
 }
