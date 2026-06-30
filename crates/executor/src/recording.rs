@@ -29,6 +29,7 @@ impl<E: Executor> RecordingExecutor<E> {
             command: target.command.clone(),
             args: target.args.clone(),
             working_dir: target.working_dir.clone(),
+            env: target.env.clone(),
         };
 
         Ok(ExecutionRecord::new(
@@ -58,7 +59,7 @@ mod tests {
 
         let target = ProcessTarget::new("sh").args([
             "-c",
-            "cat >/dev/null && echo '{\"protocol_version\":\"ryvus.invoke.v1\",\"invocation_id\":\"inv_test\",\"status\":\"success\",\"output\":{\"ok\":true},\"error\":null}'",
+            "cat >/dev/null && echo '{\"type\":\"result\",\"result\":{\"protocol_version\":\"ryvus.invoke.v1\",\"invocation_id\":\"inv_test\",\"status\":\"success\",\"output\":{\"ok\":true},\"error\":null}}'",
         ]);
 
         let executor = RecordingExecutor::new(LocalProcessExecutor::new());

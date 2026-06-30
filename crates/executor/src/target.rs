@@ -1,10 +1,11 @@
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessTarget {
     pub command: String,
     pub args: Vec<String>,
     pub working_dir: Option<PathBuf>,
+    pub env: HashMap<String, String>,
 }
 
 impl ProcessTarget {
@@ -13,6 +14,7 @@ impl ProcessTarget {
             command: command.into(),
             args: Vec::new(),
             working_dir: None,
+            env: HashMap::new(),
         }
     }
 
@@ -28,6 +30,11 @@ impl ProcessTarget {
 
     pub fn working_dir(mut self, working_dir: impl Into<PathBuf>) -> Self {
         self.working_dir = Some(working_dir.into());
+        self
+    }
+
+    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.insert(key.into(), value.into());
         self
     }
 }

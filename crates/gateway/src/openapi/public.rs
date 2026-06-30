@@ -17,7 +17,7 @@ pub fn build_public_openapi_json_from_actions<'a>(
 
         let method = api.method.to_lowercase();
         let action_key = action_key(action);
-        let operation_name = action.entrypoint.clone();
+        let operation_id = operation_id(action, &api.method, &api.path);
 
         let path_item = paths.entry(api.path.clone()).or_insert_with(|| json!({}));
 
@@ -28,8 +28,8 @@ pub fn build_public_openapi_json_from_actions<'a>(
         path_object.insert(
             method,
             build_operation(
-                &operation_name,
-                &operation_name,
+                &operation_id,
+                &action.entrypoint,
                 &format!("Routes to Ryvus action '{}'.", action_key),
                 &api.path,
                 &api.method,
@@ -70,7 +70,7 @@ pub fn build_openapi_json_from_actions<'a>(
 
         let method = api.method.to_lowercase();
         let action_key = action_key(action);
-        let operation_name = action.entrypoint.clone();
+        let operation_id = operation_id(action, &api.method, &api.path);
 
         let path_item = paths.entry(api.path.clone()).or_insert_with(|| json!({}));
 
@@ -81,8 +81,8 @@ pub fn build_openapi_json_from_actions<'a>(
         path_object.insert(
             method,
             build_operation(
-                &operation_name,
-                &operation_name,
+                &operation_id,
+                &action.entrypoint,
                 &format!("Routes to Ryvus action `{}`.", action_key),
                 &api.path,
                 &api.method,
@@ -195,23 +195,22 @@ fn build_operation(
             "content": {
                 "application/json": {
                     "schema": response_schema
-                        .cloned()
+                        .map(resolve_local_schema_refs)
                         .unwrap_or_else(default_object_schema)
                 }
             }
-        }
+        },
+        "400": error_response("Invalid request"),
+        "405": error_response("Method not allowed"),
+        "500": error_response("Action or runtime failed"),
+        "504": error_response("Action timed out")
     });
 
     if include_404 {
         responses
             .as_object_mut()
             .expect("responses should be an object")
-            .insert(
-                "404".to_string(),
-                json!({
-                    "description": "Route not configured"
-                }),
-            );
+            .insert("404".to_string(), error_response("Route not configured"));
     }
 
     let mut operation = json!({
@@ -242,8 +241,26 @@ fn request_body_schema(schema: Option<&Value>) -> Value {
         "content": {
             "application/json": {
                 "schema": schema
-                    .cloned()
+                    .map(resolve_local_schema_refs)
                     .unwrap_or_else(default_object_schema)
+            }
+        }
+    })
+}
+
+fn error_response(description: &str) -> Value {
+    json!({
+        "description": description,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "required": ["error", "message"],
+                    "properties": {
+                        "error": { "type": "string" },
+                        "message": { "type": "string" }
+                    }
+                }
             }
         }
     })
@@ -251,6 +268,49 @@ fn request_body_schema(schema: Option<&Value>) -> Value {
 
 fn default_object_schema() -> Value {
     json!({})
+}
+
+fn resolve_local_schema_refs(schema: &Value) -> Value {
+    let defs = schema
+        .get("$defs")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut resolved = schema.clone();
+    inline_local_refs(&mut resolved, &defs);
+
+    if let Some(object) = resolved.as_object_mut() {
+        object.remove("$defs");
+    }
+
+    resolved
+}
+
+fn inline_local_refs(value: &mut Value, defs: &serde_json::Map<String, Value>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(ref_value) = object.get("$ref").and_then(Value::as_str) {
+                if let Some(name) = ref_value.strip_prefix("#/$defs/") {
+                    if let Some(definition) = defs.get(name) {
+                        *value = definition.clone();
+                        inline_local_refs(value, defs);
+                        return;
+                    }
+                }
+            }
+
+            for child in object.values_mut() {
+                inline_local_refs(child, defs);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                inline_local_refs(item, defs);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn method_allows_request_body(method: &str) -> bool {
@@ -272,6 +332,29 @@ fn method_to_openapi_key(method: HttpMethod) -> &'static str {
 
 fn action_key(action: &ActionDefinition) -> String {
     format!("{}::{}", action.source.display(), action.entrypoint)
+}
+
+fn operation_id(action: &ActionDefinition, method: &str, path: &str) -> String {
+    format!(
+        "{}_{}_{}",
+        sanitize_identifier(&action.entrypoint),
+        method.to_ascii_lowercase(),
+        sanitize_identifier(path)
+    )
+}
+
+fn sanitize_identifier(value: &str) -> String {
+    let mut output = String::new();
+
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            output.push(character.to_ascii_lowercase());
+        } else if !output.ends_with('_') {
+            output.push('_');
+        }
+    }
+
+    output.trim_matches('_').to_string()
 }
 
 fn path_parameters(path: &str) -> Vec<Value> {

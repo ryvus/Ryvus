@@ -15,6 +15,9 @@ pub enum ExecutorError {
         stderr: String,
     },
 
+    #[error("process timed out: command={command}, timeout_ms={timeout_ms}")]
+    ProcessTimedOut { command: String, timeout_ms: u128 },
+
     #[error("invalid protocol version: expected={expected}, actual={actual}")]
     InvalidProtocolVersion { expected: String, actual: String },
 

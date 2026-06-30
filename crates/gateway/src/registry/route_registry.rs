@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::http::Method;
 use ryvus_protocol::{ActionDefinition, ActionKind};
+use thiserror::Error;
 
 use crate::config::routes::{HttpMethod, RouteDefinition, RouteMatch};
 
@@ -11,19 +12,38 @@ pub struct RouteRegistry {
 }
 
 impl RouteRegistry {
-    pub fn from_actions<'a>(actions: impl IntoIterator<Item = &'a ActionDefinition>) -> Self {
+    pub fn from_actions<'a>(
+        actions: impl IntoIterator<Item = &'a ActionDefinition>,
+    ) -> Result<Self, RouteRegistryError> {
         let mut routes = Vec::new();
+        let mut seen = HashSet::new();
 
         for action in actions {
             if let ActionKind::Api(api) = &action.kind {
-                let method = match api.method.as_str() {
+                validate_path_template(&api.path)?;
+
+                let method = match api.method.to_ascii_uppercase().as_str() {
                     "GET" => HttpMethod::Get,
                     "POST" => HttpMethod::Post,
                     "PUT" => HttpMethod::Put,
                     "DELETE" => HttpMethod::Delete,
                     "PATCH" => HttpMethod::Patch,
-                    value => panic!("unsupported HTTP method: {value}"),
+                    value => {
+                        return Err(RouteRegistryError::UnsupportedMethod {
+                            method: value.to_string(),
+                            path: api.path.clone(),
+                        })
+                    }
                 };
+
+                let route_key = (method, normalize_path_template(&api.path));
+
+                if !seen.insert(route_key) {
+                    return Err(RouteRegistryError::DuplicateRoute {
+                        method: api.method.clone(),
+                        path: api.path.clone(),
+                    });
+                }
 
                 let name = format!("{} {}", api.method, api.path);
                 let action_key = format!("{}::{}", action.source.display(), action.entrypoint);
@@ -37,7 +57,7 @@ impl RouteRegistry {
             }
         }
 
-        Self { routes }
+        Ok(Self { routes })
     }
 
     pub fn resolve(&self, method: &Method, path: &str) -> Option<RouteMatch> {
@@ -54,6 +74,24 @@ impl RouteRegistry {
             })
         })
     }
+
+    pub fn path_exists(&self, path: &str) -> bool {
+        self.routes
+            .iter()
+            .any(|route| match_path(&route.path, path).is_some())
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum RouteRegistryError {
+    #[error("unsupported HTTP method `{method}` for route `{path}`")]
+    UnsupportedMethod { method: String, path: String },
+
+    #[error("duplicate route `{method} {path}`")]
+    DuplicateRoute { method: String, path: String },
+
+    #[error("invalid route path `{path}`: {reason}")]
+    InvalidPath { path: String, reason: String },
 }
 
 fn match_path(template: &str, path: &str) -> Option<HashMap<String, String>> {
@@ -80,6 +118,55 @@ fn match_path(template: &str, path: &str) -> Option<HashMap<String, String>> {
     }
 
     Some(params)
+}
+
+fn validate_path_template(path: &str) -> Result<(), RouteRegistryError> {
+    if !path.starts_with('/') {
+        return Err(RouteRegistryError::InvalidPath {
+            path: path.to_string(),
+            reason: "path must start with `/`".to_string(),
+        });
+    }
+
+    for part in path.trim_matches('/').split('/') {
+        let starts = part.starts_with('{');
+        let ends = part.ends_with('}');
+
+        if starts != ends {
+            return Err(RouteRegistryError::InvalidPath {
+                path: path.to_string(),
+                reason: "path parameters must use `{name}`".to_string(),
+            });
+        }
+
+        if starts
+            && part
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+                .is_empty()
+        {
+            return Err(RouteRegistryError::InvalidPath {
+                path: path.to_string(),
+                reason: "path parameter name cannot be empty".to_string(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_path_template(path: &str) -> String {
+    path.trim_matches('/')
+        .split('/')
+        .map(|part| {
+            if part.starts_with('{') && part.ends_with('}') {
+                "{}"
+            } else {
+                part
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 impl HttpMethod {

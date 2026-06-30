@@ -38,6 +38,10 @@ def main() -> None:
 
 def discover_actions(project_root: Path, source_root: Path) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
+    source_root_value = str(source_root)
+
+    if source_root_value not in sys.path:
+        sys.path.insert(0, source_root_value)
 
     for path in source_root.rglob("*.py"):
         if path.name.startswith("__"):

@@ -50,6 +50,7 @@ pub enum ExecutionTarget {
         command: String,
         args: Vec<String>,
         working_dir: Option<PathBuf>,
+        env: std::collections::HashMap<String, String>,
     },
     Container {
         image: String,

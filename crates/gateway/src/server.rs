@@ -32,19 +32,21 @@ impl GatewayServerConfig {
     }
 }
 
-pub async fn serve(config: GatewayServerConfig) -> Result<(), Box<dyn std::error::Error>> {
+pub fn build_app(config: &GatewayServerConfig) -> Result<Router, Box<dyn std::error::Error>> {
     let manifest_path = config.manifest_path();
 
     let action_catalog = FileActionCatalog::load(&manifest_path)?;
 
     let public_openapi = build_public_openapi_json_from_actions(action_catalog.all());
-    let route_registry = RouteRegistry::from_actions(action_catalog.all());
+    let route_registry = RouteRegistry::from_actions(action_catalog.all())?;
 
     let action_service = Arc::new(ActionService::new(action_catalog));
 
     let execution_service: Arc<GatewayExecutionService> =
         Arc::new(ryvus_execution_service::ExecutionService::new(
-            Arc::new(LocalRuntimeResolver::new()) as Arc<dyn RuntimeResolver>,
+            Arc::new(LocalRuntimeResolver::with_project_root(
+                config.project_root.clone(),
+            )) as Arc<dyn RuntimeResolver>,
             Arc::new(LocalProcessExecutor::new()) as Arc<dyn Executor>,
             Arc::new(ConsoleExecutionPersistence::default()) as Arc<dyn ExecutionPersistence>,
         ));
@@ -63,14 +65,18 @@ pub async fn serve(config: GatewayServerConfig) -> Result<(), Box<dyn std::error
         .external_url_unchecked("/openapi.json", public_openapi)
         .into();
 
-    let app = Router::<AppState>::new()
+    Ok(Router::<AppState>::new()
         .merge(system_routes())
         .merge(system_swagger)
         .merge(public_swagger)
         .fallback(handle_dynamic_route)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .with_state(state))
+}
+
+pub async fn serve(config: GatewayServerConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let app = build_app(&config)?;
 
     tracing::info!("ryvus-gateway listening on http://{}", config.addr);
     tracing::info!("public swagger available at http://{}/docs", config.addr);

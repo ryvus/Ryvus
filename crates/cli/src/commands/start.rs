@@ -4,12 +4,6 @@ use crate::{
 };
 
 pub fn run() -> Result<()> {
-    discover::run()?;
-
-    let project_root = std::env::current_dir().map_err(CliError::Io)?;
-
-    let runtime = tokio::runtime::Runtime::new().map_err(CliError::Io)?;
-
     let ryvus_root = std::env::var("RYVUS_ROOT").ok();
 
     if let Some(ryvus_root) = ryvus_root {
@@ -25,6 +19,13 @@ pub fn run() -> Result<()> {
 
         std::env::set_var("PYTHONPATH", pythonpath);
     }
+
+    discover::run()?;
+
+    let project_root = std::env::current_dir().map_err(CliError::Io)?;
+
+    let runtime = tokio::runtime::Runtime::new().map_err(CliError::Io)?;
+
     runtime
         .block_on(async {
             ryvus_gateway::server::serve(ryvus_gateway::server::GatewayServerConfig {

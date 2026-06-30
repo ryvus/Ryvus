@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::error::{ExecutorError, ExecutorResult};
 use crate::executor::Executor;
@@ -12,6 +13,7 @@ use ryvus_protocol::{InvocationMessage, InvocationRequest, InvocationResult, PRO
 #[derive(Clone)]
 pub struct LocalProcessExecutor {
     event_sink: Arc<dyn InvocationEventSink>,
+    timeout: Duration,
 }
 
 impl std::fmt::Debug for LocalProcessExecutor {
@@ -30,11 +32,20 @@ impl LocalProcessExecutor {
     pub fn new() -> Self {
         Self {
             event_sink: Arc::new(ConsoleInvocationEventSink),
+            timeout: Duration::from_secs(30),
         }
     }
 
     pub fn with_event_sink(event_sink: Arc<dyn InvocationEventSink>) -> Self {
-        Self { event_sink }
+        Self {
+            event_sink,
+            timeout: Duration::from_secs(30),
+        }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 }
 
@@ -59,6 +70,7 @@ impl Executor for LocalProcessExecutor {
 
         let mut command = Command::new(&target.command);
         command.args(&target.args);
+        command.envs(&target.env);
 
         if let Some(working_dir) = &target.working_dir {
             command.current_dir(working_dir);
@@ -72,6 +84,23 @@ impl Executor for LocalProcessExecutor {
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(&request_json)?;
+        }
+
+        loop {
+            if child.try_wait()?.is_some() {
+                break;
+            }
+
+            if started.elapsed() >= self.timeout {
+                let _ = child.kill();
+                let _ = child.wait_with_output();
+                return Err(ExecutorError::ProcessTimedOut {
+                    command: target.command.clone(),
+                    timeout_ms: self.timeout.as_millis(),
+                });
+            }
+
+            std::thread::sleep(Duration::from_millis(10));
         }
 
         let output = child.wait_with_output()?;
@@ -172,5 +201,24 @@ mod tests {
         assert_eq!(result.invocation_result.status, InvocationStatus::Success);
         assert_eq!(result.invocation_result.output, Some(json!({ "ok": true })));
         assert_eq!(result.exit_code, Some(0));
+    }
+
+    #[test]
+    fn times_out_long_running_process() {
+        let request = InvocationRequest::new(json!({ "message": "hello" }));
+
+        let target = ProcessTarget::new("sh").args(["-c", "cat >/dev/null && sleep 1"]);
+
+        let executor =
+            LocalProcessExecutor::new().with_timeout(std::time::Duration::from_millis(20));
+
+        let error = executor
+            .invoke(&target, &request)
+            .expect_err("process should time out");
+
+        assert!(matches!(
+            error,
+            crate::ExecutorError::ProcessTimedOut { .. }
+        ));
     }
 }
