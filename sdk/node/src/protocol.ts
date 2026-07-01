@@ -24,13 +24,14 @@ export interface InvocationContext {
 export interface InvocationError {
   code: string;
   message: string;
-  details?: JsonValue;
+  retryable: boolean;
+  details: JsonValue;
 }
 
 export interface InvocationResult {
   protocol_version: string;
   invocation_id: string;
-  status: "success" | "failure";
+  status: "success" | "failed";
   output: JsonValue | null;
   error: InvocationError | null;
 }
@@ -85,11 +86,13 @@ export function createFailureResult(
   return {
     protocol_version: request.protocol_version,
     invocation_id: request.invocation_id,
-    status: "failure",
+    status: "failed",
     output: null,
     error: {
       code: "handler_error",
       message: error instanceof Error ? error.message : String(error),
+      retryable: false,
+      details: {},
     },
   };
 }

@@ -49,6 +49,31 @@ from ryvus import api_action
         fs::write(self.root.join("src").join(file), content).expect("action should be written");
     }
 
+    pub fn add_node_action(&self, file: &str, body: &str) {
+        let sdk_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../sdk/node/dist/index.js")
+            .canonicalize()
+            .expect("node SDK path should resolve");
+        let content = format!(
+            r#"import {{
+  apiAction,
+  array,
+  boolean,
+  integer,
+  number,
+  object,
+  string,
+}} from {sdk_path:?};
+{body}
+"#,
+            sdk_path = format!("file://{}", sdk_path.display()),
+            body = body,
+        );
+
+        fs::write(self.root.join("src").join(file), content)
+            .expect("node action should be written");
+    }
+
     pub fn write_manifest(&self, actions: &[Value]) {
         fs::write(
             self.root.join(".ryvus/action-manifest.json"),
@@ -70,6 +95,11 @@ from ryvus import api_action
 pub struct TestResponse {
     pub status: StatusCode,
     pub body: Value,
+}
+
+pub struct TextResponse {
+    pub status: StatusCode,
+    pub body: String,
 }
 
 pub fn assert_public_error(response: TestResponse, status: StatusCode, error: &str) {
@@ -117,9 +147,46 @@ pub async fn raw_request(
     TestResponse { status, body }
 }
 
+pub async fn text_request(project: &TestProject, method: Method, uri: &str) -> TextResponse {
+    let app = server::build_app(&project.config()).expect("gateway app should build");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let body = String::from_utf8(bytes.to_vec()).expect("body should be UTF-8");
+
+    TextResponse { status, body }
+}
+
 pub fn action(method: &str, path: &str, source: &str, entrypoint: &str) -> Value {
     json!({
         "runtime": "Python",
+        "kind": {
+            "Api": {
+                "method": method,
+                "path": path,
+                "query_params": []
+            }
+        },
+        "source": source,
+        "entrypoint": entrypoint
+    })
+}
+
+pub fn node_action(method: &str, path: &str, source: &str, entrypoint: &str) -> Value {
+    json!({
+        "runtime": "Node",
         "kind": {
             "Api": {
                 "method": method,

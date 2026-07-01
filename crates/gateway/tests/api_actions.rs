@@ -28,6 +28,186 @@ def hello(event, context):
 }
 
 #[tokio::test]
+async fn serves_scalar_docs_and_openapi_json() {
+    let project = TestProject::new("docs");
+    project.add_action(
+        "hello.py",
+        r#"
+@api_action(method="GET", path="/hello")
+def hello():
+    return {"ok": True}
+"#,
+    );
+    project.write_manifest(&[action("GET", "/hello", "src/hello.py", "hello")]);
+
+    let docs = text_request(&project, Method::GET, "/docs").await;
+    assert_eq!(docs.status, StatusCode::OK);
+    assert!(docs.body.contains("Scalar.createApiReference"));
+    assert!(docs.body.contains("/openapi.json"));
+    assert!(docs.body.contains("/assets/scalar-api-reference.js"));
+    assert!(!docs.body.contains("https://"));
+
+    let scalar = text_request(&project, Method::GET, "/assets/scalar-api-reference.js").await;
+    assert_eq!(scalar.status, StatusCode::OK);
+    assert!(scalar.body.contains("createApiReference"));
+
+    let openapi = request(&project, Method::GET, "/openapi.json", None).await;
+    assert_eq!(openapi.status, StatusCode::OK);
+    assert_eq!(
+        openapi.body["paths"]["/hello"]["get"]["operationId"],
+        json!("hello_get_hello")
+    );
+}
+
+#[tokio::test]
+async fn keeps_system_health_without_system_docs() {
+    let project = TestProject::new("system-health");
+    project.write_manifest(&[]);
+
+    let health = request(&project, Method::GET, "/system/health", None).await;
+    assert_eq!(health.status, StatusCode::OK);
+    assert_eq!(health.body, json!({ "status": "ok" }));
+
+    let system_docs = request(&project, Method::GET, "/system/docs", None).await;
+    assert_eq!(system_docs.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn invokes_node_api_action() {
+    let project = TestProject::new("node-get");
+    project.add_node_action(
+        "hello.js",
+        r#"
+export default apiAction({
+  method: "GET",
+  path: "/node/hello",
+  handler(event, context) {
+    return {
+      message: "Hello from Node",
+      invocation_id: context.invocationId,
+      event,
+    };
+  },
+});
+"#,
+    );
+    project.write_manifest(&[node_action("GET", "/node/hello", "src/hello.js", "default")]);
+
+    let response = request(&project, Method::GET, "/node/hello", None).await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body["message"], json!("Hello from Node"));
+    assert!(response.body["invocation_id"].is_string());
+    assert_eq!(response.body["event"]["body"], json!(null));
+}
+
+#[tokio::test]
+async fn invokes_node_api_action_with_object_binding_and_schemas() {
+    let project = TestProject::new("node-binding");
+    project.add_node_action(
+        "store.js",
+        r#"
+const itemSchema = object({
+  sku: string(),
+  quantity: integer(),
+});
+
+export default apiAction({
+  method: "POST",
+  path: "/store/carts/{cart_id}",
+  query: {
+    confirm: boolean(),
+  },
+  body: object({
+    sku: string(),
+    quantity: integer(),
+  }),
+  response: object({
+    cart: itemSchema,
+    cart_id: string(),
+    confirmed: boolean(),
+  }),
+  handler({ path, query, body }) {
+    return {
+      cart: body,
+      cart_id: path.cart_id,
+      confirmed: query.confirm,
+    };
+  },
+});
+"#,
+    );
+    project.write_manifest(&[json!({
+        "runtime": "Node",
+        "kind": {
+            "Api": {
+                "method": "POST",
+                "path": "/store/carts/{cart_id}",
+                "query_params": [
+                    {
+                        "name": "confirm",
+                        "required": true,
+                        "schema": { "type": "boolean" }
+                    }
+                ],
+                "request_schema": {
+                    "type": "object",
+                    "required": ["sku", "quantity"],
+                    "properties": {
+                        "sku": { "type": "string" },
+                        "quantity": { "type": "integer" }
+                    }
+                },
+                "response_schema": {
+                    "type": "object",
+                    "required": ["cart", "cart_id", "confirmed"],
+                    "properties": {
+                        "cart": {
+                            "type": "object",
+                            "required": ["sku", "quantity"],
+                            "properties": {
+                                "sku": { "type": "string" },
+                                "quantity": { "type": "integer" }
+                            }
+                        },
+                        "cart_id": { "type": "string" },
+                        "confirmed": { "type": "boolean" }
+                    }
+                }
+            }
+        },
+        "source": "src/store.js",
+        "entrypoint": "default"
+    })]);
+
+    let response = request(
+        &project,
+        Method::POST,
+        "/store/carts/cart_123?confirm=true",
+        Some(json!({ "sku": "food_salmon_2kg", "quantity": 2 })),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body["cart_id"], json!("cart_123"));
+    assert_eq!(response.body["confirmed"], json!(true));
+    assert_eq!(response.body["cart"]["quantity"], json!(2));
+
+    let invalid_query = request(
+        &project,
+        Method::POST,
+        "/store/carts/cart_123?confirm=maybe",
+        Some(json!({ "sku": "food_salmon_2kg", "quantity": 2 })),
+    )
+    .await;
+    assert_eq!(invalid_query.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        invalid_query.body["error"],
+        json!("request_validation_failed")
+    );
+}
+
+#[tokio::test]
 async fn binds_path_params_query_params_and_json_body() {
     let project = TestProject::new("binding");
     project.add_action(

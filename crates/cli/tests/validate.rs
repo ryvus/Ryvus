@@ -16,11 +16,22 @@ def hello():
     return {"ok": True}
 "#,
     );
+    project.add_node_action(
+        "hello.js",
+        r#"
+export default apiAction({
+  method: "GET",
+  path: "/node/hello",
+  handler() {
+    return { ok: true };
+  },
+});
+"#,
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_ryvus"))
         .arg("validate")
         .current_dir(&project.root)
-        .env("RYVUS_ROOT", workspace_root())
         .output()
         .expect("validate command should run");
 
@@ -33,10 +44,11 @@ def hello():
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(stdout.contains("Discovered 1 action(s)"));
-    assert!(stdout.contains("Validated 1 action(s)"));
+    assert!(stdout.contains("Discovered 2 action(s)"));
+    assert!(stdout.contains("Validated 2 action(s)"));
     assert!(stdout.contains("GET"));
     assert!(stdout.contains("/hello"));
+    assert!(stdout.contains("/node/hello"));
 }
 
 struct TestProject {
@@ -64,6 +76,20 @@ impl TestProject {
         );
 
         fs::write(self.root.join("src").join(file), content).expect("action should be written");
+    }
+
+    fn add_node_action(&self, file: &str, body: &str) {
+        let sdk_path = workspace_root().join("sdk/node/dist/index.js");
+        let content = format!(
+            r#"import {{ apiAction }} from {sdk_path:?};
+{body}
+"#,
+            sdk_path = format!("file://{}", sdk_path.display()),
+            body = body,
+        );
+
+        fs::write(self.root.join("src").join(file), content)
+            .expect("node action should be written");
     }
 }
 

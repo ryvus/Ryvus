@@ -1,16 +1,19 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
-use axum::Router;
+use axum::{
+    http::header,
+    response::{Html, IntoResponse},
+    routing::get,
+    Json, Router,
+};
 use ryvus_action_catalog::{ActionService, FileActionCatalog};
 use ryvus_executor::{Executor, LocalProcessExecutor, LocalRuntimeResolver, RuntimeResolver};
 use ryvus_persistence::{ConsoleExecutionPersistence, ExecutionPersistence};
 use ryvus_protocol::{ActionDefinition, ActionKind};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use utoipa::OpenApi;
-use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
-    openapi::{public::build_public_openapi_json_from_actions, system::ApiDoc},
+    openapi::public::build_public_openapi_json_from_actions,
     registry::route_registry::RouteRegistry,
     routes::{public::dynamic::handle_dynamic_route, system::system_routes},
     state::{AppState, GatewayExecutionService},
@@ -72,18 +75,11 @@ pub fn build_app(config: &GatewayServerConfig) -> Result<Router, Box<dyn std::er
         execution_service,
     };
 
-    let system_swagger: Router<AppState> = SwaggerUi::new("/system/docs")
-        .url("/system/openapi.json", ApiDoc::openapi())
-        .into();
-
-    let public_swagger: Router<AppState> = SwaggerUi::new("/docs")
-        .external_url_unchecked("/openapi.json", public_openapi)
-        .into();
+    let docs_routes = docs_routes(public_openapi);
 
     Ok(Router::<AppState>::new()
         .merge(system_routes())
-        .merge(system_swagger)
-        .merge(public_swagger)
+        .merge(docs_routes)
         .fallback(handle_dynamic_route)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -109,17 +105,68 @@ pub async fn serve(config: GatewayServerConfig) -> Result<(), Box<dyn std::error
     let app = build_app(&config)?;
 
     tracing::info!("ryvus-gateway listening on http://{}", config.addr);
-    tracing::info!("public swagger available at http://{}/docs", config.addr);
-    tracing::info!(
-        "system swagger available at http://{}/system/docs",
-        config.addr
-    );
+    tracing::info!("public docs available at http://{}/docs", config.addr);
 
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
 
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+fn docs_routes(public_openapi: serde_json::Value) -> Router<AppState> {
+    let public_openapi = Arc::new(public_openapi);
+
+    Router::new()
+        .route(
+            "/openapi.json",
+            get({
+                let openapi = Arc::clone(&public_openapi);
+                move || {
+                    let openapi = Arc::clone(&openapi);
+                    async move { Json((*openapi).clone()) }
+                }
+            }),
+        )
+        .route(
+            "/docs",
+            get(|| async { Html(scalar_page("Ryvus Public API", "/openapi.json")) }),
+        )
+        .route("/assets/scalar-api-reference.js", get(scalar_asset))
+}
+
+fn scalar_page(title: &str, openapi_url: &str) -> String {
+    format!(
+        r##"<!doctype html>
+<html>
+  <head>
+    <title>{title}</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script src="/assets/scalar-api-reference.js"></script>
+    <script>
+      Scalar.createApiReference("#app", {{
+        url: "{openapi_url}",
+        theme: "default",
+        withDefaultFonts: false,
+      }});
+    </script>
+  </body>
+</html>"##
+    )
+}
+
+async fn scalar_asset() -> impl IntoResponse {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        include_str!("../assets/scalar-api-reference.js"),
+    )
 }
 
 fn validate_action_schemas<'a>(

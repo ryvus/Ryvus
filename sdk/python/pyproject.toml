@@ -13,3 +13,6 @@ dependencies = ["pydantic>=2,<3"]
 
 [tool.setuptools]
 packages = ["ryvus"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

@@ -9,6 +9,7 @@ import {
   type InvocationRequest,
   type JsonValue,
 } from "./protocol.js";
+import type { InferSchema, InferShape, Schema } from "./schema.js";
 
 export type ApiActionHandler =
   | ((event: JsonValue) => JsonValue | Promise<JsonValue>)
@@ -17,11 +18,102 @@ export type ApiActionHandler =
       context: InvocationContext,
     ) => JsonValue | Promise<JsonValue>);
 
-export function apiAction(handler: ApiActionHandler): void {
-  void runApiAction(handler);
+type QueryShape = Record<string, Schema>;
+type BodySchema = Schema | undefined;
+type ResponseSchema = Schema | undefined;
+
+export interface ApiActionInput<
+  Query extends QueryShape = QueryShape,
+  Body extends BodySchema = undefined,
+> {
+  path: Record<string, string>;
+  query: InferShape<Query>;
+  body: Body extends Schema ? InferSchema<Body> : JsonValue | null;
+  context: InvocationContext;
+  event: JsonValue;
 }
 
-async function runApiAction(handler: ApiActionHandler): Promise<void> {
+export type BoundApiActionHandler<
+  Query extends QueryShape = QueryShape,
+  Body extends BodySchema = undefined,
+  Response extends ResponseSchema = undefined,
+> = (
+  input: ApiActionInput<Query, Body>,
+) => Response extends Schema ? InferSchema<Response> | Promise<InferSchema<Response>> : JsonValue | Promise<JsonValue>;
+
+export interface ApiActionOptions<
+  Query extends QueryShape = QueryShape,
+  Body extends BodySchema = undefined,
+  Response extends ResponseSchema = undefined,
+> {
+  method?: string;
+  path?: string;
+  query?: Query;
+  body?: Body;
+  response?: Response;
+}
+
+export interface ApiActionDefinition {
+  __ryvusAction: true;
+  type: "api";
+  method: string;
+  path: string;
+  query: QueryShape;
+  body?: Schema;
+  response?: Schema;
+  handler: ApiActionHandler | BoundApiActionHandler;
+}
+
+export function apiAction(handler: ApiActionHandler): ApiActionDefinition;
+export function apiAction(
+  handler: ApiActionHandler,
+  options: ApiActionOptions,
+): ApiActionDefinition;
+export function apiAction<
+  Query extends QueryShape = QueryShape,
+  Body extends BodySchema = undefined,
+  Response extends ResponseSchema = undefined,
+>(
+  options: ApiActionOptions<Query, Body, Response> & {
+    handler: BoundApiActionHandler<Query, Body, Response>;
+  },
+): ApiActionDefinition;
+export function apiAction(
+  handlerOrOptions: ApiActionHandler | (ApiActionOptions & { handler: BoundApiActionHandler }),
+  maybeOptions: ApiActionOptions = {},
+): ApiActionDefinition {
+  const handler =
+    typeof handlerOrOptions === "function"
+      ? handlerOrOptions
+      : handlerOrOptions.handler;
+  const options =
+    typeof handlerOrOptions === "function" ? maybeOptions : handlerOrOptions;
+
+  const action: ApiActionDefinition = {
+    __ryvusAction: true,
+    type: "api",
+    method: options.method ?? "GET",
+    path: options.path ?? "/",
+    query: options.query ?? {},
+    handler,
+  };
+
+  if (options.body !== undefined) {
+    action.body = options.body;
+  }
+
+  if (options.response !== undefined) {
+    action.response = options.response;
+  }
+
+  if (process.env.RYVUS_DISCOVER !== "1") {
+    void runApiAction(handler);
+  }
+
+  return action;
+}
+
+async function runApiAction(handler: ApiActionHandler | BoundApiActionHandler): Promise<void> {
   let request: InvocationRequest | null = null;
 
   try {
@@ -30,7 +122,7 @@ async function runApiAction(handler: ApiActionHandler): Promise<void> {
     installConsoleCapture(request.invocation_id);
 
     const context = createInvocationContext(request);
-    const output = await handler(request.event, context);
+    const output = await callHandler(handler, request, context);
 
     writeInvocationMessage(
       createResultMessage(createSuccessResult(request, output)),
@@ -44,6 +136,60 @@ async function runApiAction(handler: ApiActionHandler): Promise<void> {
       createResultMessage(createFailureResult(request, error)),
     );
   }
+}
+
+async function callHandler(
+  handler: ApiActionHandler | BoundApiActionHandler,
+  request: InvocationRequest,
+  context: InvocationContext,
+): Promise<JsonValue> {
+  const event = eventObject(request.event);
+
+  if (handler.length >= 2) {
+    return await (handler as ApiActionHandler)(request.event, context);
+  }
+
+  return await (handler as BoundApiActionHandler)({
+    path: event.path_params ?? {},
+    query: coerceQuery(event.query_params ?? {}),
+    body: event.body ?? null,
+    context,
+    event: request.event,
+  });
+}
+
+function eventObject(event: JsonValue): {
+  body?: JsonValue;
+  query_params?: Record<string, string>;
+  path_params?: Record<string, string>;
+} {
+  if (typeof event === "object" && event !== null && !Array.isArray(event)) {
+    return event as {
+      body?: JsonValue;
+      query_params?: Record<string, string>;
+      path_params?: Record<string, string>;
+    };
+  }
+
+  return { body: event };
+}
+
+function coerceQuery(query: Record<string, string>): Record<string, JsonValue> {
+  const output: Record<string, JsonValue> = {};
+
+  for (const [key, value] of Object.entries(query)) {
+    if (/^-?\d+$/.test(value)) {
+      output[key] = Number.parseInt(value, 10);
+    } else if (/^-?\d+\.\d+$/.test(value)) {
+      output[key] = Number.parseFloat(value);
+    } else if (["true", "false"].includes(value.toLowerCase())) {
+      output[key] = value.toLowerCase() === "true";
+    } else {
+      output[key] = value;
+    }
+  }
+
+  return output;
 }
 
 async function readInvocationRequest(): Promise<InvocationRequest> {

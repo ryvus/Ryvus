@@ -1,20 +1,88 @@
+use std::path::{Path, PathBuf};
+
 use crate::error::{CliError, Result};
 
 pub fn configure_python_path() {
-    let Some(ryvus_root) = std::env::var("RYVUS_ROOT").ok() else {
+    let Ok(ryvus_root) = ryvus_root() else {
         return;
     };
 
-    let sdk_path = std::path::PathBuf::from(ryvus_root).join("sdk/python");
+    prepend_python_path(ryvus_root.join("sdk/python"));
+}
+
+pub fn python_path() -> Result<String> {
+    let sdk_path = ryvus_root()?.join("sdk/python");
     let existing = std::env::var("PYTHONPATH").unwrap_or_default();
 
+    Ok(if existing.is_empty() {
+        sdk_path.display().to_string()
+    } else {
+        format!("{}:{}", sdk_path.display(), existing)
+    })
+}
+
+pub fn ryvus_root() -> Result<PathBuf> {
+    if let Some(root) = std::env::var_os("RYVUS_ROOT")
+        .map(PathBuf::from)
+        .and_then(valid_root)
+    {
+        return Ok(root);
+    }
+
+    if let Some(root) = option_env!("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .and_then(|path| path.parent().and_then(Path::parent).map(Path::to_path_buf))
+        .and_then(valid_root)
+    {
+        return Ok(root);
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(root) = find_root_near(&exe) {
+            return Ok(root);
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(root) = find_root_near(&cwd) {
+            return Ok(root);
+        }
+    }
+
+    Err(CliError::Validation(
+        "could not find Ryvus root; set RYVUS_ROOT".to_string(),
+    ))
+}
+
+fn prepend_python_path(sdk_path: PathBuf) {
+    let existing = std::env::var("PYTHONPATH").unwrap_or_default();
     let pythonpath = if existing.is_empty() {
-        sdk_path.to_string_lossy().to_string()
+        sdk_path.display().to_string()
     } else {
         format!("{}:{}", sdk_path.display(), existing)
     };
 
     std::env::set_var("PYTHONPATH", pythonpath);
+}
+
+fn find_root_near(path: &Path) -> Option<PathBuf> {
+    for ancestor in path.ancestors() {
+        if let Some(root) = valid_root(ancestor.to_path_buf()) {
+            return Some(root);
+        }
+
+        if let Some(root) = valid_root(ancestor.join("ryvus")) {
+            return Some(root);
+        }
+    }
+
+    None
+}
+
+fn valid_root(path: PathBuf) -> Option<PathBuf> {
+    let root = path.canonicalize().ok()?;
+
+    root.join("sdk/python").is_dir().then_some(root)
 }
 
 pub fn gateway_config() -> Result<ryvus_gateway::server::GatewayServerConfig> {
