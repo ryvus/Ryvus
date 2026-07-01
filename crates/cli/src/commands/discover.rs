@@ -45,9 +45,13 @@ pub fn discover_project(project_root: impl AsRef<Path>) -> Result<ActionManifest
 
 fn discover_python_actions(
     project_root: &Path,
-    _dir: &Path,
+    dir: &Path,
     actions: &mut Vec<ActionDefinition>,
 ) -> Result<()> {
+    if !has_python_sources(dir) {
+        return Ok(());
+    }
+
     let output = Command::new("python")
         .args([
             "-m",
@@ -59,12 +63,16 @@ fn discover_python_actions(
         ])
         .env("PYTHONPATH", project::python_path()?)
         .output()
-        .map_err(CliError::Io)?;
+        .map_err(|error| {
+            CliError::Validation(format!(
+                "Python discovery failed: could not start python: {error}"
+            ))
+        })?;
 
     if !output.status.success() {
         return Err(CliError::Validation(format!(
             "Python discovery failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
+            command_output(&output)
         )));
     }
 
@@ -100,6 +108,13 @@ fn discover_node_actions_from(
     }
 
     let discover_script = node_discover_script()?;
+    if !discover_script.is_file() {
+        return Err(CliError::Validation(format!(
+            "Node discovery failed: discovery script not found at {}. Build the Node SDK first.",
+            discover_script.display()
+        )));
+    }
+
     let output = Command::new("node")
         .args([
             discover_script.to_str().ok_or_else(|| {
@@ -115,12 +130,16 @@ fn discover_node_actions_from(
             })?,
         ])
         .output()
-        .map_err(CliError::Io)?;
+        .map_err(|error| {
+            CliError::Validation(format!(
+                "Node discovery failed: could not start node: {error}"
+            ))
+        })?;
 
     if !output.status.success() {
         return Err(CliError::Validation(format!(
             "Node discovery failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
+            command_output(&output)
         )));
     }
 
@@ -149,6 +168,13 @@ fn compile_typescript(project_root: &Path) -> Result<()> {
         .join(".bin")
         .join("tsc");
 
+    if !tsc.is_file() {
+        return Err(CliError::Validation(format!(
+            "TypeScript build failed: tsc not found at {}. Run npm install in sdk/node.",
+            tsc.display()
+        )));
+    }
+
     let output = Command::new(tsc)
         .args([
             "-p",
@@ -157,12 +183,16 @@ fn compile_typescript(project_root: &Path) -> Result<()> {
             })?,
         ])
         .output()
-        .map_err(CliError::Io)?;
+        .map_err(|error| {
+            CliError::Validation(format!(
+                "TypeScript build failed: could not start tsc: {error}"
+            ))
+        })?;
 
     if !output.status.success() {
         return Err(CliError::Validation(format!(
             "TypeScript build failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
+            command_output(&output)
         )));
     }
 
@@ -200,6 +230,29 @@ fn has_node_sources(dir: &Path) -> bool {
     false
 }
 
+fn has_python_sources(dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+
+        if path.is_dir() && has_python_sources(&path) {
+            return true;
+        }
+
+        if matches!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("py")
+        ) {
+            return true;
+        }
+    }
+
+    false
+}
+
 fn has_ts_sources(dir: &Path) -> bool {
     let Ok(entries) = fs::read_dir(dir) else {
         return false;
@@ -221,4 +274,16 @@ fn has_ts_sources(dir: &Path) -> bool {
     }
 
     false
+}
+
+fn command_output(output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    match (stdout.trim(), stderr.trim()) {
+        ("", "") => format!("process exited with status {}", output.status),
+        ("", stderr) => stderr.to_string(),
+        (stdout, "") => stdout.to_string(),
+        (stdout, stderr) => format!("{stdout}\n{stderr}"),
+    }
 }

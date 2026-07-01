@@ -80,7 +80,11 @@ impl Executor for LocalProcessExecutor {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()?;
+            .spawn()
+            .map_err(|io_error| ExecutorError::ProcessStartFailed {
+                command: target.command.clone(),
+                io_error,
+            })?;
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(&request_json)?;

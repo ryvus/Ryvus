@@ -15,6 +15,19 @@ pub enum ExecutorError {
         stderr: String,
     },
 
+    #[error("process failed to start: command={command}, error={io_error}")]
+    ProcessStartFailed {
+        command: String,
+        io_error: std::io::Error,
+    },
+
+    #[error("runtime source file not found for {runtime} action {action}: {path}")]
+    RuntimeSourceMissing {
+        runtime: String,
+        action: String,
+        path: String,
+    },
+
     #[error("process timed out: command={command}, timeout_ms={timeout_ms}")]
     ProcessTimedOut { command: String, timeout_ms: u128 },
 

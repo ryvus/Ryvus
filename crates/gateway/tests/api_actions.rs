@@ -458,6 +458,19 @@ async fn validates_unsupported_methods_and_invalid_paths_at_startup() {
     assert!(error.to_string().contains("path must start"));
 }
 
+#[tokio::test]
+async fn validates_runtime_sources_at_startup() {
+    let project = TestProject::new("missing-runtime-source");
+    project.write_manifest(&[node_action("GET", "/missing", "src/missing.js", "default")]);
+
+    let error = server::build_app(&project.config()).expect_err("missing source should fail");
+
+    assert!(error
+        .to_string()
+        .contains("runtime source file not found for Node action"));
+    assert!(error.to_string().contains("src/missing.js"));
+}
+
 #[test]
 fn openapi_uses_discovered_routes_and_stable_operation_ids() {
     let mut actions = vec![

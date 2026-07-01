@@ -51,6 +51,70 @@ export default apiAction({
     assert!(stdout.contains("/node/hello"));
 }
 
+#[test]
+fn validate_discovers_node_only_projects() {
+    let project = TestProject::new("validate-node-only");
+    project.add_node_action(
+        "hello.js",
+        r#"
+export default apiAction({
+  method: "GET",
+  path: "/node/hello",
+  handler() {
+    return { ok: true };
+  },
+});
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ryvus"))
+        .arg("validate")
+        .current_dir(&project.root)
+        .output()
+        .expect("validate command should run");
+
+    assert!(
+        output.status.success(),
+        "validate failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stdout.contains("Discovered 1 action(s)"));
+    assert!(stdout.contains("/node/hello"));
+}
+
+#[test]
+fn validate_reports_missing_typescript_config() {
+    let project = TestProject::new("validate-ts-no-config");
+    project.add_ts_action(
+        "hello.ts",
+        r#"
+export default apiAction({
+  method: "GET",
+  path: "/ts/hello",
+  handler() {
+    return { ok: true };
+  },
+});
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ryvus"))
+        .arg("validate")
+        .current_dir(&project.root)
+        .output()
+        .expect("validate command should run");
+
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(stderr.contains("TypeScript actions require tsconfig.json"));
+}
+
 struct TestProject {
     root: PathBuf,
 }
@@ -90,6 +154,20 @@ impl TestProject {
 
         fs::write(self.root.join("src").join(file), content)
             .expect("node action should be written");
+    }
+
+    fn add_ts_action(&self, file: &str, body: &str) {
+        let sdk_path = workspace_root().join("sdk/node/src/index.ts");
+        let content = format!(
+            r#"import {{ apiAction }} from {sdk_path:?};
+{body}
+"#,
+            sdk_path = format!("file://{}", sdk_path.display()),
+            body = body,
+        );
+
+        fs::write(self.root.join("src").join(file), content)
+            .expect("TypeScript action should be written");
     }
 }
 

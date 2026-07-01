@@ -55,8 +55,9 @@ pub fn build_app(config: &GatewayServerConfig) -> Result<Router, Box<dyn std::er
     let action_catalog = FileActionCatalog::load(&manifest_path)?;
 
     validate_action_schemas(action_catalog.all())?;
-    let public_openapi = build_public_openapi_json_from_actions(action_catalog.all());
     let route_registry = RouteRegistry::from_actions(action_catalog.all())?;
+    validate_runtime_targets(config.project_root.clone(), action_catalog.all())?;
+    let public_openapi = build_public_openapi_json_from_actions(action_catalog.all());
 
     let action_service = Arc::new(ActionService::new(action_catalog));
 
@@ -94,6 +95,7 @@ pub fn validate_config(
 
     validate_action_schemas(actions.iter().copied())?;
     RouteRegistry::from_actions(actions.iter().copied())?;
+    validate_runtime_targets(config.project_root.clone(), actions.iter().copied())?;
 
     Ok(GatewayValidation {
         action_count: actions.len(),
@@ -204,6 +206,19 @@ fn validate_action_schemas<'a>(
                 )
             })?;
         }
+    }
+
+    Ok(())
+}
+
+fn validate_runtime_targets<'a>(
+    project_root: PathBuf,
+    actions: impl IntoIterator<Item = &'a ActionDefinition>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let resolver = LocalRuntimeResolver::with_project_root(project_root);
+
+    for action in actions {
+        resolver.resolve(action)?;
     }
 
     Ok(())
