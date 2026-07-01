@@ -115,6 +115,62 @@ export default apiAction({
     assert!(stderr.contains("TypeScript actions require tsconfig.json"));
 }
 
+#[test]
+fn validate_discovers_scheduled_actions() {
+    let project = TestProject::new("validate-schedule");
+    project.add_schedule_action(
+        "sync.py",
+        r#"
+@scheduled_action(every="10s")
+def sync_inventory(context):
+    return {"ok": True}
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ryvus"))
+        .arg("validate")
+        .current_dir(&project.root)
+        .output()
+        .expect("validate command should run");
+
+    assert!(
+        output.status.success(),
+        "validate failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stdout.contains("Discovered 1 action(s)"));
+    assert!(stdout.contains("Validated 1 action(s)"));
+}
+
+#[test]
+fn validate_rejects_invalid_scheduled_actions() {
+    let project = TestProject::new("validate-bad-schedule");
+    project.add_schedule_action(
+        "sync.py",
+        r#"
+@scheduled_action(every="daily")
+def sync_inventory(context):
+    return {"ok": True}
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ryvus"))
+        .arg("validate")
+        .current_dir(&project.root)
+        .output()
+        .expect("validate command should run");
+
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(stderr.contains("invalid schedule expression"));
+}
+
 struct TestProject {
     root: PathBuf,
 }
@@ -140,6 +196,17 @@ impl TestProject {
         );
 
         fs::write(self.root.join("src").join(file), content).expect("action should be written");
+    }
+
+    fn add_schedule_action(&self, file: &str, body: &str) {
+        let content = format!(
+            r#"from ryvus import scheduled_action
+{body}
+"#,
+        );
+
+        fs::write(self.root.join("src").join(file), content)
+            .expect("schedule action should be written");
     }
 
     fn add_node_action(&self, file: &str, body: &str) {

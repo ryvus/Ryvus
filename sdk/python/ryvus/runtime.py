@@ -8,7 +8,7 @@ import traceback
 from typing import Any, Callable
 
 from .context import Context
-from .events import ApiEvent
+from .events import ApiEvent, ScheduleEvent
 from .resolver import resolve_handler_args
 
 Handler = Callable[..., dict[str, Any]]
@@ -38,14 +38,23 @@ class _InvocationLogHandler(logging.Handler):
 
 
 def run_api(handler: Handler) -> None:
+    run_handler(handler, event_from_api_request)
+
+
+def run_schedule(handler: Handler) -> None:
+    run_handler(handler, event_from_schedule_request)
+
+
+def run_handler(handler: Handler, event_factory) -> None:
     protocol_stdout = sys.stdout
     captured_stdout = io.StringIO()
 
     with contextlib.redirect_stdout(captured_stdout):
         request = json.load(sys.stdin)
-        messages = handle_api_request(
+        messages = handle_request(
             request=request,
             handler=handler,
+            event_factory=event_factory,
             captured_stdout=captured_stdout,
         )
 
@@ -60,6 +69,20 @@ def handle_api_request(
     handler: Handler,
     captured_stdout: io.StringIO | None = None,
 ) -> list[dict[str, Any]]:
+    return handle_request(
+        request=request,
+        handler=handler,
+        event_factory=event_from_api_request,
+        captured_stdout=captured_stdout,
+    )
+
+
+def handle_request(
+    request: dict[str, Any],
+    handler: Handler,
+    event_factory,
+    captured_stdout: io.StringIO | None = None,
+) -> list[dict[str, Any]]:
     captured_stdout = captured_stdout or io.StringIO()
 
     invocation_id = request["invocation_id"]
@@ -69,13 +92,7 @@ def handle_api_request(
     root_logger = logging.getLogger()
     root_logger.addHandler(log_handler)
 
-    raw_event = request.get("event") or {}
-
-    event = ApiEvent(
-        body=raw_event.get("body"),
-        query_params=raw_event.get("query_params") or {},
-        path_params=raw_event.get("path_params") or {},
-    )
+    event = event_factory(request.get("event") or {})
 
     context = Context(
         invocation_id=invocation_id,
@@ -153,6 +170,22 @@ def _call_handler(
 ) -> Any:
     kwargs = resolve_handler_args(handler, event, context)
     return handler(**kwargs)
+
+
+def event_from_api_request(raw_event: dict[str, Any]) -> ApiEvent:
+    return ApiEvent(
+        body=raw_event.get("body"),
+        query_params=raw_event.get("query_params") or {},
+        path_params=raw_event.get("path_params") or {},
+    )
+
+
+def event_from_schedule_request(raw_event: dict[str, Any]) -> ScheduleEvent:
+    return ScheduleEvent(
+        trigger=raw_event.get("trigger") or "schedule",
+        scheduled_at=raw_event.get("scheduled_at"),
+        expression=raw_event.get("expression") or "",
+    )
 
 
 def _map_python_log_level(level: int) -> str:

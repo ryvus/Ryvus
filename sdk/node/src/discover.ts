@@ -2,7 +2,7 @@ import { readdir } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import type { ApiActionDefinition } from "./api.js";
+import type { ApiActionDefinition, ScheduledActionDefinition } from "./api.js";
 
 interface ActionManifest {
   actions: unknown[];
@@ -19,28 +19,41 @@ for (const file of await sourceFiles(sourceRoot)) {
   const module = await import(`${pathToFileURL(file).href}?t=${Date.now()}`);
   const action = module.default;
 
-  if (!isApiAction(action)) {
+  if (!isRyvusAction(action)) {
     continue;
   }
 
-  manifest.actions.push({
-    runtime: "Node",
-    kind: {
-      Api: {
-        method: action.method,
-        path: action.path,
-        query_params: Object.entries(action.query).map(([name, schema]) => ({
-          name,
-          required: schema.required,
-          schema: schema.jsonSchema,
-        })),
-        ...(action.body ? { request_schema: action.body.jsonSchema } : {}),
-        ...(action.response ? { response_schema: action.response.jsonSchema } : {}),
+  if (action.type === "api") {
+    manifest.actions.push({
+      runtime: "Node",
+      kind: {
+        Api: {
+          method: action.method,
+          path: action.path,
+          query_params: Object.entries(action.query).map(([name, schema]) => ({
+            name,
+            required: schema.required,
+            schema: schema.jsonSchema,
+          })),
+          ...(action.body ? { request_schema: action.body.jsonSchema } : {}),
+          ...(action.response ? { response_schema: action.response.jsonSchema } : {}),
+        },
       },
-    },
-    source: relative(projectRoot, file),
-    entrypoint: "default",
-  });
+      source: relative(projectRoot, file),
+      entrypoint: "default",
+    });
+  } else {
+    manifest.actions.push({
+      runtime: "Node",
+      kind: {
+        Schedule: {
+          expression: action.expression,
+        },
+      },
+      source: relative(projectRoot, file),
+      entrypoint: "default",
+    });
+  }
 }
 
 process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
@@ -85,11 +98,13 @@ async function sourceFiles(root: string): Promise<string[]> {
   return files;
 }
 
-function isApiAction(value: unknown): value is ApiActionDefinition {
+function isRyvusAction(
+  value: unknown,
+): value is ApiActionDefinition | ScheduledActionDefinition {
   return (
     typeof value === "object" &&
     value !== null &&
     (value as ApiActionDefinition).__ryvusAction === true &&
-    (value as ApiActionDefinition).type === "api"
+    ["api", "schedule"].includes((value as ApiActionDefinition).type)
   );
 }

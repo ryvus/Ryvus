@@ -55,29 +55,37 @@ def discover_actions(project_root: Path, source_root: Path) -> list[dict[str, An
             if not metadata:
                 continue
 
-            if metadata.get("type") != "api":
+            if metadata.get("type") == "api":
+                request_schema, response_schema = schemas_from_handler(obj)
+
+                api_config: dict[str, Any] = {
+                    "method": metadata["method"],
+                    "path": metadata["path"],
+                    "query_params": query_params_from_handler(obj, metadata["path"]),
+                }
+
+                if request_schema is not None:
+                    api_config["request_schema"] = request_schema
+
+                if response_schema is not None:
+                    api_config["response_schema"] = response_schema
+
+                kind = {
+                    "Api": api_config,
+                }
+            elif metadata.get("type") == "schedule":
+                kind = {
+                    "Schedule": {
+                        "expression": metadata["expression"],
+                    },
+                }
+            else:
                 continue
-
-            request_schema, response_schema = schemas_from_handler(obj)
-
-            api_config: dict[str, Any] = {
-                "method": metadata["method"],
-                "path": metadata["path"],
-                "query_params": query_params_from_handler(obj, metadata["path"]),
-            }
-
-            if request_schema is not None:
-                api_config["request_schema"] = request_schema
-
-            if response_schema is not None:
-                api_config["response_schema"] = response_schema
 
             actions.append(
                 {
                     "runtime": "Python",
-                    "kind": {
-                        "Api": api_config,
-                    },
+                    "kind": kind,
                     "source": str(path.relative_to(project_root)),
                     "entrypoint": obj.__name__,
                 }

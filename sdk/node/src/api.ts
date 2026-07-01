@@ -64,6 +64,22 @@ export interface ApiActionDefinition {
   handler: ApiActionHandler | BoundApiActionHandler;
 }
 
+export interface ScheduledActionInput {
+  context: InvocationContext;
+  event: JsonValue;
+}
+
+export type ScheduledActionHandler = (
+  input: ScheduledActionInput,
+) => JsonValue | Promise<JsonValue>;
+
+export interface ScheduledActionDefinition {
+  __ryvusAction: true;
+  type: "schedule";
+  expression: string;
+  handler: ScheduledActionHandler;
+}
+
 export function apiAction(handler: ApiActionHandler): ApiActionDefinition;
 export function apiAction(
   handler: ApiActionHandler,
@@ -113,6 +129,26 @@ export function apiAction(
   return action;
 }
 
+export function scheduledAction(options: {
+  every: string;
+  handler: ScheduledActionHandler;
+}): ScheduledActionDefinition {
+  const action: ScheduledActionDefinition = {
+    __ryvusAction: true,
+    type: "schedule",
+    expression: options.every.startsWith("every ")
+      ? options.every
+      : `every ${options.every}`,
+    handler: options.handler,
+  };
+
+  if (process.env.RYVUS_DISCOVER !== "1") {
+    void runScheduledAction(options.handler);
+  }
+
+  return action;
+}
+
 async function runApiAction(handler: ApiActionHandler | BoundApiActionHandler): Promise<void> {
   let request: InvocationRequest | null = null;
 
@@ -123,6 +159,34 @@ async function runApiAction(handler: ApiActionHandler | BoundApiActionHandler): 
 
     const context = createInvocationContext(request);
     const output = await callHandler(handler, request, context);
+
+    writeInvocationMessage(
+      createResultMessage(createSuccessResult(request, output)),
+    );
+  } catch (error) {
+    if (request === null) {
+      throw error;
+    }
+
+    writeInvocationMessage(
+      createResultMessage(createFailureResult(request, error)),
+    );
+  }
+}
+
+async function runScheduledAction(handler: ScheduledActionHandler): Promise<void> {
+  let request: InvocationRequest | null = null;
+
+  try {
+    request = await readInvocationRequest();
+
+    installConsoleCapture(request.invocation_id);
+
+    const context = createInvocationContext(request);
+    const output = await handler({
+      context,
+      event: request.event,
+    });
 
     writeInvocationMessage(
       createResultMessage(createSuccessResult(request, output)),

@@ -1059,8 +1059,10 @@ name = "ryvus-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ryvus-action-catalog",
  "ryvus-gateway",
  "ryvus-protocol",
+ "ryvus-scheduler",
  "serde_json",
  "thiserror",
  "tokio",
@@ -1145,6 +1147,19 @@ dependencies = [
  "serde_json",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "ryvus-scheduler"
+version = "0.1.0"
+dependencies = [
+ "ryvus-execution-service",
+ "ryvus-executor",
+ "ryvus-persistence",
+ "ryvus-protocol",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

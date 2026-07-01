@@ -1,8 +1,12 @@
 export {
   apiAction,
+  scheduledAction,
   type ApiActionDefinition,
   type ApiActionHandler,
   type ApiActionOptions,
+  type ScheduledActionDefinition,
+  type ScheduledActionHandler,
+  type ScheduledActionInput,
 } from "./api.js";
 export {
   array,

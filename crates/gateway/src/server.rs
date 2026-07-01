@@ -50,6 +50,13 @@ impl GatewayServerConfig {
 }
 
 pub fn build_app(config: &GatewayServerConfig) -> Result<Router, Box<dyn std::error::Error>> {
+    build_app_with_execution_service(config, build_execution_service(config.project_root.clone()))
+}
+
+pub fn build_app_with_execution_service(
+    config: &GatewayServerConfig,
+    execution_service: Arc<GatewayExecutionService>,
+) -> Result<Router, Box<dyn std::error::Error>> {
     let manifest_path = config.manifest_path();
 
     let action_catalog = FileActionCatalog::load(&manifest_path)?;
@@ -60,15 +67,6 @@ pub fn build_app(config: &GatewayServerConfig) -> Result<Router, Box<dyn std::er
     let public_openapi = build_public_openapi_json_from_actions(action_catalog.all());
 
     let action_service = Arc::new(ActionService::new(action_catalog));
-
-    let execution_service: Arc<GatewayExecutionService> =
-        Arc::new(ryvus_execution_service::ExecutionService::new(
-            Arc::new(LocalRuntimeResolver::with_project_root(
-                config.project_root.clone(),
-            )) as Arc<dyn RuntimeResolver>,
-            Arc::new(LocalProcessExecutor::new()) as Arc<dyn Executor>,
-            Arc::new(ConsoleExecutionPersistence) as Arc<dyn ExecutionPersistence>,
-        ));
 
     let state = AppState {
         route_registry: Arc::new(route_registry),
@@ -85,6 +83,14 @@ pub fn build_app(config: &GatewayServerConfig) -> Result<Router, Box<dyn std::er
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state))
+}
+
+pub fn build_execution_service(project_root: PathBuf) -> Arc<GatewayExecutionService> {
+    Arc::new(ryvus_execution_service::ExecutionService::new(
+        Arc::new(LocalRuntimeResolver::with_project_root(project_root)) as Arc<dyn RuntimeResolver>,
+        Arc::new(LocalProcessExecutor::new()) as Arc<dyn Executor>,
+        Arc::new(ConsoleExecutionPersistence) as Arc<dyn ExecutionPersistence>,
+    ))
 }
 
 pub fn validate_config(
@@ -104,7 +110,14 @@ pub fn validate_config(
 }
 
 pub async fn serve(config: GatewayServerConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let app = build_app(&config)?;
+    serve_with_execution_service(config.clone(), build_execution_service(config.project_root)).await
+}
+
+pub async fn serve_with_execution_service(
+    config: GatewayServerConfig,
+    execution_service: Arc<GatewayExecutionService>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let app = build_app_with_execution_service(&config, execution_service)?;
 
     tracing::info!("ryvus-gateway listening on http://{}", config.addr);
     tracing::info!("public docs available at http://{}/docs", config.addr);

@@ -1,6 +1,6 @@
 from typing import Any, Callable, Optional, TypeVar, overload
 
-from .runtime import run_api
+from .runtime import run_api, run_schedule
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -39,6 +39,42 @@ def api_action(
 
         if module_name == "__main__":
             run_api(inner)
+
+        return inner
+
+    if func is not None:
+        return decorate(func)
+
+    return decorate
+
+
+@overload
+def scheduled_action(func: F) -> F:
+    ...
+
+
+@overload
+def scheduled_action(*, every: str) -> Callable[[F], F]:
+    ...
+
+
+def scheduled_action(
+    func: Optional[F] = None,
+    *,
+    every: str = "60s",
+):
+    def decorate(inner: F) -> F:
+        metadata = {
+            "type": "schedule",
+            "expression": f"every {every}" if not every.startswith("every ") else every,
+        }
+
+        setattr(inner, "__ryvus_action__", metadata)
+
+        module_name = getattr(inner, "__module__", None)
+
+        if module_name == "__main__":
+            run_schedule(inner)
 
         return inner
 
