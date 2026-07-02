@@ -84,6 +84,15 @@ export default apiAction({
 
     assert!(stdout.contains("Discovered 1 action(s)"));
     assert!(stdout.contains("/node/hello"));
+
+    let manifest: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project.root.join(".ryvus/action-manifest.json"))
+            .expect("manifest should be written"),
+    )
+    .expect("manifest should parse");
+
+    assert_eq!(manifest["actions"][0]["entrypoint"], "default");
+    assert_eq!(manifest["actions"][0]["name"], "hello");
 }
 
 #[test]
@@ -169,6 +178,93 @@ def sync_inventory(context):
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(stderr.contains("invalid schedule expression"));
+}
+
+#[test]
+fn schedule_list_prints_discovered_schedules() {
+    let project = TestProject::new("schedule-list");
+    project.add_schedule_action(
+        "sync.py",
+        r#"
+@scheduled_action(every="10s")
+def sync_inventory(context):
+    return {"ok": True}
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ryvus"))
+        .args(["schedule", "list"])
+        .current_dir(&project.root)
+        .output()
+        .expect("schedule list should run");
+
+    assert!(
+        output.status.success(),
+        "schedule list failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("sync_inventory"));
+    assert!(stdout.contains("every 10s"));
+    assert!(stdout.contains("src/sync.py::sync_inventory"));
+}
+
+#[test]
+fn schedule_run_executes_one_schedule() {
+    let project = TestProject::new("schedule-run");
+    project.add_schedule_action(
+        "sync.py",
+        r#"
+@scheduled_action(every="10s")
+def sync_inventory(event):
+    print("sync log")
+    return {"expression": event.expression}
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ryvus"))
+        .args(["schedule", "run", "sync_inventory"])
+        .current_dir(&project.root)
+        .output()
+        .expect("schedule run should run");
+
+    assert!(
+        output.status.success(),
+        "schedule run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("status: success"));
+    assert!(
+        stdout.contains("\"expression\":\"every 10s\"")
+            || stdout.contains("\"expression\": \"every 10s\"")
+    );
+}
+
+#[test]
+fn schedule_run_reports_unknown_selector() {
+    let project = TestProject::new("schedule-run-missing");
+    project.add_schedule_action(
+        "sync.py",
+        r#"
+@scheduled_action(every="10s")
+def sync_inventory(context):
+    return {"ok": True}
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ryvus"))
+        .args(["schedule", "run", "missing"])
+        .current_dir(&project.root)
+        .output()
+        .expect("schedule run should run");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("schedule not found"));
 }
 
 struct TestProject {

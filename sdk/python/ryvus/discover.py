@@ -88,6 +88,7 @@ def discover_actions(project_root: Path, source_root: Path) -> list[dict[str, An
                     "kind": kind,
                     "source": str(path.relative_to(project_root)),
                     "entrypoint": obj.__name__,
+                    "name": metadata.get("name", obj.__name__),
                 }
             )
 

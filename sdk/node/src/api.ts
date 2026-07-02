@@ -46,6 +46,7 @@ export interface ApiActionOptions<
   Body extends BodySchema = undefined,
   Response extends ResponseSchema = undefined,
 > {
+  name?: string;
   method?: string;
   path?: string;
   query?: Query;
@@ -56,6 +57,7 @@ export interface ApiActionOptions<
 export interface ApiActionDefinition {
   __ryvusAction: true;
   type: "api";
+  name?: string;
   method: string;
   path: string;
   query: QueryShape;
@@ -76,6 +78,7 @@ export type ScheduledActionHandler = (
 export interface ScheduledActionDefinition {
   __ryvusAction: true;
   type: "schedule";
+  name?: string;
   expression: string;
   handler: ScheduledActionHandler;
 }
@@ -108,6 +111,7 @@ export function apiAction(
   const action: ApiActionDefinition = {
     __ryvusAction: true,
     type: "api",
+    ...(options.name ? { name: options.name } : {}),
     method: options.method ?? "GET",
     path: options.path ?? "/",
     query: options.query ?? {},
@@ -130,12 +134,14 @@ export function apiAction(
 }
 
 export function scheduledAction(options: {
+  name?: string;
   every: string;
   handler: ScheduledActionHandler;
 }): ScheduledActionDefinition {
   const action: ScheduledActionDefinition = {
     __ryvusAction: true,
     type: "schedule",
+    ...(options.name ? { name: options.name } : {}),
     expression: options.every.startsWith("every ")
       ? options.every
       : `every ${options.every}`,

@@ -7,13 +7,13 @@ use axum::{
     Json, Router,
 };
 use ryvus_action_catalog::{ActionService, FileActionCatalog};
+use ryvus_docs::{DocsRegistry, DocsRegistryBuilder, GeneratedCatalogDocsSource};
 use ryvus_executor::{Executor, LocalProcessExecutor, LocalRuntimeResolver, RuntimeResolver};
 use ryvus_persistence::{ConsoleExecutionPersistence, ExecutionPersistence};
 use ryvus_protocol::{ActionDefinition, ActionKind};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::{
-    openapi::public::build_public_openapi_json_from_actions,
     registry::route_registry::RouteRegistry,
     routes::{public::dynamic::handle_dynamic_route, system::system_routes},
     state::{AppState, GatewayExecutionService},
@@ -63,8 +63,11 @@ pub fn build_app_with_execution_service(
 
     validate_action_schemas(action_catalog.all())?;
     let route_registry = RouteRegistry::from_actions(action_catalog.all())?;
+    ryvus_scheduler::validate_schedule_actions(action_catalog.all())?;
     validate_runtime_targets(config.project_root.clone(), action_catalog.all())?;
-    let public_openapi = build_public_openapi_json_from_actions(action_catalog.all());
+    let docs_registry = DocsRegistryBuilder::new()
+        .add_provider(GeneratedCatalogDocsSource::new(action_catalog.all()))
+        .build()?;
 
     let action_service = Arc::new(ActionService::new(action_catalog));
 
@@ -74,7 +77,7 @@ pub fn build_app_with_execution_service(
         execution_service,
     };
 
-    let docs_routes = docs_routes(public_openapi);
+    let docs_routes = docs_routes(docs_registry)?;
 
     Ok(Router::<AppState>::new()
         .merge(system_routes())
@@ -129,10 +132,10 @@ pub async fn serve_with_execution_service(
     Ok(())
 }
 
-fn docs_routes(public_openapi: serde_json::Value) -> Router<AppState> {
-    let public_openapi = Arc::new(public_openapi);
+fn docs_routes(registry: DocsRegistry) -> Result<Router<AppState>, Box<dyn std::error::Error>> {
+    let public_openapi = Arc::new(registry.json_page("/openapi.json")?.clone());
 
-    Router::new()
+    Ok(Router::new()
         .route(
             "/openapi.json",
             get({
@@ -147,7 +150,7 @@ fn docs_routes(public_openapi: serde_json::Value) -> Router<AppState> {
             "/docs",
             get(|| async { Html(scalar_page("Ryvus Public API", "/openapi.json")) }),
         )
-        .route("/assets/scalar-api-reference.js", get(scalar_asset))
+        .route("/assets/scalar-api-reference.js", get(scalar_asset)))
 }
 
 fn scalar_page(title: &str, openapi_url: &str) -> String {

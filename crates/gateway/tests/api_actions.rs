@@ -1,8 +1,7 @@
 mod support;
 
 use axum::http::{Method, StatusCode};
-use ryvus_gateway::{openapi::public::build_public_openapi_json_from_actions, server};
-use ryvus_protocol::ActionKind;
+use ryvus_gateway::server;
 use serde_json::json;
 
 use support::*;
@@ -38,7 +37,18 @@ def hello():
     return {"ok": True}
 "#,
     );
-    project.write_manifest(&[action("GET", "/hello", "src/hello.py", "hello")]);
+    project.add_action(
+        "restock.py",
+        r#"
+@scheduled_action(every="10s")
+def restock_report(context):
+    return {"ok": True}
+"#,
+    );
+    project.write_manifest(&[
+        action("GET", "/hello", "src/hello.py", "hello"),
+        schedule_action("src/restock.py", "restock_report", "every 10s"),
+    ]);
 
     let docs = text_request(&project, Method::GET, "/docs").await;
     assert_eq!(docs.status, StatusCode::OK);
@@ -57,6 +67,20 @@ def hello():
         openapi.body["paths"]["/hello"]["get"]["operationId"],
         json!("hello_get_hello")
     );
+    assert!(openapi.body["paths"]["/system/schedules"].is_null());
+    assert_eq!(
+        openapi.body["paths"]["/system/schedules/restock_report/run"]["post"]["operationId"],
+        json!("run_schedule_restock_report")
+    );
+    assert_eq!(
+        openapi.body["paths"]["/system/schedules/restock_report/run"]["post"]["summary"],
+        json!("Run restock_report")
+    );
+    assert_eq!(
+        openapi.body["paths"]["/system/schedules/restock_report/run"]["post"]["tags"],
+        json!(["public"])
+    );
+    assert!(openapi.body["paths"]["/system/schedules/{id}/run"].is_null());
 }
 
 #[tokio::test]
@@ -70,6 +94,67 @@ async fn keeps_system_health_without_system_docs() {
 
     let system_docs = request(&project, Method::GET, "/system/docs", None).await;
     assert_eq!(system_docs.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn lists_system_schedules() {
+    let project = TestProject::new("system-schedules");
+    project.add_action(
+        "restock.py",
+        r#"
+@scheduled_action(every="10s")
+def restock_report(context):
+    return {"ok": True}
+"#,
+    );
+    project.write_manifest(&[schedule_action(
+        "src/restock.py",
+        "restock_report",
+        "every 10s",
+    )]);
+
+    let response = request(&project, Method::GET, "/system/schedules", None).await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body[0]["id"], json!("restock_report"));
+    assert_eq!(response.body[0]["name"], json!("restock_report"));
+    assert_eq!(response.body[0]["expression"], json!("every 10s"));
+    assert_eq!(
+        response.body[0]["action_key"],
+        json!("src/restock.py::restock_report")
+    );
+}
+
+#[tokio::test]
+async fn runs_system_schedule_once() {
+    let project = TestProject::new("system-schedule-run");
+    project.add_action(
+        "restock.py",
+        r#"
+@scheduled_action(every="10s")
+def restock_report(event):
+    return {
+        "expression": event.expression,
+    }
+"#,
+    );
+    project.write_manifest(&[schedule_action(
+        "src/restock.py",
+        "restock_report",
+        "every 10s",
+    )]);
+
+    let response = request(
+        &project,
+        Method::POST,
+        "/system/schedules/restock_report/run",
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body["status"], json!("success"));
+    assert_eq!(response.body["output"]["expression"], json!("every 10s"));
 }
 
 #[tokio::test]
@@ -469,72 +554,4 @@ async fn validates_runtime_sources_at_startup() {
         .to_string()
         .contains("runtime source file not found for Node action"));
     assert!(error.to_string().contains("src/missing.js"));
-}
-
-#[test]
-fn openapi_uses_discovered_routes_and_stable_operation_ids() {
-    let mut actions = vec![
-        api_definition("GET", "/hello/{name}", "src/hello.py", "hello"),
-        api_definition("POST", "/hello", "src/post.py", "hello"),
-    ];
-
-    if let ActionKind::Api(api) = &mut actions[0].kind {
-        api.response_schema = Some(json!({
-            "$defs": {
-                "PetResponse": {
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "string" }
-                    }
-                }
-            },
-            "type": "object",
-            "properties": {
-                "pets": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/$defs/PetResponse"
-                    }
-                }
-            }
-        }));
-    }
-
-    let openapi = build_public_openapi_json_from_actions(&actions);
-
-    assert_eq!(
-        openapi["paths"]["/hello/{name}"]["get"]["operationId"],
-        json!("hello_get_hello_name")
-    );
-    assert_eq!(
-        openapi["paths"]["/hello"]["post"]["operationId"],
-        json!("hello_post_hello")
-    );
-    assert!(openapi["paths"]["/hello"]["post"]["responses"]["400"].is_object());
-    assert!(openapi["paths"]["/hello"]["post"]["responses"]["504"].is_object());
-    assert_eq!(
-        openapi["paths"]["/hello"]["post"]["responses"]["400"]["content"]["application/json"]
-            ["schema"]["properties"]["error"]["type"],
-        json!("string")
-    );
-    assert_eq!(
-        openapi["paths"]["/hello"]["post"]["responses"]["400"]["content"]["application/json"]
-            ["schema"]["properties"]["invocation_id"]["type"],
-        json!("string")
-    );
-    assert_eq!(
-        openapi["paths"]["/hello"]["post"]["responses"]["400"]["content"]["application/json"]
-            ["schema"]["properties"]["message"]["type"],
-        json!("string")
-    );
-    assert!(
-        openapi["paths"]["/hello/{name}"]["get"]["responses"]["200"]["content"]["application/json"]
-            ["schema"]["properties"]["pets"]["items"]["$ref"]
-            .is_null()
-    );
-    assert_eq!(
-        openapi["paths"]["/hello/{name}"]["get"]["responses"]["200"]["content"]["application/json"]
-            ["schema"]["properties"]["pets"]["items"]["properties"]["id"]["type"],
-        json!("string")
-    );
 }

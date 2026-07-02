@@ -4,7 +4,7 @@ use crate::{
 };
 use ryvus_action_catalog::FileActionCatalog;
 
-pub fn run() -> Result<()> {
+pub fn run(run_schedules: bool) -> Result<()> {
     project::configure_python_path();
 
     discover::run()?;
@@ -20,23 +20,38 @@ pub fn run() -> Result<()> {
         ryvus_gateway::server::build_execution_service(config.project_root.clone());
 
     project::print_validation(&validation);
-    println!("Schedules: {}", scheduler.action_count());
+    if run_schedules {
+        println!("Schedules: {}", scheduler.action_count());
+    } else {
+        println!(
+            "Schedules: {} (disabled; use --schedules or ryvus schedule run <selector>)",
+            scheduler.action_count()
+        );
+    }
     println!("Server: http://{}", config.addr);
     println!("Docs:   http://{}/docs", config.addr);
 
     let runtime = tokio::runtime::Runtime::new().map_err(CliError::Io)?;
 
-    runtime.block_on(async move {
-        tokio::select! {
-            result = ryvus_gateway::server::serve_with_execution_service(
-                config,
-                execution_service.clone(),
-            ) => result.map_err(|err| CliError::Gateway(err.to_string())),
-            result = scheduler.run(execution_service) => {
-                result.map_err(|err| CliError::Validation(err.to_string()))
+    if run_schedules {
+        runtime.block_on(async move {
+            tokio::select! {
+                result = ryvus_gateway::server::serve_with_execution_service(
+                    config,
+                    execution_service.clone(),
+                ) => result.map_err(|err| CliError::Gateway(err.to_string())),
+                result = scheduler.run(execution_service) => {
+                    result.map_err(|err| CliError::Validation(err.to_string()))
+                }
             }
-        }
-    })?;
+        })?;
+    } else {
+        runtime.block_on(async move {
+            ryvus_gateway::server::serve_with_execution_service(config, execution_service)
+                .await
+                .map_err(|err| CliError::Gateway(err.to_string()))
+        })?;
+    }
 
     Ok(())
 }

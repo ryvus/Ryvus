@@ -18,8 +18,21 @@ pub enum Command {
         language: Language,
     },
     Discover,
-    Start,
+    Start {
+        #[arg(long)]
+        schedules: bool,
+    },
     Validate,
+    Schedule {
+        #[command(subcommand)]
+        command: ScheduleCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ScheduleCommand {
+    List,
+    Run { selector: String },
 }
 
 #[derive(clap::ValueEnum, Clone)]

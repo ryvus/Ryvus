@@ -11,7 +11,14 @@ def api_action(func: F) -> F:
 
 
 @overload
-def api_action(*, method: str, path: str) -> Callable[[F], F]:
+def api_action(*, name: str) -> Callable[[F], F]:
+    ...
+
+
+@overload
+def api_action(
+    *, method: str, path: str, name: Optional[str] = None
+) -> Callable[[F], F]:
     ...
 
 
@@ -20,6 +27,7 @@ def api_action(
     *,
     method: Optional[str] = None,
     path: Optional[str] = None,
+    name: Optional[str] = None,
 ):
     if func is None and ((method is None) != (path is None)):
         raise ValueError(
@@ -29,6 +37,7 @@ def api_action(
     def decorate(inner: F) -> F:
         metadata = {
             "type": "api",
+            "name": name or inner.__name__,
             "method": method or "GET",
             "path": path or f"/{inner.__name__.replace('_', '-')}",
         }
@@ -54,7 +63,7 @@ def scheduled_action(func: F) -> F:
 
 
 @overload
-def scheduled_action(*, every: str) -> Callable[[F], F]:
+def scheduled_action(*, every: str = "60s", name: Optional[str] = None) -> Callable[[F], F]:
     ...
 
 
@@ -62,10 +71,12 @@ def scheduled_action(
     func: Optional[F] = None,
     *,
     every: str = "60s",
+    name: Optional[str] = None,
 ):
     def decorate(inner: F) -> F:
         metadata = {
             "type": "schedule",
+            "name": name or inner.__name__,
             "expression": f"every {every}" if not every.startswith("every ") else every,
         }
 

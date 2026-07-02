@@ -1,5 +1,5 @@
 import { readdir } from "node:fs/promises";
-import { relative, resolve } from "node:path";
+import { basename, extname, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { ApiActionDefinition, ScheduledActionDefinition } from "./api.js";
@@ -24,6 +24,8 @@ for (const file of await sourceFiles(sourceRoot)) {
   }
 
   if (action.type === "api") {
+    const name = action.name ?? actionNameFromFile(file);
+
     manifest.actions.push({
       runtime: "Node",
       kind: {
@@ -41,8 +43,11 @@ for (const file of await sourceFiles(sourceRoot)) {
       },
       source: relative(projectRoot, file),
       entrypoint: "default",
+      name,
     });
   } else {
+    const name = action.name ?? actionNameFromFile(file);
+
     manifest.actions.push({
       runtime: "Node",
       kind: {
@@ -52,6 +57,7 @@ for (const file of await sourceFiles(sourceRoot)) {
       },
       source: relative(projectRoot, file),
       entrypoint: "default",
+      name,
     });
   }
 }
@@ -107,4 +113,8 @@ function isRyvusAction(
     (value as ApiActionDefinition).__ryvusAction === true &&
     ["api", "schedule"].includes((value as ApiActionDefinition).type)
   );
+}
+
+function actionNameFromFile(file: string): string {
+  return basename(file, extname(file));
 }

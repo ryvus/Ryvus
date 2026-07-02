@@ -12,6 +12,7 @@ members = [
   "crates/execution",
   "crates/persistence",
   "crates/execution-service",
+  "crates/docs",
   "crates/gateway",
   "crates/action-catalog",
   "crates/scheduler",
@@ -42,6 +43,7 @@ ryvus-protocol = { path = "crates/protocol" }
 ryvus-execution = { path = "crates/execution" }
 ryvus-persistence = { path = "crates/persistence" }
 ryvus-execution-service = { path = "crates/execution-service" }
+ryvus-docs = { path = "crates/docs" }
 ryvus-gateway = { path = "crates/gateway" }
 ryvus-action-catalog = { path = "crates/action-catalog" }
 ryvus-scheduler = { path = "crates/scheduler" }

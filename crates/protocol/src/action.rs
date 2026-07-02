@@ -13,6 +13,9 @@ pub struct ActionDefinition {
     pub kind: ActionKind,
     pub source: PathBuf,
     pub entrypoint: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

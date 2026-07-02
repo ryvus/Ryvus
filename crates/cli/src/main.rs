@@ -1,8 +1,8 @@
 use clap::Parser;
 use ryvus_cli::{
-    commands::{discover, new, start, validate},
+    commands::{discover, new, schedule, start, validate},
     error::CliError,
-    Cli, Command,
+    Cli, Command, ScheduleCommand,
 };
 
 fn main() {
@@ -29,8 +29,13 @@ fn run(cli: Cli) -> Result<(), CliError> {
 
         Command::Discover => discover::run(),
 
-        Command::Start => start::run(),
+        Command::Start { schedules } => start::run(schedules),
 
         Command::Validate => validate::run(),
+
+        Command::Schedule { command } => match command {
+            ScheduleCommand::List => schedule::list(),
+            ScheduleCommand::Run { selector } => schedule::run(selector),
+        },
     }
 }

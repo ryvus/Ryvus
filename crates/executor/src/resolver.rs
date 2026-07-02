@@ -151,6 +151,7 @@ mod tests {
             }),
             source: "src/missing.js".into(),
             entrypoint: "default".to_string(),
+            name: None,
         };
 
         let resolver = LocalRuntimeResolver::with_project_root(root);

@@ -9,7 +9,6 @@ use axum::{
     http::{Method, Request, StatusCode},
 };
 use ryvus_gateway::{server, server::GatewayServerConfig};
-use ryvus_protocol::{ActionDefinition, ActionKind, ApiAction, RuntimeKind};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -39,7 +38,7 @@ impl TestProject {
         let content = format!(
             r#"import sys
 sys.path.insert(0, {sdk_path:?})
-from ryvus import api_action
+from ryvus import api_action, scheduled_action
 {body}
 "#,
             sdk_path = sdk_path.to_string_lossy().to_string(),
@@ -199,22 +198,16 @@ pub fn node_action(method: &str, path: &str, source: &str, entrypoint: &str) -> 
     })
 }
 
-pub fn api_definition(
-    method: &str,
-    path: &str,
-    source: &str,
-    entrypoint: &str,
-) -> ActionDefinition {
-    ActionDefinition {
-        runtime: RuntimeKind::Python,
-        kind: ActionKind::Api(ApiAction {
-            method: method.to_string(),
-            path: path.to_string(),
-            request_schema: None,
-            response_schema: None,
-            query_params: Vec::new(),
-        }),
-        source: source.into(),
-        entrypoint: entrypoint.to_string(),
-    }
+pub fn schedule_action(source: &str, entrypoint: &str, expression: &str) -> Value {
+    json!({
+        "runtime": "Python",
+        "kind": {
+            "Schedule": {
+                "expression": expression
+            }
+        },
+        "source": source,
+        "entrypoint": entrypoint,
+        "name": entrypoint
+    })
 }
