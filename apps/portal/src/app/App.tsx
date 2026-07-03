@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { loadArtifacts } from "../artifacts/load";
 import type { Artifacts } from "../artifacts/types";
 import { ApiActions } from "../pages/ApiActions";
@@ -7,10 +7,13 @@ import { EmptyState } from "../pages/EmptyState";
 import { Overview } from "../pages/Overview";
 import { Schedules } from "../pages/Schedules";
 
+const Flows = lazy(() => import("../pages/Flows").then((module) => ({ default: module.Flows })));
+
 const routes = [
   ["overview", "Overview"],
   ["api-actions", "API Actions"],
   ["schedules", "Schedules"],
+  ["flows", "Flows"],
   ["docs", "Docs"],
   ["sdk-docs", "SDK Docs"],
   ["execution-preview", "Execution Preview"],
@@ -92,6 +95,12 @@ function renderRoute(route: RouteId, artifacts: Artifacts) {
       return <ApiActions artifacts={artifacts} />;
     case "schedules":
       return <Schedules artifacts={artifacts} />;
+    case "flows":
+      return (
+        <Suspense fallback={<p>Loading flows...</p>}>
+          <Flows artifacts={artifacts} />
+        </Suspense>
+      );
     case "docs":
       return <Docs artifacts={artifacts} />;
     case "sdk-docs":

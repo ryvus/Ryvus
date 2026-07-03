@@ -175,6 +175,19 @@ def sync_inventory(context):
 "#,
     );
     project.add_doc("docs/guide.md", "# Guide\n\nProject guide.");
+    project.add_flow(
+        "flows/restock.json",
+        r#"{
+  "key": "restock_flow",
+  "steps": [
+    {
+      "key": "restock",
+      "action": "sync_inventory"
+    }
+  ]
+}
+"#,
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_ryvus"))
         .arg("validate")
@@ -193,6 +206,7 @@ def sync_inventory(context):
     assert!(project.root.join(".ryvus/catalog.json").is_file());
     assert!(project.root.join(".ryvus/openapi.json").is_file());
     assert!(project.root.join(".ryvus/schedules.json").is_file());
+    assert!(project.root.join(".ryvus/flows.json").is_file());
     assert!(project.root.join(".ryvus/docs/registry.json").is_file());
 
     let openapi: serde_json::Value = serde_json::from_str(
@@ -212,6 +226,14 @@ def sync_inventory(context):
     assert_eq!(schedules["schedules"][0]["expression"], "every 10s");
     assert_eq!(schedules["schedules"][0]["runtime"], "python");
     assert_eq!(schedules["schedules"][0]["enabled"], true);
+
+    let flows: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project.root.join(".ryvus/flows.json"))
+            .expect("flows should be written"),
+    )
+    .expect("flows should parse");
+    assert_eq!(flows["flows"][0]["key"], "restock_flow");
+    assert_eq!(flows["flows"][0]["steps"][0]["action"], "sync_inventory");
 
     let registry: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(project.root.join(".ryvus/docs/registry.json"))
@@ -389,6 +411,13 @@ impl TestProject {
         fs::create_dir_all(full_path.parent().expect("doc should have parent"))
             .expect("doc parent should be created");
         fs::write(full_path, content).expect("doc should be written");
+    }
+
+    fn add_flow(&self, path: &str, content: &str) {
+        let full_path = self.root.join(path);
+        fs::create_dir_all(full_path.parent().expect("flow should have parent"))
+            .expect("flow parent should be created");
+        fs::write(full_path, content).expect("flow should be written");
     }
 
     fn add_node_action(&self, file: &str, body: &str) {

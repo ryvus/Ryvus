@@ -3,8 +3,8 @@ resolver = "2"
 
 members = [
   # "crates/core",
-  # "crates/engine",
-  # "crates/flow",
+  # "crates/old_engine",
+  # "crates/old_flow",
   # "crates/utils",
   # "crates/ryvus",
   "crates/executor",
@@ -35,9 +35,9 @@ authors = ["Ryvus Team <support@ryvus.dev>"]
 repository = "https://github.com/ryvus/ryvus"
 
 [workspace.dependencies]
-# ryvus-engine = { path = "crates/engine" }
+# ryvus-engine = { path = "crates/old_engine" }
 # ryvus-core = { path = "crates/core" }
-# ryvus-flow = { path = "crates/flow" }
+# ryvus-flow = { path = "crates/old_flow" }
 # ryvus-utils = { path = "crates/utils" }
 ryvus-executor = { path = "crates/executor" }
 ryvus-protocol = { path = "crates/protocol" }

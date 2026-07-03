@@ -42,6 +42,33 @@ export type SchedulesFile = {
   schedules: ScheduleArtifact[];
 };
 
+export type FlowBranch = {
+  when: string;
+  next: string;
+};
+
+export type FlowStep = {
+  key: string;
+  action: string;
+  params?: unknown;
+  config?: unknown;
+  next?: string;
+  next_when?: FlowBranch[];
+  otherwise?: string;
+  on_error?: string;
+};
+
+export type FlowDefinition = {
+  key: string;
+  description?: string;
+  version?: string;
+  steps: FlowStep[];
+};
+
+export type FlowsFile = {
+  flows: FlowDefinition[];
+};
+
 export type DocsRegistryPage = {
   id: string;
   title: string;
@@ -68,6 +95,7 @@ export type Artifacts = {
     tags?: Array<{ name: string }>;
   };
   schedules: SchedulesFile;
+  flows: FlowsFile;
   docsRegistry: DocsRegistry;
 };
 

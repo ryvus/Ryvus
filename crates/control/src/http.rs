@@ -28,26 +28,42 @@ pub struct ControlState {
 }
 
 pub fn control_app(control_service: Arc<ControlService>) -> Router {
+    control_app_with_routes(control_service, Router::new())
+}
+
+pub fn control_app_with_routes(control_service: Arc<ControlService>, routes: Router) -> Router {
     let portal_dist = portal_dist_dir();
     let portal_index = portal_dist.join("index.html");
-
-    Router::new()
+    let control_routes = Router::new()
         .route("/control/catalog", get(catalog))
         .route("/control/specs/openapi", get(openapi))
         .route("/control/specs/schedules", get(schedules))
+        .route("/control/specs/flows", get(flows))
         .route("/control/docs/registry", get(docs_registry))
         .route("/control/docs/pages/{id}", get(doc_page))
+        .with_state(ControlState { control_service });
+
+    Router::new()
+        .merge(routes)
+        .merge(control_routes)
         .fallback_service(ServeDir::new(portal_dist).fallback(ServeFile::new(portal_index)))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
-        .with_state(ControlState { control_service })
 }
 
 pub async fn serve(
     addr: SocketAddr,
     control_service: Arc<ControlService>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let app = control_app(control_service);
+    serve_with_routes(addr, control_service, Router::new()).await
+}
+
+pub async fn serve_with_routes(
+    addr: SocketAddr,
+    control_service: Arc<ControlService>,
+    routes: Router,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let app = control_app_with_routes(control_service, routes);
     tracing::info!("ryvus-control listening on http://{}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
@@ -105,6 +121,14 @@ async fn schedules(State(state): State<ControlState>) -> Result<Json<Value>, Sta
         .collect::<Vec<_>>();
 
     Ok(Json(json!({ "schedules": schedules })))
+}
+
+async fn flows(State(state): State<ControlState>) -> Result<Json<Value>, StatusCode> {
+    state
+        .control_service
+        .flow_spec()
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn docs_registry(State(state): State<ControlState>) -> Json<Value> {
@@ -224,6 +248,24 @@ mod tests {
             .expect("manifest should serialize"),
         )
         .expect("manifest should be written");
+        fs::write(
+            project_root.join(".ryvus/flows.json"),
+            serde_json::to_string_pretty(&json!({
+                "flows": [
+                    {
+                        "key": "restock_flow",
+                        "steps": [
+                            {
+                                "key": "restock",
+                                "action": "restock_report"
+                            }
+                        ]
+                    }
+                ]
+            }))
+            .expect("flows should serialize"),
+        )
+        .expect("flows should be written");
 
         let control_service = Arc::new(
             ControlService::load_local(LocalControlConfig {
@@ -257,6 +299,9 @@ mod tests {
             json!("src/restock.py::restock_report")
         );
         assert_eq!(schedules["schedules"][0]["enabled"], json!(true));
+
+        let flows = request_json(app.clone(), "/control/specs/flows").await;
+        assert_eq!(flows["flows"][0]["key"], json!("restock_flow"));
 
         let registry = request_json(app.clone(), "/control/docs/registry").await;
         let openapi_page = registry["pages"]

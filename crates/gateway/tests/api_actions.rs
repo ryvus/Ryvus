@@ -71,7 +71,7 @@ async fn keeps_system_health_without_system_docs() {
 }
 
 #[tokio::test]
-async fn lists_system_schedules() {
+async fn does_not_serve_system_schedules() {
     let project = TestProject::new("system-schedules");
     project.add_action(
         "restock.py",
@@ -89,18 +89,11 @@ def restock_report(context):
 
     let response = request(&project, Method::GET, "/system/schedules", None).await;
 
-    assert_eq!(response.status, StatusCode::OK);
-    assert_eq!(response.body[0]["id"], json!("restock_report"));
-    assert_eq!(response.body[0]["name"], json!("restock_report"));
-    assert_eq!(response.body[0]["expression"], json!("every 10s"));
-    assert_eq!(
-        response.body[0]["action_key"],
-        json!("src/restock.py::restock_report")
-    );
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn runs_system_schedule_once() {
+async fn does_not_run_system_schedules() {
     let project = TestProject::new("system-schedule-run");
     project.add_action(
         "restock.py",
@@ -126,9 +119,7 @@ def restock_report(event):
     )
     .await;
 
-    assert_eq!(response.status, StatusCode::OK);
-    assert_eq!(response.body["status"], json!("success"));
-    assert_eq!(response.body["output"]["expression"], json!("every 10s"));
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

@@ -22,6 +22,7 @@ pub fn write_portal_artifacts(project_root: &Path, manifest: &ActionManifest) ->
         &build_public_openapi_json_from_actions(&manifest.actions),
     )?;
     write_json(output_dir.join("schedules.json"), &schedules_json(manifest))?;
+    write_json(output_dir.join("flows.json"), &flows_json(project_root)?)?;
     write_docs(project_root, docs_dir.join("registry.json"), &pages_dir)?;
 
     Ok(())
@@ -54,6 +55,50 @@ fn schedules_json(manifest: &ActionManifest) -> serde_json::Value {
         .collect::<Vec<_>>();
 
     json!({ "schedules": schedules })
+}
+
+fn flows_json(project_root: &Path) -> Result<serde_json::Value> {
+    let mut flows = Vec::new();
+    let root_file = project_root.join("flows.json");
+
+    if root_file.is_file() {
+        flows.extend(read_flows_file(&root_file)?);
+    }
+
+    let flows_dir = project_root.join("flows");
+    let Ok(entries) = fs::read_dir(flows_dir) else {
+        return Ok(json!({ "flows": flows }));
+    };
+
+    for entry in entries {
+        let path = entry.map_err(CliError::Io)?.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("json") {
+            flows.extend(read_flows_file(&path)?);
+        }
+    }
+
+    Ok(json!({ "flows": flows }))
+}
+
+fn read_flows_file(path: &Path) -> Result<Vec<serde_json::Value>> {
+    let value =
+        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(path).map_err(CliError::Io)?)
+            .map_err(|error| {
+                CliError::Validation(format!("invalid flow spec {}: {error}", path.display()))
+            })?;
+
+    if let Some(flows) = value.get("flows").and_then(|flows| flows.as_array()) {
+        return Ok(flows.clone());
+    }
+
+    if value.get("key").is_some() && value.get("steps").is_some() {
+        return Ok(vec![value]);
+    }
+
+    Err(CliError::Validation(format!(
+        "invalid flow spec {}: expected {{ \"flows\": [] }} or a flow object",
+        path.display()
+    )))
 }
 
 fn runtime_label(runtime: &RuntimeKind) -> &'static str {

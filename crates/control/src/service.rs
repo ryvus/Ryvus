@@ -1,9 +1,10 @@
-use std::path::PathBuf;
+use std::{fs, io::ErrorKind, path::PathBuf};
 
 use ryvus_action_catalog::{ActionCatalog, FileActionCatalog};
 use ryvus_docs::{DocsRegistry, DocsRegistryBuilder, GeneratedCatalogDocsSource};
 use ryvus_protocol::ActionDefinition;
 use ryvus_scheduler::ScheduleInfo;
+use serde_json::{json, Value};
 
 use crate::{ControlResult, RouteRegistry};
 
@@ -14,6 +15,7 @@ pub struct LocalControlConfig {
 }
 
 pub struct ControlService {
+    project_root: PathBuf,
     action_catalog: FileActionCatalog,
     route_registry: RouteRegistry,
     docs_registry: DocsRegistry,
@@ -35,6 +37,7 @@ impl ControlService {
             .build()?;
 
         Ok(Self {
+            project_root: config.project_root,
             action_catalog,
             route_registry,
             docs_registry,
@@ -55,6 +58,15 @@ impl ControlService {
 
     pub fn schedule_infos(&self) -> ControlResult<Vec<ScheduleInfo>> {
         Ok(ryvus_scheduler::schedule_infos(self.action_catalog.all())?)
+    }
+
+    pub fn flow_spec(&self) -> ControlResult<Value> {
+        let path = self.project_root.join(".ryvus/flows.json");
+        match fs::read_to_string(path) {
+            Ok(content) => Ok(serde_json::from_str(&content)?),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(json!({ "flows": [] })),
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub fn resolve_action(&self, action: &str) -> ControlResult<&ActionDefinition> {
@@ -115,6 +127,10 @@ mod tests {
             .is_some());
         assert!(control.docs_registry().json_page("/openapi.json").is_ok());
         assert_eq!(control.schedule_infos().expect("schedules should load"), []);
+        assert_eq!(
+            control.flow_spec().expect("flows should load"),
+            json!({ "flows": [] })
+        );
     }
 
     fn temp_project_root() -> PathBuf {

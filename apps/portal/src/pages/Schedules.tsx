@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { gatewayUrl } from "../api/runtime";
 import type { Artifacts, ScheduleArtifact } from "../artifacts/types";
 
 type RunResult = {
@@ -20,7 +19,7 @@ export function Schedules({ artifacts }: { artifacts: Artifacts }) {
     setResults((current) => ({ ...current, [id]: {} }));
 
     try {
-      const response = await fetch(gatewayUrl(`/system/schedules/${encodeURIComponent(id)}/run`), {
+      const response = await fetch(`/internal/scheduler/schedules/${encodeURIComponent(id)}/run`, {
         method: "POST",
       });
       const body = (await response.json()) as RunResult;

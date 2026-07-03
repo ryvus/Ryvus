@@ -28,16 +28,13 @@ pub fn run(run_schedules: bool) -> Result<()> {
         .map_err(|err| CliError::Validation(err.to_string()))?;
     let execution_service =
         ryvus_gateway::server::build_execution_service(config.project_root.clone());
+    let scheduler_service = Arc::new(ryvus_scheduler::http::SchedulerService::new(
+        action_catalog.all().cloned().collect(),
+        Arc::clone(&execution_service),
+    ));
+    let scheduler_routes = ryvus_scheduler::http::scheduler_routes(scheduler_service);
 
-    project::print_validation(&validation);
-    if run_schedules {
-        println!("Schedules: {}", scheduler.action_count());
-    } else {
-        println!(
-            "Schedules: {} (disabled; use --schedules or ryvus schedule run <selector>)",
-            scheduler.action_count()
-        );
-    }
+    println!("Validated {} action(s)", validation.action_count);
     println!("Gateway: http://{}", config.addr);
     println!("Control: http://{}", control_addr);
     println!("Portal:  http://{}", control_addr);
@@ -52,7 +49,7 @@ pub fn run(run_schedules: bool) -> Result<()> {
                     config,
                     execution_service.clone(),
                 ) => result.map_err(|err| CliError::Gateway(err.to_string())),
-                result = ryvus_control::http::serve(control_addr, control_service) => {
+                result = ryvus_control::http::serve_with_routes(control_addr, control_service, scheduler_routes) => {
                     result.map_err(|err| CliError::Gateway(err.to_string()))
                 },
                 result = scheduler.run(execution_service) => {
@@ -66,7 +63,7 @@ pub fn run(run_schedules: bool) -> Result<()> {
                 result = ryvus_gateway::server::serve_with_execution_service(config, execution_service) => {
                     result.map_err(|err| CliError::Gateway(err.to_string()))
                 },
-                result = ryvus_control::http::serve(control_addr, control_service) => {
+                result = ryvus_control::http::serve_with_routes(control_addr, control_service, scheduler_routes) => {
                     result.map_err(|err| CliError::Gateway(err.to_string()))
                 }
             }

@@ -1210,13 +1210,16 @@ dependencies = [
 name = "ryvus-scheduler"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "ryvus-execution-service",
  "ryvus-executor",
  "ryvus-persistence",
  "ryvus-protocol",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "tower",
 ]
 
 [[package]]

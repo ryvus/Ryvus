@@ -417,6 +417,95 @@ textarea:focus {
   padding: 12px;
 }
 
+.flow-list {
+  display: grid;
+  gap: 14px;
+}
+
+.flow-card {
+  display: grid;
+  gap: 14px;
+  border: 1px solid #ddd8cf;
+  border-radius: 8px;
+  background: #fffdf8;
+  padding: 16px;
+}
+
+.flow-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.flow-header h2 {
+  margin-bottom: 6px;
+}
+
+.flow-header p {
+  color: #5a544b;
+}
+
+.flow-diagram {
+  height: 320px;
+  overflow: auto;
+  border: 1px solid #ddd8cf;
+  border-radius: 8px;
+  background: #f8f5ee;
+}
+
+.flow-diagram .react-flow__node {
+  min-width: 170px;
+  border: 1px solid #b8ddc9;
+  border-radius: 8px;
+  background: #fffdf8;
+  color: #202124;
+  box-shadow: 0 1px 1px rgba(31, 28, 24, 0.04);
+}
+
+.flow-diagram .react-flow__edge-path {
+  stroke: #786f63;
+}
+
+.flow-diagram .react-flow__edge-textbg {
+  fill: #fffdf8;
+}
+
+.flow-diagram .react-flow__edge-text {
+  fill: #5a544b;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.flow-node-label {
+  display: grid;
+  gap: 4px;
+  padding: 4px;
+  text-align: left;
+}
+
+.flow-node-label strong {
+  font-size: 13px;
+}
+
+.flow-node-label code {
+  color: #5a544b;
+  font-size: 12px;
+}
+
+.flow-source summary {
+  cursor: pointer;
+  color: #5a544b;
+  font-weight: 700;
+}
+
+.flow-source pre {
+  margin-top: 10px;
+  border-radius: 7px;
+  background: #f8f5ee;
+  padding: 12px;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

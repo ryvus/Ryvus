@@ -87,6 +87,24 @@ function validateSchedules(value: unknown): asserts value is Artifacts["schedule
   }
 }
 
+function validateFlows(value: unknown): asserts value is Artifacts["flows"] {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.flows) ||
+    value.flows.some(
+      (flow) =>
+        !isRecord(flow) ||
+        !isString(flow.key) ||
+        !Array.isArray(flow.steps) ||
+        flow.steps.some(
+          (step) => !isRecord(step) || !isString(step.key) || !isString(step.action),
+        ),
+    )
+  ) {
+    throw new Error("Invalid flows artifact: expected { flows: [] }");
+  }
+}
+
 function validateDocsRegistry(value: unknown): asserts value is Artifacts["docsRegistry"] {
   if (
     !isRecord(value) ||
@@ -114,28 +132,32 @@ async function loadArtifactsFrom(source: "control" | "static"): Promise<Artifact
           catalog: "/control/catalog",
           openapi: "/control/specs/openapi",
           schedules: "/control/specs/schedules",
+          flows: "/control/specs/flows",
           docsRegistry: "/control/docs/registry",
         }
       : {
           catalog: "/.ryvus/catalog.json",
           openapi: "/.ryvus/openapi.json",
           schedules: "/.ryvus/schedules.json",
+          flows: "/.ryvus/flows.json",
           docsRegistry: "/.ryvus/docs/registry.json",
         };
 
-  const [catalog, openapi, schedules, docsRegistry] = await Promise.all([
+  const [catalog, openapi, schedules, flows, docsRegistry] = await Promise.all([
     loadJson<Artifacts["catalog"]>(paths.catalog),
     loadJson<Artifacts["openapi"]>(paths.openapi),
     loadJson<Artifacts["schedules"]>(paths.schedules),
+    loadJson<Artifacts["flows"]>(paths.flows),
     loadJson<Artifacts["docsRegistry"]>(paths.docsRegistry),
   ]);
 
   validateCatalog(catalog);
   validateOpenApi(openapi);
   validateSchedules(schedules);
+  validateFlows(flows);
   validateDocsRegistry(docsRegistry);
 
-  return { catalog, openapi, schedules, docsRegistry };
+  return { catalog, openapi, schedules, flows, docsRegistry };
 }
 
 export async function loadDocPage(page: DocsRegistryPage): Promise<string> {
