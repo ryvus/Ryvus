@@ -1,3 +1,4 @@
+pub mod artifacts;
 pub mod discover;
 pub mod new;
 pub mod project;

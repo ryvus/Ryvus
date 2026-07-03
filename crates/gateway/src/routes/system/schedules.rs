@@ -17,7 +17,9 @@ pub struct ScheduleRunResponse {
 }
 
 pub async fn list_schedules(State(state): State<AppState>) -> Json<Value> {
-    let schedules = ryvus_scheduler::schedule_infos(state.action_service.catalog().all())
+    let schedules = state
+        .control_service
+        .schedule_infos()
         .expect("loaded schedule expressions should already be validated");
 
     Json(json!(schedules
@@ -40,7 +42,7 @@ pub async fn run_schedule(
     Path(id): Path<String>,
 ) -> Result<Json<ScheduleRunResponse>, (StatusCode, Json<Value>)> {
     let result = ryvus_scheduler::run_schedule_once(
-        state.action_service.catalog().all(),
+        state.control_service.action_catalog().all(),
         &id,
         state.execution_service.clone(),
     )

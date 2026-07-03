@@ -12,6 +12,7 @@ members = [
   "crates/execution",
   "crates/persistence",
   "crates/execution-service",
+  "crates/control",
   "crates/docs",
   "crates/gateway",
   "crates/action-catalog",
@@ -43,6 +44,7 @@ ryvus-protocol = { path = "crates/protocol" }
 ryvus-execution = { path = "crates/execution" }
 ryvus-persistence = { path = "crates/persistence" }
 ryvus-execution-service = { path = "crates/execution-service" }
+ryvus-control = { path = "crates/control" }
 ryvus-docs = { path = "crates/docs" }
 ryvus-gateway = { path = "crates/gateway" }
 ryvus-action-catalog = { path = "crates/action-catalog" }
@@ -58,7 +60,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 # Useful shared testing tools
 rstest = "0.18"
-tower-http = { version = "0.6", features = ["trace", "cors"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
 axum = "0.8"
 
 utoipa = { version = "5", features = ["axum_extras"] }

@@ -3,6 +3,8 @@ use crate::{
     error::{CliError, Result},
 };
 use ryvus_action_catalog::FileActionCatalog;
+use ryvus_control::{ControlService, LocalControlConfig};
+use std::sync::Arc;
 
 pub fn run(run_schedules: bool) -> Result<()> {
     project::configure_python_path();
@@ -10,6 +12,14 @@ pub fn run(run_schedules: bool) -> Result<()> {
     discover::run()?;
 
     let config = project::gateway_config()?;
+    let control_service = Arc::new(
+        ControlService::load_local(LocalControlConfig {
+            project_root: config.project_root.clone(),
+            manifest_path: config.manifest_path(),
+        })
+        .map_err(|err| CliError::Validation(err.to_string()))?,
+    );
+    let control_addr = project::control_addr();
     let validation = ryvus_gateway::server::validate_config(&config)
         .map_err(|err| CliError::Validation(err.to_string()))?;
     let action_catalog = FileActionCatalog::load(config.manifest_path())
@@ -28,18 +38,23 @@ pub fn run(run_schedules: bool) -> Result<()> {
             scheduler.action_count()
         );
     }
-    println!("Server: http://{}", config.addr);
-    println!("Docs:   http://{}/docs", config.addr);
+    println!("Gateway: http://{}", config.addr);
+    println!("Control: http://{}", control_addr);
+    println!("Portal:  http://{}", control_addr);
 
     let runtime = tokio::runtime::Runtime::new().map_err(CliError::Io)?;
 
     if run_schedules {
         runtime.block_on(async move {
+            let control_service = Arc::clone(&control_service);
             tokio::select! {
                 result = ryvus_gateway::server::serve_with_execution_service(
                     config,
                     execution_service.clone(),
                 ) => result.map_err(|err| CliError::Gateway(err.to_string())),
+                result = ryvus_control::http::serve(control_addr, control_service) => {
+                    result.map_err(|err| CliError::Gateway(err.to_string()))
+                },
                 result = scheduler.run(execution_service) => {
                     result.map_err(|err| CliError::Validation(err.to_string()))
                 }
@@ -47,9 +62,14 @@ pub fn run(run_schedules: bool) -> Result<()> {
         })?;
     } else {
         runtime.block_on(async move {
-            ryvus_gateway::server::serve_with_execution_service(config, execution_service)
-                .await
-                .map_err(|err| CliError::Gateway(err.to_string()))
+            tokio::select! {
+                result = ryvus_gateway::server::serve_with_execution_service(config, execution_service) => {
+                    result.map_err(|err| CliError::Gateway(err.to_string()))
+                },
+                result = ryvus_control::http::serve(control_addr, control_service) => {
+                    result.map_err(|err| CliError::Gateway(err.to_string()))
+                }
+            }
         })?;
     }
 

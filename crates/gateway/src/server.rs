@@ -1,20 +1,13 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
-use axum::{
-    http::header,
-    response::{Html, IntoResponse},
-    routing::get,
-    Json, Router,
-};
-use ryvus_action_catalog::{ActionService, FileActionCatalog};
-use ryvus_docs::{DocsRegistry, DocsRegistryBuilder, GeneratedCatalogDocsSource};
+use axum::Router;
+use ryvus_control::{ControlService, LocalControlConfig};
 use ryvus_executor::{Executor, LocalProcessExecutor, LocalRuntimeResolver, RuntimeResolver};
 use ryvus_persistence::{ConsoleExecutionPersistence, ExecutionPersistence};
 use ryvus_protocol::{ActionDefinition, ActionKind};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::{
-    registry::route_registry::RouteRegistry,
     routes::{public::dynamic::handle_dynamic_route, system::system_routes},
     state::{AppState, GatewayExecutionService},
 };
@@ -57,31 +50,24 @@ pub fn build_app_with_execution_service(
     config: &GatewayServerConfig,
     execution_service: Arc<GatewayExecutionService>,
 ) -> Result<Router, Box<dyn std::error::Error>> {
-    let manifest_path = config.manifest_path();
+    let control_service = Arc::new(ControlService::load_local(LocalControlConfig {
+        project_root: config.project_root.clone(),
+        manifest_path: config.manifest_path(),
+    })?);
 
-    let action_catalog = FileActionCatalog::load(&manifest_path)?;
-
-    validate_action_schemas(action_catalog.all())?;
-    let route_registry = RouteRegistry::from_actions(action_catalog.all())?;
-    ryvus_scheduler::validate_schedule_actions(action_catalog.all())?;
-    validate_runtime_targets(config.project_root.clone(), action_catalog.all())?;
-    let docs_registry = DocsRegistryBuilder::new()
-        .add_provider(GeneratedCatalogDocsSource::new(action_catalog.all()))
-        .build()?;
-
-    let action_service = Arc::new(ActionService::new(action_catalog));
+    validate_action_schemas(control_service.action_catalog().all())?;
+    validate_runtime_targets(
+        config.project_root.clone(),
+        control_service.action_catalog().all(),
+    )?;
 
     let state = AppState {
-        route_registry: Arc::new(route_registry),
-        action_service,
+        control_service: Arc::clone(&control_service),
         execution_service,
     };
 
-    let docs_routes = docs_routes(docs_registry)?;
-
     Ok(Router::<AppState>::new()
         .merge(system_routes())
-        .merge(docs_routes)
         .fallback(handle_dynamic_route)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -99,11 +85,13 @@ pub fn build_execution_service(project_root: PathBuf) -> Arc<GatewayExecutionSer
 pub fn validate_config(
     config: &GatewayServerConfig,
 ) -> Result<GatewayValidation, Box<dyn std::error::Error>> {
-    let action_catalog = FileActionCatalog::load(config.manifest_path())?;
-    let actions = action_catalog.all().collect::<Vec<_>>();
+    let control_service = ControlService::load_local(LocalControlConfig {
+        project_root: config.project_root.clone(),
+        manifest_path: config.manifest_path(),
+    })?;
+    let actions = control_service.action_catalog().all().collect::<Vec<_>>();
 
     validate_action_schemas(actions.iter().copied())?;
-    RouteRegistry::from_actions(actions.iter().copied())?;
     validate_runtime_targets(config.project_root.clone(), actions.iter().copied())?;
 
     Ok(GatewayValidation {
@@ -123,68 +111,12 @@ pub async fn serve_with_execution_service(
     let app = build_app_with_execution_service(&config, execution_service)?;
 
     tracing::info!("ryvus-gateway listening on http://{}", config.addr);
-    tracing::info!("public docs available at http://{}/docs", config.addr);
 
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
 
     axum::serve(listener, app).await?;
 
     Ok(())
-}
-
-fn docs_routes(registry: DocsRegistry) -> Result<Router<AppState>, Box<dyn std::error::Error>> {
-    let public_openapi = Arc::new(registry.json_page("/openapi.json")?.clone());
-
-    Ok(Router::new()
-        .route(
-            "/openapi.json",
-            get({
-                let openapi = Arc::clone(&public_openapi);
-                move || {
-                    let openapi = Arc::clone(&openapi);
-                    async move { Json((*openapi).clone()) }
-                }
-            }),
-        )
-        .route(
-            "/docs",
-            get(|| async { Html(scalar_page("Ryvus Public API", "/openapi.json")) }),
-        )
-        .route("/assets/scalar-api-reference.js", get(scalar_asset)))
-}
-
-fn scalar_page(title: &str, openapi_url: &str) -> String {
-    format!(
-        r##"<!doctype html>
-<html>
-  <head>
-    <title>{title}</title>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-  </head>
-  <body>
-    <div id="app"></div>
-    <script src="/assets/scalar-api-reference.js"></script>
-    <script>
-      Scalar.createApiReference("#app", {{
-        url: "{openapi_url}",
-        theme: "default",
-        withDefaultFonts: false,
-      }});
-    </script>
-  </body>
-</html>"##
-    )
-}
-
-async fn scalar_asset() -> impl IntoResponse {
-    (
-        [(
-            header::CONTENT_TYPE,
-            "application/javascript; charset=utf-8",
-        )],
-        include_str!("../assets/scalar-api-reference.js"),
-    )
 }
 
 fn validate_action_schemas<'a>(

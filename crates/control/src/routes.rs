@@ -1,10 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use axum::http::Method;
 use ryvus_protocol::{ActionDefinition, ActionKind};
+use serde::Deserialize;
 use thiserror::Error;
-
-use crate::config::routes::{HttpMethod, RouteDefinition, RouteMatch};
 
 #[derive(Debug, Default)]
 pub struct RouteRegistry {
@@ -22,19 +20,12 @@ impl RouteRegistry {
             if let ActionKind::Api(api) = &action.kind {
                 validate_path_template(&api.path)?;
 
-                let method = match api.method.to_ascii_uppercase().as_str() {
-                    "GET" => HttpMethod::Get,
-                    "POST" => HttpMethod::Post,
-                    "PUT" => HttpMethod::Put,
-                    "DELETE" => HttpMethod::Delete,
-                    "PATCH" => HttpMethod::Patch,
-                    value => {
-                        return Err(RouteRegistryError::UnsupportedMethod {
-                            method: value.to_string(),
-                            path: api.path.clone(),
-                        })
+                let method = HttpMethod::parse(&api.method).ok_or_else(|| {
+                    RouteRegistryError::UnsupportedMethod {
+                        method: api.method.clone(),
+                        path: api.path.clone(),
                     }
-                };
+                })?;
 
                 let route_key = (method, normalize_path_template(&api.path));
 
@@ -60,8 +51,8 @@ impl RouteRegistry {
         Ok(Self { routes })
     }
 
-    pub fn resolve(&self, method: &Method, path: &str) -> Option<RouteMatch> {
-        let method = HttpMethod::from_axum(method)?;
+    pub fn resolve(&self, method: &str, path: &str) -> Option<RouteMatch> {
+        let method = HttpMethod::parse(method)?;
 
         self.routes.iter().find_map(|route| {
             if route.method != method {
@@ -79,6 +70,43 @@ impl RouteRegistry {
         self.routes
             .iter()
             .any(|route| match_path(&route.path, path).is_some())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RouteDefinition {
+    pub name: String,
+    pub method: HttpMethod,
+    pub path: String,
+    pub action: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RouteMatch {
+    pub definition: RouteDefinition,
+    pub path_params: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum HttpMethod {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+impl HttpMethod {
+    fn parse(method: &str) -> Option<Self> {
+        match method.to_ascii_uppercase().as_str() {
+            "GET" => Some(Self::Get),
+            "POST" => Some(Self::Post),
+            "PUT" => Some(Self::Put),
+            "PATCH" => Some(Self::Patch),
+            "DELETE" => Some(Self::Delete),
+            _ => None,
+        }
     }
 }
 
@@ -167,17 +195,4 @@ fn normalize_path_template(path: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
-}
-
-impl HttpMethod {
-    pub fn from_axum(method: &Method) -> Option<Self> {
-        match *method {
-            Method::GET => Some(Self::Get),
-            Method::POST => Some(Self::Post),
-            Method::PUT => Some(Self::Put),
-            Method::DELETE => Some(Self::Delete),
-            Method::PATCH => Some(Self::Patch),
-            _ => None,
-        }
-    }
 }

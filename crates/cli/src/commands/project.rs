@@ -93,6 +93,10 @@ pub fn gateway_config() -> Result<ryvus_gateway::server::GatewayServerConfig> {
     })
 }
 
+pub fn control_addr() -> std::net::SocketAddr {
+    ([127, 0, 0, 1], 8079).into()
+}
+
 pub fn print_validation(validation: &ryvus_gateway::server::GatewayValidation) {
     println!("Validated {} action(s)", validation.action_count);
 

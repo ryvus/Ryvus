@@ -3,19 +3,14 @@ use std::collections::BTreeSet;
 use serde_json::{json, Value};
 
 use ryvus_protocol::{ActionDefinition, ActionKind, ApiQueryParam};
-use ryvus_scheduler::ScheduleInfo;
 
 pub fn build_public_openapi_json_from_actions<'a>(
     actions: impl IntoIterator<Item = &'a ActionDefinition>,
 ) -> Value {
     let mut paths = serde_json::Map::new();
     let mut tags = BTreeSet::new();
-    let actions = actions.into_iter().collect::<Vec<_>>();
-    let schedule_infos =
-        ryvus_scheduler::schedule_infos(actions.iter().copied()).unwrap_or_default();
-
-    for action in &actions {
-        if matches!(&action.kind, ActionKind::Schedule(_)) {
+    for action in actions {
+        if !matches!(&action.kind, ActionKind::Api(_)) {
             continue;
         }
 
@@ -51,10 +46,6 @@ pub fn build_public_openapi_json_from_actions<'a>(
         );
     }
 
-    if !schedule_infos.is_empty() {
-        add_schedule_paths(&mut paths, &mut tags, &schedule_infos);
-    }
-
     json!({
         "openapi": "3.1.0",
         "info": {
@@ -63,72 +54,6 @@ pub fn build_public_openapi_json_from_actions<'a>(
         },
         "tags": tags.into_iter().map(|name| json!({ "name": name })).collect::<Vec<_>>(),
         "paths": paths
-    })
-}
-
-fn add_schedule_paths(
-    paths: &mut serde_json::Map<String, Value>,
-    tags: &mut BTreeSet<String>,
-    schedules: &[ScheduleInfo],
-) {
-    for schedule in schedules {
-        let tag = module_tag_from_source(&schedule.source);
-        tags.insert(tag.clone());
-
-        paths.insert(
-            format!("/system/schedules/{}/run", schedule.id),
-            json!({
-                "post": {
-                    "tags": [tag],
-                    "operationId": format!("run_schedule_{}", schedule.id),
-                    "summary": format!("Run {}", schedule.name),
-                    "description": schedule_description(schedule),
-                    "responses": schedule_run_responses()
-                }
-            }),
-        );
-    }
-}
-
-fn schedule_description(schedule: &ScheduleInfo) -> String {
-    format!(
-        "Runs the `{}` scheduled action once.\n\n\
-         | Field | Value |\n\
-         | --- | --- |\n\
-         | Schedule | `{}` |\n\
-         | Expression | `{}` |\n\
-         | Source | `{}` |\n\
-         | Entrypoint | `{}` |\n\
-         | Action key | `{}` |\n",
-        schedule.name,
-        schedule.name,
-        schedule.expression,
-        schedule.source,
-        schedule.entrypoint,
-        schedule.action_key
-    )
-}
-
-fn schedule_run_responses() -> Value {
-    json!({
-        "200": {
-            "description": "Schedule run result",
-            "content": {
-                "application/json": {
-                    "schema": {
-                        "type": "object",
-                        "required": ["invocation_id", "status", "output"],
-                        "properties": {
-                            "invocation_id": { "type": "string" },
-                            "status": { "type": "string" },
-                            "output": {}
-                        }
-                    }
-                }
-            }
-        },
-        "404": error_response("Schedule not found"),
-        "500": error_response("Schedule execution failed")
     })
 }
 
@@ -472,8 +397,22 @@ mod tests {
     }
 
     #[test]
-    fn generated_openapi_includes_system_schedule_endpoints_when_schedules_exist() {
-        let action = ActionDefinition {
+    fn openapi_excludes_schedules() {
+        let api_action = ActionDefinition {
+            runtime: RuntimeKind::Python,
+            kind: ActionKind::Api(ApiAction {
+                method: "GET".to_string(),
+                path: "/hello".to_string(),
+                request_schema: None,
+                response_schema: None,
+                query_params: Vec::new(),
+            }),
+            source: PathBuf::from("src/hello.py"),
+            entrypoint: "hello".to_string(),
+            name: None,
+        };
+
+        let schedule_action = ActionDefinition {
             runtime: RuntimeKind::Python,
             kind: ActionKind::Schedule(ScheduleAction {
                 expression: "every 10s".to_string(),
@@ -483,28 +422,15 @@ mod tests {
             name: Some("restock_report".to_string()),
         };
 
-        let openapi = build_public_openapi_json_from_actions([&action]);
+        let openapi = build_public_openapi_json_from_actions([&api_action, &schedule_action]);
 
+        assert_eq!(
+            openapi["paths"]["/hello"]["get"]["operationId"],
+            json!("hello_get_hello")
+        );
         assert!(openapi["paths"]["/system/schedules"].is_null());
+        assert!(openapi["paths"]["/system/schedules/restock_report/run"].is_null());
         assert!(openapi["paths"]["/system/schedules/{id}/run"].is_null());
-        assert_eq!(
-            openapi["paths"]["/system/schedules/restock_report/run"]["post"]["operationId"],
-            json!("run_schedule_restock_report")
-        );
-        assert_eq!(
-            openapi["paths"]["/system/schedules/restock_report/run"]["post"]["summary"],
-            json!("Run restock_report")
-        );
-        assert_eq!(
-            openapi["paths"]["/system/schedules/restock_report/run"]["post"]["tags"],
-            json!(["petstore"])
-        );
-        assert_eq!(openapi["tags"], json!([{ "name": "petstore" }]));
-        assert!(
-            openapi["paths"]["/system/schedules/restock_report/run"]["post"]["description"]
-                .as_str()
-                .expect("schedule description should be markdown")
-                .contains("| Expression | `every 10s` |")
-        );
+        assert_eq!(openapi["tags"], json!([{ "name": "public" }]));
     }
 }

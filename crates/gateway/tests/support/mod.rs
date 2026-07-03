@@ -96,11 +96,6 @@ pub struct TestResponse {
     pub body: Value,
 }
 
-pub struct TextResponse {
-    pub status: StatusCode,
-    pub body: String,
-}
-
 pub fn assert_public_error(response: TestResponse, status: StatusCode, error: &str) {
     assert_eq!(response.status, status);
     assert_eq!(response.body["error"], json!(error));
@@ -144,28 +139,6 @@ pub async fn raw_request(
     let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
 
     TestResponse { status, body }
-}
-
-pub async fn text_request(project: &TestProject, method: Method, uri: &str) -> TextResponse {
-    let app = server::build_app(&project.config()).expect("gateway app should build");
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(method)
-                .uri(uri)
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should be handled");
-
-    let status = response.status();
-    let bytes = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body should read");
-    let body = String::from_utf8(bytes.to_vec()).expect("body should be UTF-8");
-
-    TextResponse { status, body }
 }
 
 pub fn action(method: &str, path: &str, source: &str, entrypoint: &str) -> Value {

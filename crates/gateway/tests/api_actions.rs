@@ -27,7 +27,7 @@ def hello(event, context):
 }
 
 #[tokio::test]
-async fn serves_scalar_docs_and_openapi_json() {
+async fn does_not_serve_docs_or_openapi() {
     let project = TestProject::new("docs");
     project.add_action(
         "hello.py",
@@ -50,37 +50,11 @@ def restock_report(context):
         schedule_action("src/restock.py", "restock_report", "every 10s"),
     ]);
 
-    let docs = text_request(&project, Method::GET, "/docs").await;
-    assert_eq!(docs.status, StatusCode::OK);
-    assert!(docs.body.contains("Scalar.createApiReference"));
-    assert!(docs.body.contains("/openapi.json"));
-    assert!(docs.body.contains("/assets/scalar-api-reference.js"));
-    assert!(!docs.body.contains("https://"));
-
-    let scalar = text_request(&project, Method::GET, "/assets/scalar-api-reference.js").await;
-    assert_eq!(scalar.status, StatusCode::OK);
-    assert!(scalar.body.contains("createApiReference"));
+    let docs = request(&project, Method::GET, "/docs", None).await;
+    assert_eq!(docs.status, StatusCode::NOT_FOUND);
 
     let openapi = request(&project, Method::GET, "/openapi.json", None).await;
-    assert_eq!(openapi.status, StatusCode::OK);
-    assert_eq!(
-        openapi.body["paths"]["/hello"]["get"]["operationId"],
-        json!("hello_get_hello")
-    );
-    assert!(openapi.body["paths"]["/system/schedules"].is_null());
-    assert_eq!(
-        openapi.body["paths"]["/system/schedules/restock_report/run"]["post"]["operationId"],
-        json!("run_schedule_restock_report")
-    );
-    assert_eq!(
-        openapi.body["paths"]["/system/schedules/restock_report/run"]["post"]["summary"],
-        json!("Run restock_report")
-    );
-    assert_eq!(
-        openapi.body["paths"]["/system/schedules/restock_report/run"]["post"]["tags"],
-        json!(["public"])
-    );
-    assert!(openapi.body["paths"]["/system/schedules/{id}/run"].is_null());
+    assert_eq!(openapi.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

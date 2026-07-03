@@ -33,10 +33,14 @@ pub async fn handle_dynamic_route(
             .into_owned()
             .collect();
 
-    let route_match = match state.route_registry.resolve(&method, &path) {
+    let route_match = match state
+        .control_service
+        .route_registry()
+        .resolve(method.as_str(), &path)
+    {
         Some(route_match) => route_match,
         None => {
-            if state.route_registry.path_exists(&path) {
+            if state.control_service.route_registry().path_exists(&path) {
                 return public_error(
                     StatusCode::METHOD_NOT_ALLOWED,
                     &invocation_id,
@@ -57,7 +61,7 @@ pub async fn handle_dynamic_route(
     };
     let route = route_match.definition;
 
-    let action = match state.action_service.resolve_action(&route.action) {
+    let action = match state.control_service.resolve_action(&route.action) {
         Ok(action) => action,
         Err(error) => {
             return public_error(

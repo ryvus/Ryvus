@@ -156,6 +156,85 @@ def sync_inventory(context):
 }
 
 #[test]
+fn validate_writes_portal_artifacts() {
+    let project = TestProject::new("validate-artifacts");
+    project.add_action(
+        "hello.py",
+        r#"
+@api_action(method="GET", path="/hello")
+def hello():
+    return {"ok": True}
+"#,
+    );
+    project.add_schedule_action(
+        "sync.py",
+        r#"
+@scheduled_action(every="10s")
+def sync_inventory(context):
+    return {"ok": True}
+"#,
+    );
+    project.add_doc("docs/guide.md", "# Guide\n\nProject guide.");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ryvus"))
+        .arg("validate")
+        .current_dir(&project.root)
+        .output()
+        .expect("validate command should run");
+
+    assert!(
+        output.status.success(),
+        "validate failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(project.root.join(".ryvus/action-manifest.json").is_file());
+    assert!(project.root.join(".ryvus/catalog.json").is_file());
+    assert!(project.root.join(".ryvus/openapi.json").is_file());
+    assert!(project.root.join(".ryvus/schedules.json").is_file());
+    assert!(project.root.join(".ryvus/docs/registry.json").is_file());
+
+    let openapi: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project.root.join(".ryvus/openapi.json"))
+            .expect("openapi should be written"),
+    )
+    .expect("openapi should parse");
+    assert!(openapi["paths"]["/hello"]["get"].is_object());
+    assert!(openapi["paths"]["/system/schedules/sync_inventory/run"].is_null());
+
+    let schedules: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project.root.join(".ryvus/schedules.json"))
+            .expect("schedules should be written"),
+    )
+    .expect("schedules should parse");
+    assert_eq!(schedules["schedules"][0]["name"], "sync_inventory");
+    assert_eq!(schedules["schedules"][0]["expression"], "every 10s");
+    assert_eq!(schedules["schedules"][0]["runtime"], "python");
+    assert_eq!(schedules["schedules"][0]["enabled"], true);
+
+    let registry: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project.root.join(".ryvus/docs/registry.json"))
+            .expect("docs registry should be written"),
+    )
+    .expect("docs registry should parse");
+    assert!(registry["pages"]
+        .as_array()
+        .expect("pages should be an array")
+        .iter()
+        .any(|page| page["path"] == "/docs/guide.md"));
+    let content_path = registry["pages"][0]["content_path"]
+        .as_str()
+        .expect("content path should be a string")
+        .trim_start_matches("/.ryvus/");
+    assert_eq!(
+        fs::read_to_string(project.root.join(".ryvus").join(content_path))
+            .expect("doc page should be copied"),
+        "# Guide\n\nProject guide."
+    );
+}
+
+#[test]
 fn validate_rejects_invalid_scheduled_actions() {
     let project = TestProject::new("validate-bad-schedule");
     project.add_schedule_action(
@@ -303,6 +382,13 @@ impl TestProject {
 
         fs::write(self.root.join("src").join(file), content)
             .expect("schedule action should be written");
+    }
+
+    fn add_doc(&self, path: &str, content: &str) {
+        let full_path = self.root.join(path);
+        fs::create_dir_all(full_path.parent().expect("doc should have parent"))
+            .expect("doc parent should be created");
+        fs::write(full_path, content).expect("doc should be written");
     }
 
     fn add_node_action(&self, file: &str, body: &str) {

@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    commands::project,
+    commands::{artifacts, project},
     error::{CliError, Result},
 };
 use ryvus_protocol::{ActionDefinition, ActionManifest};
@@ -22,6 +22,7 @@ pub fn run() -> Result<()> {
         serde_json::to_string_pretty(&manifest).map_err(|_| CliError::SerializationFailed)?;
 
     fs::write(&output_path, json).map_err(CliError::Io)?;
+    artifacts::write_portal_artifacts(Path::new("."), &manifest)?;
 
     println!(
         "Discovered {} action(s) -> {}",
