@@ -3,11 +3,10 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::error::{ExecutorError, ExecutorResult};
-use crate::executor::Executor;
-use crate::target::ProcessTarget;
-use crate::{ConsoleInvocationEventSink, InvocationEventSink};
-use ryvus_execution::ExecutionResult;
+use crate::{
+    error::{ExecutorError, ExecutorResult},
+    ConsoleInvocationEventSink, ExecutionResult, Executor, InvocationEventSink, ProcessTarget,
+};
 use ryvus_protocol::{InvocationMessage, InvocationRequest, InvocationResult, PROTOCOL_VERSION};
 
 #[derive(Clone)]

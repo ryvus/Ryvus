@@ -13,6 +13,6 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
-ryvus-executor = { workspace = true }
+ryvus-execution = { workspace = true }
 ryvus-protocol = { workspace = true }
 serde_json = { workspace = true }

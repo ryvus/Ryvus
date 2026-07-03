@@ -3,8 +3,7 @@ use std::path::{Path, PathBuf};
 
 use ryvus_execution::ExecutionRecord;
 
-use crate::error::PersistenceResult;
-use crate::persistence::ExecutionPersistence;
+use crate::{ExecutionPersistence, ExecutionPersistenceResult, PersistenceResult};
 
 #[derive(Debug, Clone)]
 pub struct FilesystemExecutionPersistence {
@@ -28,7 +27,7 @@ impl FilesystemExecutionPersistence {
 }
 
 impl ExecutionPersistence for FilesystemExecutionPersistence {
-    fn save_execution(&self, record: &ExecutionRecord) -> PersistenceResult<()> {
+    fn save_execution(&self, record: &ExecutionRecord) -> ExecutionPersistenceResult<()> {
         let dir = self.execution_dir(record);
 
         fs::create_dir_all(&dir)?;

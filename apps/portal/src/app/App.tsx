@@ -1,17 +1,19 @@
+import { useQuery } from "@tanstack/react-query";
 import { lazy, Suspense, useEffect, useState } from "react";
+import ryvusMark from "../assets/ryvus-mark.svg";
 import { loadArtifacts } from "../artifacts/load";
 import type { Artifacts } from "../artifacts/types";
+import { Badge, EmptyState, cn } from "../components/ui";
 import { ApiActions } from "../pages/ApiActions";
 import { Docs } from "../pages/Docs";
-import { EmptyState } from "../pages/EmptyState";
-import { Overview } from "../pages/Overview";
+import { Dashboard } from "../pages/Dashboard";
 import { Schedules } from "../pages/Schedules";
 
 const Flows = lazy(() => import("../pages/Flows").then((module) => ({ default: module.Flows })));
 
 const routes = [
-  ["overview", "Overview"],
-  ["api-actions", "API Actions"],
+  ["dashboard", "Dashboard"],
+  ["gateway", "Gateway"],
   ["schedules", "Schedules"],
   ["flows", "Flows"],
   ["docs", "Docs"],
@@ -23,8 +25,10 @@ type RouteId = (typeof routes)[number][0];
 
 export function App() {
   const [route, setRoute] = useState<RouteId>(currentRoute());
-  const [artifacts, setArtifacts] = useState<Artifacts | null>(null);
-  const [error, setError] = useState("");
+  const artifacts = useQuery({
+    queryKey: ["artifacts"],
+    queryFn: loadArtifacts,
+  });
 
   useEffect(() => {
     const onHashChange = () => setRoute(currentRoute());
@@ -32,51 +36,70 @@ export function App() {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
-  useEffect(() => {
-    loadArtifacts()
-      .then((value) => {
-        setArtifacts(value);
-        setError("");
-      })
-      .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : "failed to load artifacts");
-      });
-  }, []);
+  const status = artifacts.isError
+    ? "Artifact error"
+    : artifacts.data
+      ? "Artifacts loaded"
+      : "Loading";
 
   return (
-    <main className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <span className="brand-mark">R</span>
-          <span>Ryvus Portal</span>
-        </div>
-        <nav aria-label="Portal sections">
-          {routes.map(([id, label]) => (
-            <a key={id} href={`#${id}`} className={route === id ? "active" : ""}>
-              {label}
-            </a>
-          ))}
-        </nav>
-      </aside>
-      <div className="workspace">
-        <header className="topbar">
-          <div>
-            <span className="eyebrow">Local snapshot</span>
-            <strong>{artifacts?.openapi.info?.title ?? "Ryvus Public API"}</strong>
+    <main className="min-h-screen bg-slate-950 text-slate-100">
+      <div className="grid min-h-screen grid-cols-1 lg:grid-cols-[260px_minmax(0,1fr)]">
+        <aside className="border-b border-white/10 bg-[#07111f] px-4 py-4 lg:border-b-0 lg:border-r lg:px-3">
+          <div className="mb-5 flex items-center gap-3 px-2">
+            <img
+              src={ryvusMark}
+              alt=""
+              className="h-9 w-9 rounded-xl bg-slate-950 shadow-lg shadow-blue-950/50"
+            />
+            <span className="grid leading-tight">
+              <strong className="text-sm font-semibold text-white">Ryvus</strong>
+              <small className="text-xs font-medium text-slate-400">Portal</small>
+            </span>
           </div>
-          <span className={error ? "status-pill error-pill" : "status-pill"}>
-            {error ? "Artifact error" : artifacts ? "Artifacts loaded" : "Loading"}
-          </span>
-        </header>
-        <section className="content">
-          {error ? (
-            <ArtifactError message={error} />
-          ) : artifacts ? (
-            renderRoute(route, artifacts)
-          ) : (
-            <p>Loading artifacts...</p>
-          )}
-        </section>
+          <nav className="grid gap-1" aria-label="Portal sections">
+            {routes.map(([id, label]) => (
+              <a
+                key={id}
+                href={`#${id}`}
+                className={cn(
+                  "rounded-lg border border-transparent px-3 py-2 text-sm font-medium text-slate-400 transition hover:bg-white/[0.06] hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-300",
+                  route === id &&
+                    "border-blue-400/20 bg-blue-500/10 text-white shadow-[inset_2px_0_0_#2563ff]",
+                )}
+              >
+                {label}
+              </a>
+            ))}
+          </nav>
+        </aside>
+
+        <div className="min-w-0 bg-[radial-gradient(circle_at_top_right,rgba(37,99,255,0.18),transparent_34rem),linear-gradient(180deg,#0b1220_0%,#020617_100%)]">
+          <header className="sticky top-0 z-20 flex min-h-16 items-center justify-between border-b border-white/10 bg-slate-950/75 px-5 backdrop-blur-xl sm:px-8">
+            <div className="grid gap-0.5">
+              <span className="text-[11px] font-semibold uppercase text-blue-400">Local Snapshot</span>
+              <strong className="text-sm font-semibold text-white">
+                {artifacts.data?.openapi.info?.title ?? "Ryvus Public API"}
+              </strong>
+            </div>
+            <Badge tone={artifacts.isError ? "red" : artifacts.data ? "blue" : "slate"}>
+              {status}
+            </Badge>
+          </header>
+
+          <section className="min-w-0 px-5 py-6 sm:px-8 lg:py-8">
+            {artifacts.isError ? (
+              <EmptyState
+                title="Artifact Error"
+                message={artifacts.error instanceof Error ? artifacts.error.message : "Failed to load artifacts."}
+              />
+            ) : artifacts.data ? (
+              renderRoute(route, artifacts.data)
+            ) : (
+              <EmptyState title="Loading artifacts" message="Reading generated Ryvus artifacts from Control." />
+            )}
+          </section>
+        </div>
       </div>
     </main>
   );
@@ -84,20 +107,26 @@ export function App() {
 
 function currentRoute(): RouteId {
   const hash = window.location.hash.replace("#", "");
-  return routes.some(([id]) => id === hash) ? (hash as RouteId) : "overview";
+  if (hash === "overview") {
+    return "dashboard";
+  }
+  if (hash === "api-actions") {
+    return "gateway";
+  }
+  return routes.some(([id]) => id === hash) ? (hash as RouteId) : "dashboard";
 }
 
 function renderRoute(route: RouteId, artifacts: Artifacts) {
   switch (route) {
-    case "overview":
-      return <Overview artifacts={artifacts} />;
-    case "api-actions":
+    case "dashboard":
+      return <Dashboard artifacts={artifacts} />;
+    case "gateway":
       return <ApiActions artifacts={artifacts} />;
     case "schedules":
       return <Schedules artifacts={artifacts} />;
     case "flows":
       return (
-        <Suspense fallback={<p>Loading flows...</p>}>
+        <Suspense fallback={<EmptyState title="Loading flows" message="Preparing the graph renderer." />}>
           <Flows artifacts={artifacts} />
         </Suspense>
       );
@@ -114,17 +143,8 @@ function renderRoute(route: RouteId, artifacts: Artifacts) {
       return (
         <EmptyState
           title="Execution Preview"
-          message="Execution preview will call gateway runtime APIs in a later slice."
+          message="Execution preview will call runtime APIs in a later slice."
         />
       );
   }
-}
-
-function ArtifactError({ message }: { message: string }) {
-  return (
-    <div className="page error-state">
-      <h1>Artifact Error</h1>
-      <p>{message}</p>
-    </div>
-  );
 }

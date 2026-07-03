@@ -1069,7 +1069,6 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 name = "ryvus-action-catalog"
 version = "0.1.0"
 dependencies = [
- "ryvus-executor",
  "ryvus-protocol",
  "serde",
  "serde_json",
@@ -1130,29 +1129,6 @@ dependencies = [
  "ryvus-protocol",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "ryvus-execution-service"
-version = "0.1.0"
-dependencies = [
- "ryvus-execution",
- "ryvus-executor",
- "ryvus-persistence",
- "ryvus-protocol",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "ryvus-executor"
-version = "0.1.0"
-dependencies = [
- "ryvus-execution",
- "ryvus-protocol",
- "serde",
- "serde_json",
  "thiserror",
  "tracing",
  "uuid",
@@ -1167,8 +1143,7 @@ dependencies = [
  "ryvus-action-catalog",
  "ryvus-control",
  "ryvus-docs",
- "ryvus-execution-service",
- "ryvus-executor",
+ "ryvus-execution",
  "ryvus-persistence",
  "ryvus-protocol",
  "ryvus-scheduler",
@@ -1189,7 +1164,6 @@ name = "ryvus-persistence"
 version = "0.1.0"
 dependencies = [
  "ryvus-execution",
- "ryvus-executor",
  "ryvus-protocol",
  "serde",
  "serde_json",
@@ -1211,8 +1185,7 @@ name = "ryvus-scheduler"
 version = "0.1.0"
 dependencies = [
  "axum",
- "ryvus-execution-service",
- "ryvus-executor",
+ "ryvus-execution",
  "ryvus-persistence",
  "ryvus-protocol",
  "serde",

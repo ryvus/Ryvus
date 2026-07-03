@@ -2,8 +2,11 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use axum::Router;
 use ryvus_control::{ControlService, LocalControlConfig};
-use ryvus_executor::{Executor, LocalProcessExecutor, LocalRuntimeResolver, RuntimeResolver};
-use ryvus_persistence::{ConsoleExecutionPersistence, ExecutionPersistence};
+use ryvus_execution::{
+    ExecutionPersistence, ExecutionService, Executor, LocalProcessExecutor, LocalRuntimeResolver,
+    RuntimeResolver,
+};
+use ryvus_persistence::ConsoleExecutionPersistence;
 use ryvus_protocol::{ActionDefinition, ActionKind};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
@@ -75,7 +78,7 @@ pub fn build_app_with_execution_service(
 }
 
 pub fn build_execution_service(project_root: PathBuf) -> Arc<GatewayExecutionService> {
-    Arc::new(ryvus_execution_service::ExecutionService::new(
+    Arc::new(ExecutionService::new(
         Arc::new(LocalRuntimeResolver::with_project_root(project_root)) as Arc<dyn RuntimeResolver>,
         Arc::new(LocalProcessExecutor::new()) as Arc<dyn Executor>,
         Arc::new(ConsoleExecutionPersistence) as Arc<dyn ExecutionPersistence>,

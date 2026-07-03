@@ -3,8 +3,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use ryvus_execution_service::ExecutionServiceError;
-use ryvus_executor::ExecutorError;
+use ryvus_execution::{ExecutionServiceError, ExecutorError};
 use serde_json::Value;
 
 pub fn public_error(

@@ -1,9 +1,8 @@
 use std::time::SystemTime;
 
-use ryvus_execution::{ExecutionRecord, ExecutionTarget};
 use ryvus_protocol::InvocationRequest;
 
-use crate::{Executor, ExecutorResult, ProcessTarget};
+use crate::{ExecutionRecord, ExecutionTarget, Executor, ExecutorResult, ProcessTarget};
 
 pub struct RecordingExecutor<E> {
     inner: E,
@@ -44,14 +43,11 @@ impl<E: Executor> RecordingExecutor<E> {
 
 #[cfg(test)]
 mod tests {
-    use ryvus_execution::ExecutionTarget;
     use serde_json::json;
 
     use ryvus_protocol::{InvocationRequest, InvocationStatus};
 
-    use crate::local_process::LocalProcessExecutor;
-    use crate::recording::RecordingExecutor;
-    use crate::target::ProcessTarget;
+    use crate::{ExecutionTarget, LocalProcessExecutor, ProcessTarget, RecordingExecutor};
 
     #[test]
     fn invokes_and_returns_execution_record() {

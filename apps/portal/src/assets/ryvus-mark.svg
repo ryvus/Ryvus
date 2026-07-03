@@ -1,0 +1,44 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Ryvus mark</title>
+  <desc id="desc">A rounded geometric R mark in a blue to violet gradient.</desc>
+  <defs>
+    <linearGradient id="ryvus-mark-gradient" x1="18" y1="16" x2="106" y2="112" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2563FF"/>
+      <stop offset="0.52" stop-color="#7C3AED"/>
+      <stop offset="1" stop-color="#22D3EE"/>
+    </linearGradient>
+  </defs>
+  <path
+    d="M35 28H82C96 28 106 38 106 51C106 64 96 74 82 74H48"
+    stroke="url(#ryvus-mark-gradient)"
+    stroke-width="13"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M35 28C22 28 14 38 14 51C14 64 23 74 36 74H70"
+    stroke="url(#ryvus-mark-gradient)"
+    stroke-width="13"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M50 52H78"
+    stroke="url(#ryvus-mark-gradient)"
+    stroke-width="13"
+    stroke-linecap="round"
+  />
+  <path
+    d="M54 74L94 106"
+    stroke="url(#ryvus-mark-gradient)"
+    stroke-width="13"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M24 94H48"
+    stroke="url(#ryvus-mark-gradient)"
+    stroke-width="13"
+    stroke-linecap="round"
+  />
+</svg>

@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
-use ryvus_execution::ExecutionResult;
 use ryvus_protocol::InvocationRequest;
 
-use crate::{error::ExecutorResult, ProcessTarget};
+use crate::{error::ExecutorResult, ExecutionResult, ProcessTarget};
 
 pub trait Executor: Send + Sync {
     fn invoke(

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { defaultGatewayUrl } from "../api/runtime";
 import type { Artifacts } from "../artifacts/types";
+import { Badge, Button, CodeBlock, EmptyState, Page, Panel, cn } from "../components/ui";
 
 type OpenApiParameter = {
   name: string;
@@ -37,6 +38,7 @@ const HTTP_METHODS = ["get", "post", "put", "patch", "delete", "head", "options"
 
 export function ApiActions({ artifacts }: { artifacts: Artifacts }) {
   const operations = useMemo(() => openApiOperations(artifacts.openapi), [artifacts.openapi]);
+  const routeGroups = useMemo(() => groupRoutes(operations), [operations]);
   const [selectedKey, setSelectedKey] = useState(operations[0]?.key ?? "");
   const selected = operations.find((operation) => operation.key === selectedKey) ?? operations[0];
 
@@ -48,42 +50,77 @@ export function ApiActions({ artifacts }: { artifacts: Artifacts }) {
 
   if (!selected) {
     return (
-      <div className="page">
-        <h1>API Actions</h1>
-        <p>No HTTP API actions were found in this artifact snapshot.</p>
-      </div>
+      <Page eyebrow="OpenAPI" title="Gateway">
+        <EmptyState
+          title="No gateway routes"
+          message="No HTTP gateway routes were found in this artifact snapshot."
+        />
+      </Page>
     );
   }
 
   return (
-    <div className="api-workspace">
-      <section className="operation-browser" aria-label="API operations">
-        <div className="section-heading">
-          <span className="eyebrow">OpenAPI</span>
-          <h1>API Actions</h1>
-        </div>
-        <div className="operation-list">
-          {operations.map((operation) => (
-            <button
-              key={operation.key}
-              type="button"
-              className={operation.key === selected.key ? "operation-item active" : "operation-item"}
-              onClick={() => setSelectedKey(operation.key)}
-            >
-              <span className={`method ${operation.method.toLowerCase()}`}>
-                {operation.method}
-              </span>
-              <span>
-                <strong>{operation.operation.summary || operation.operation.operationId || operation.path}</strong>
-                <code>{operation.path}</code>
-              </span>
-            </button>
-          ))}
-        </div>
-      </section>
-      <TryIt operation={selected} />
-    </div>
+    <Page eyebrow="OpenAPI" title="Gateway">
+      <div className="grid gap-4 xl:grid-cols-[360px_minmax(0,1fr)]">
+        <Panel className="self-start p-4" aria-label="Gateway routes">
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-white">Routes</h2>
+            <Badge tone="slate">{operations.length}</Badge>
+          </div>
+          <div className="grid gap-3">
+            {routeGroups.map((group) => (
+              <div key={group.segment} className="grid gap-1.5">
+                <div className="flex items-center gap-2 px-2 text-xs font-semibold text-slate-500">
+                  <span className="h-px flex-1 bg-white/10" />
+                  <code>/{group.segment}</code>
+                </div>
+                <div className="grid gap-1 border-l border-white/10 pl-3">
+                  {group.operations.map((operation) => (
+                    <button
+                      key={operation.key}
+                      type="button"
+                      className={cn(
+                        "grid w-full grid-cols-[58px_minmax(0,1fr)] gap-3 rounded-lg border border-transparent p-2.5 text-left transition hover:border-blue-400/20 hover:bg-white/[0.04]",
+                        operation.key === selected.key && "border-blue-400/25 bg-blue-500/10",
+                      )}
+                      onClick={() => setSelectedKey(operation.key)}
+                    >
+                      <MethodBadge method={operation.method} />
+                      <span className="min-w-0">
+                        <strong className="block truncate text-sm font-semibold text-slate-100">
+                          {operation.operation.summary || operation.operation.operationId || operation.path}
+                        </strong>
+                        <code className="block truncate text-xs text-slate-400">{routeTail(operation.path)}</code>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+        <TryIt operation={selected} />
+      </div>
+    </Page>
   );
+}
+
+function groupRoutes(operations: Operation[]) {
+  const groups = new Map<string, Operation[]>();
+  for (const operation of operations) {
+    const segment = operation.path.split("/").filter(Boolean)[0] ?? "root";
+    groups.set(segment, [...(groups.get(segment) ?? []), operation]);
+  }
+
+  return Array.from(groups, ([segment, groupOperations]) => ({
+    segment,
+    operations: groupOperations.sort((left, right) => left.path.localeCompare(right.path) || left.method.localeCompare(right.method)),
+  })).sort((left, right) => left.segment.localeCompare(right.segment));
+}
+
+function routeTail(path: string) {
+  const segments = path.split("/").filter(Boolean);
+  return segments.length > 1 ? `/${segments.slice(1).join("/")}` : "/";
 }
 
 function TryIt({ operation }: { operation: Operation }) {
@@ -145,29 +182,31 @@ function TryIt({ operation }: { operation: Operation }) {
   }
 
   return (
-    <section className="try-panel">
-      <div className="operation-header">
-        <span className={`method ${operation.method.toLowerCase()}`}>{operation.method}</span>
+    <Panel className="grid gap-4 p-5">
+      <div className="flex items-start gap-3">
+        <MethodBadge method={operation.method} />
         <div>
-          <h2>{operation.operation.summary || operation.operation.operationId || operation.path}</h2>
-          <code>{operation.path}</code>
+          <h2 className="text-lg font-semibold text-white">
+            {operation.operation.summary || operation.operation.operationId || operation.path}
+          </h2>
+          <code className="text-sm text-slate-400">{operation.path}</code>
         </div>
       </div>
 
       {operation.operation.description && (
-        <p className="operation-description">{operation.operation.description}</p>
+        <p className="max-w-3xl text-sm leading-6 text-slate-400">{operation.operation.description}</p>
       )}
 
-      <label className="field">
-        <span>Base URL</span>
+      <label className="grid gap-2">
+        <span className="text-xs font-semibold text-slate-300">Base URL</span>
         <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} />
       </label>
 
       {pathParams.length > 0 && (
-        <div className="field-grid">
+        <div className="grid gap-3 sm:grid-cols-2">
           {pathParams.map((name) => (
-            <label className="field" key={name}>
-              <span>Path: {name}</span>
+            <label className="grid gap-2" key={name}>
+              <span className="text-xs font-semibold text-slate-300">Path: {name}</span>
               <input
                 value={pathValues[name] ?? ""}
                 onChange={(event) =>
@@ -180,10 +219,10 @@ function TryIt({ operation }: { operation: Operation }) {
       )}
 
       {queryParams.length > 0 && (
-        <div className="field-grid">
+        <div className="grid gap-3 sm:grid-cols-2">
           {queryParams.map((param) => (
-            <label className="field" key={param.name}>
-              <span>
+            <label className="grid gap-2" key={param.name}>
+              <span className="text-xs font-semibold text-slate-300">
                 Query: {param.name}
                 {param.required ? " *" : ""}
               </span>
@@ -199,46 +238,58 @@ function TryIt({ operation }: { operation: Operation }) {
       )}
 
       {allowsBody && (
-        <label className="field">
-          <span>JSON Body</span>
+        <label className="grid gap-2">
+          <span className="text-xs font-semibold text-slate-300">JSON Body</span>
           <textarea value={body} onChange={(event) => setBody(event.target.value)} rows={8} />
         </label>
       )}
 
-      <div className="request-bar">
-        <code>{requestUrl}</code>
-        <button type="button" onClick={sendRequest} disabled={isRunning}>
+      <div className="grid gap-3 rounded-xl border border-white/10 bg-black/20 p-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
+        <code className="truncate text-xs text-slate-300">{requestUrl}</code>
+        <Button type="button" onClick={sendRequest} disabled={isRunning}>
           {isRunning ? "Sending..." : "Send request"}
-        </button>
+        </Button>
       </div>
 
-      <div className="code-panel">
-        <div className="panel-title">cURL</div>
-        <pre>{curl}</pre>
+      <div className="grid gap-2">
+        <div className="text-xs font-semibold uppercase text-slate-500">cURL</div>
+        <CodeBlock>{curl}</CodeBlock>
       </div>
 
       {(error || response) && (
-        <div className="response-panel">
-          <div className="panel-title">Response</div>
+        <div className="grid gap-2">
+          <div className="text-xs font-semibold uppercase text-slate-500">Response</div>
           {error ? (
-            <p className="error">{error}</p>
+            <p className="rounded-lg border border-red-400/20 bg-red-500/10 p-3 text-sm text-red-200">{error}</p>
           ) : response ? (
             <>
-              <div className="response-meta">
+              <div className="flex gap-3 text-sm font-medium text-emerald-300">
                 <span>{response.status} {response.statusText}</span>
                 <span>{response.durationMs}ms</span>
               </div>
-              <pre>{response.body}</pre>
-              <details>
-                <summary>Headers</summary>
-                <pre>{response.headers}</pre>
+              <CodeBlock>{response.body}</CodeBlock>
+              <details className="text-sm text-slate-300">
+                <summary className="cursor-pointer font-medium">Headers</summary>
+                <CodeBlock className="mt-2">{response.headers}</CodeBlock>
               </details>
             </>
           ) : null}
         </div>
       )}
-    </section>
+    </Panel>
   );
+}
+
+function MethodBadge({ method }: { method: string }) {
+  const tone =
+    method === "DELETE"
+      ? "red"
+      : method === "POST"
+        ? "violet"
+        : method === "PUT" || method === "PATCH"
+          ? "cyan"
+          : "blue";
+  return <Badge tone={tone}>{method}</Badge>;
 }
 
 function openApiOperations(openapi: Artifacts["openapi"]): Operation[] {

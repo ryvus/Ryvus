@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use ryvus_control::ControlService;
-use ryvus_execution_service::ExecutionService;
-use ryvus_executor::{Executor, RuntimeResolver};
-use ryvus_persistence::ExecutionPersistence;
+use ryvus_execution::{ExecutionPersistence, ExecutionService, Executor, RuntimeResolver};
 
 pub type GatewayExecutionService =
     ExecutionService<Arc<dyn RuntimeResolver>, Arc<dyn Executor>, Arc<dyn ExecutionPersistence>>;

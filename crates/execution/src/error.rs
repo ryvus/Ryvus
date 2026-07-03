@@ -39,3 +39,20 @@ pub enum ExecutorError {
 }
 
 pub type ExecutorResult<T> = Result<T, ExecutorError>;
+
+#[derive(Debug, Error)]
+pub enum ExecutionServiceError {
+    #[error("executor error: {0}")]
+    Executor(#[from] ExecutorError),
+
+    #[error("persistence error: {0}")]
+    Persistence(Box<dyn std::error::Error + Send + Sync + 'static>),
+}
+
+impl From<Box<dyn std::error::Error + Send + Sync + 'static>> for ExecutionServiceError {
+    fn from(error: Box<dyn std::error::Error + Send + Sync + 'static>) -> Self {
+        Self::Persistence(error)
+    }
+}
+
+pub type ExecutionServiceResult<T> = Result<T, ExecutionServiceError>;

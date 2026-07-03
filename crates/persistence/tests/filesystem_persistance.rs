@@ -1,4 +1,4 @@
-// use ryvus_executor::{
+// use ryvus_execution::{
 //     ActionDefinition, ActionKind, LocalProcessExecutor, LocalRuntimeResolver, RecordingExecutor,
 //     RuntimeKind, RuntimeResolver,
 // };
@@ -10,7 +10,7 @@
 // fn records_and_persists_node_execution() {
 //     let action = ActionDefinition::new(
 //         RuntimeKind::Node,
-//         ActionKind::Api(ryvus_executor::ApiAction {
+//         ActionKind::Api(ryvus_protocol::ApiAction {
 //             method: "POST".to_string(),
 //             path: "/echo".to_string(),
 //         }),

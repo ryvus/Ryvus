@@ -9,8 +9,7 @@ repository.workspace = true
 [dependencies]
 axum = { workspace = true }
 ryvus-protocol = { workspace = true }
-ryvus-execution-service = { workspace = true }
-ryvus-executor = { workspace = true }
+ryvus-execution = { workspace = true }
 ryvus-persistence = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

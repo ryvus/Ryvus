@@ -7,11 +7,9 @@ members = [
   # "crates/old_flow",
   # "crates/utils",
   # "crates/ryvus",
-  "crates/executor",
   "crates/protocol",
   "crates/execution",
   "crates/persistence",
-  "crates/execution-service",
   "crates/control",
   "crates/docs",
   "crates/gateway",
@@ -39,11 +37,9 @@ repository = "https://github.com/ryvus/ryvus"
 # ryvus-core = { path = "crates/core" }
 # ryvus-flow = { path = "crates/old_flow" }
 # ryvus-utils = { path = "crates/utils" }
-ryvus-executor = { path = "crates/executor" }
 ryvus-protocol = { path = "crates/protocol" }
 ryvus-execution = { path = "crates/execution" }
 ryvus-persistence = { path = "crates/persistence" }
-ryvus-execution-service = { path = "crates/execution-service" }
 ryvus-control = { path = "crates/control" }
 ryvus-docs = { path = "crates/docs" }
 ryvus-gateway = { path = "crates/gateway" }

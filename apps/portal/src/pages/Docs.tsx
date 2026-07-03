@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { loadDocPage } from "../artifacts/load";
 import type { Artifacts, DocsRegistryPage } from "../artifacts/types";
+import { CodeBlock, EmptyState, Page, Panel, cn } from "../components/ui";
 
 export function Docs({ artifacts }: { artifacts: Artifacts }) {
   const pages = artifacts.docsRegistry.pages;
@@ -30,25 +31,36 @@ export function Docs({ artifacts }: { artifacts: Artifacts }) {
   }, [selected]);
 
   return (
-    <div className="page docs-layout">
-      <div className="docs-nav">
-        <h1>Docs</h1>
+    <Page eyebrow="Project" title="Docs">
+      <div className="grid gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
+      <Panel className="grid content-start gap-2 p-3">
         {pages.map((page) => (
-          <button key={page.id} type="button" onClick={() => setSelected(page)}>
+          <button
+            key={page.id}
+            type="button"
+            className={cn(
+              "rounded-lg border border-transparent px-3 py-2 text-left text-sm font-medium text-slate-400 transition hover:border-blue-400/20 hover:bg-white/[0.04] hover:text-white",
+              selected?.id === page.id && "border-blue-400/25 bg-blue-500/10 text-white",
+            )}
+            onClick={() => setSelected(page)}
+          >
             {page.title}
           </button>
         ))}
-      </div>
-      <article className="doc-content">
-        {error && <p className="error">{error}</p>}
+      </Panel>
+      <Panel className="min-w-0 p-5">
+        {error && <p className="rounded-lg border border-red-400/20 bg-red-500/10 p-3 text-sm text-red-200">{error}</p>}
         {!selected ? (
-          <p>No docs pages in this artifact snapshot.</p>
+          <EmptyState title="No docs" message="No docs pages in this artifact snapshot." />
         ) : selected.content_type === "Markdown" ? (
-          <ReactMarkdown>{content}</ReactMarkdown>
+          <article className="portal-markdown">
+            <ReactMarkdown>{content}</ReactMarkdown>
+          </article>
         ) : (
-          <pre>{content}</pre>
+          <CodeBlock>{content}</CodeBlock>
         )}
-      </article>
-    </div>
+      </Panel>
+      </div>
+    </Page>
   );
 }
