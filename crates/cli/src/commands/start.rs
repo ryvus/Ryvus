@@ -33,6 +33,19 @@ pub fn run(run_schedules: bool) -> Result<()> {
         Arc::clone(&execution_service),
     ));
     let scheduler_routes = ryvus_scheduler::http::scheduler_routes(scheduler_service);
+    let flow_store = Arc::new(ryvus_flow::InMemoryFlowStateStore::default());
+    let flow_service = Arc::new(
+        ryvus_flow::FlowService::new(
+            control_service
+                .typed_flow_spec()
+                .map_err(|err| CliError::Validation(err.to_string()))?,
+            action_catalog.all().cloned().collect(),
+            flow_store,
+            Arc::clone(&execution_service),
+        )
+        .map_err(|err| CliError::Validation(err.to_string()))?,
+    );
+    let control_routes = scheduler_routes.merge(ryvus_flow::http::flow_routes(flow_service));
 
     println!("Validated {} action(s)", validation.action_count);
     println!("Gateway: http://{}", config.addr);
@@ -49,7 +62,7 @@ pub fn run(run_schedules: bool) -> Result<()> {
                     config,
                     execution_service.clone(),
                 ) => result.map_err(|err| CliError::Gateway(err.to_string())),
-                result = ryvus_control::http::serve_with_routes(control_addr, control_service, scheduler_routes) => {
+                result = ryvus_control::http::serve_with_routes(control_addr, control_service, control_routes) => {
                     result.map_err(|err| CliError::Gateway(err.to_string()))
                 },
                 result = scheduler.run(execution_service) => {
@@ -63,7 +76,7 @@ pub fn run(run_schedules: bool) -> Result<()> {
                 result = ryvus_gateway::server::serve_with_execution_service(config, execution_service) => {
                     result.map_err(|err| CliError::Gateway(err.to_string()))
                 },
-                result = ryvus_control::http::serve_with_routes(control_addr, control_service, scheduler_routes) => {
+                result = ryvus_control::http::serve_with_routes(control_addr, control_service, control_routes) => {
                     result.map_err(|err| CliError::Gateway(err.to_string()))
                 }
             }

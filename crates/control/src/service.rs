@@ -2,9 +2,10 @@ use std::{fs, io::ErrorKind, path::PathBuf};
 
 use ryvus_action_catalog::{ActionCatalog, FileActionCatalog};
 use ryvus_docs::{DocsRegistry, DocsRegistryBuilder, GeneratedCatalogDocsSource};
+use ryvus_flow::FlowSpec;
 use ryvus_protocol::ActionDefinition;
 use ryvus_scheduler::ScheduleInfo;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::{ControlResult, RouteRegistry};
 
@@ -15,10 +16,10 @@ pub struct LocalControlConfig {
 }
 
 pub struct ControlService {
-    project_root: PathBuf,
     action_catalog: FileActionCatalog,
     route_registry: RouteRegistry,
     docs_registry: DocsRegistry,
+    flow_spec: FlowSpec,
 }
 
 impl ControlService {
@@ -32,15 +33,22 @@ impl ControlService {
         let action_catalog = FileActionCatalog::load(manifest_path)?;
         let route_registry = RouteRegistry::from_actions(action_catalog.all())?;
         ryvus_scheduler::validate_schedule_actions(action_catalog.all())?;
+        let flow_spec = match fs::read_to_string(config.project_root.join(".ryvus/flows.json")) {
+            Ok(content) => serde_json::from_str::<FlowSpec>(&content)?,
+            Err(error) if error.kind() == ErrorKind::NotFound => FlowSpec::default(),
+            Err(error) => return Err(error.into()),
+        };
+        ryvus_flow::validate_flow_spec(&flow_spec)?;
+        ryvus_flow::validate_flow_actions(&flow_spec, action_catalog.all())?;
         let docs_registry = DocsRegistryBuilder::new()
             .add_provider(GeneratedCatalogDocsSource::new(action_catalog.all()))
             .build()?;
 
         Ok(Self {
-            project_root: config.project_root,
             action_catalog,
             route_registry,
             docs_registry,
+            flow_spec,
         })
     }
 
@@ -61,12 +69,11 @@ impl ControlService {
     }
 
     pub fn flow_spec(&self) -> ControlResult<Value> {
-        let path = self.project_root.join(".ryvus/flows.json");
-        match fs::read_to_string(path) {
-            Ok(content) => Ok(serde_json::from_str(&content)?),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(json!({ "flows": [] })),
-            Err(error) => Err(error.into()),
-        }
+        Ok(serde_json::to_value(&self.flow_spec)?)
+    }
+
+    pub fn typed_flow_spec(&self) -> ControlResult<FlowSpec> {
+        Ok(self.flow_spec.clone())
     }
 
     pub fn resolve_action(&self, action: &str) -> ControlResult<&ActionDefinition> {
@@ -114,6 +121,24 @@ mod tests {
             serde_json::to_string_pretty(&manifest).expect("manifest should serialize"),
         )
         .expect("manifest should be written");
+        fs::write(
+            project_root.join(".ryvus/flows.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "flows": [
+                    {
+                        "key": "hello_flow",
+                        "steps": [
+                            {
+                                "key": "hello",
+                                "action": "src/hello.py::hello"
+                            }
+                        ]
+                    }
+                ]
+            }))
+            .expect("flow spec should serialize"),
+        )
+        .expect("flow spec should be written");
 
         let control = ControlService::load_local(LocalControlConfig {
             project_root,
@@ -129,8 +154,108 @@ mod tests {
         assert_eq!(control.schedule_infos().expect("schedules should load"), []);
         assert_eq!(
             control.flow_spec().expect("flows should load"),
-            json!({ "flows": [] })
+            serde_json::json!({
+                "flows": [
+                    {
+                        "key": "hello_flow",
+                        "steps": [
+                            {
+                                "key": "hello",
+                                "action": "src/hello.py::hello",
+                                "params": null,
+                                "config": null,
+                                "next_when": []
+                            }
+                        ]
+                    }
+                ]
+            })
         );
+        assert_eq!(
+            control.typed_flow_spec().expect("typed flows should load"),
+            FlowSpec {
+                flows: vec![ryvus_flow::FlowDefinition {
+                    key: "hello_flow".to_string(),
+                    description: None,
+                    version: None,
+                    steps: vec![ryvus_flow::FlowStep {
+                        key: "hello".to_string(),
+                        action: "src/hello.py::hello".to_string(),
+                        params: Value::Null,
+                        config: Value::Null,
+                        next: None,
+                        next_when: Vec::new(),
+                        otherwise: None,
+                        on_error: None,
+                        end: None,
+                    }],
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn local_control_rejects_unknown_flow_actions() {
+        let project_root = temp_project_root();
+        let manifest_path = project_root.join(".ryvus/action-manifest.json");
+        fs::create_dir_all(manifest_path.parent().expect("manifest should have parent"))
+            .expect("manifest parent should be created");
+
+        let manifest = ActionManifest {
+            actions: vec![ActionDefinition {
+                runtime: RuntimeKind::Python,
+                kind: ActionKind::Api(ApiAction {
+                    method: "GET".to_string(),
+                    path: "/hello/{name}".to_string(),
+                    request_schema: None,
+                    response_schema: None,
+                    query_params: Vec::new(),
+                }),
+                source: PathBuf::from("src/hello.py"),
+                entrypoint: "hello".to_string(),
+                name: None,
+            }],
+        };
+
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).expect("manifest should serialize"),
+        )
+        .expect("manifest should be written");
+        fs::write(
+            project_root.join(".ryvus/flows.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "flows": [
+                    {
+                        "key": "hello_flow",
+                        "steps": [
+                            {
+                                "key": "hello",
+                                "action": "does_not_exist"
+                            }
+                        ]
+                    }
+                ]
+            }))
+            .expect("flow spec should serialize"),
+        )
+        .expect("flow spec should be written");
+
+        let error = ControlService::load_local(LocalControlConfig {
+            project_root,
+            manifest_path: PathBuf::from(".ryvus/action-manifest.json"),
+        });
+
+        let error = match error {
+            Ok(_) => panic!("unknown flow action should fail validation"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            crate::ControlError::Flow(ryvus_flow::FlowError::ActionNotFound { action })
+                if action == "does_not_exist"
+        ));
     }
 
     fn temp_project_root() -> PathBuf {

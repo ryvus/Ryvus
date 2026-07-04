@@ -14,3 +14,8 @@ class ScheduleEvent:
     trigger: str
     scheduled_at: Any
     expression: str
+
+
+@dataclass(frozen=True)
+class FlowEvent:
+    data: Any = None

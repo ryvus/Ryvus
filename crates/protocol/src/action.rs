@@ -29,6 +29,7 @@ pub enum RuntimeKind {
 pub enum ActionKind {
     Api(ApiAction),
     Schedule(ScheduleAction),
+    Flow(FlowAction),
     Queue(QueueAction),
 }
 
@@ -58,6 +59,9 @@ pub struct ApiQueryParam {
 pub struct ScheduleAction {
     pub expression: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowAction {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueAction {

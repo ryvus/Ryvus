@@ -1,8 +1,19 @@
+import os
 from typing import Any, Callable, Optional, TypeVar, overload
 
-from .runtime import run_api, run_schedule
+from .runtime import run_api, run_flow, run_schedule
 
 F = TypeVar("F", bound=Callable[..., Any])
+
+
+def _should_run(inner: Callable[..., Any]) -> bool:
+    module_name = getattr(inner, "__module__", None)
+
+    if module_name != "__main__":
+        return False
+
+    entrypoint = os.environ.get("RYVUS_ENTRYPOINT")
+    return entrypoint is None or entrypoint == inner.__name__
 
 
 @overload
@@ -44,9 +55,7 @@ def api_action(
 
         setattr(inner, "__ryvus_action__", metadata)
 
-        module_name = getattr(inner, "__module__", None)
-
-        if module_name == "__main__":
+        if _should_run(inner):
             run_api(inner)
 
         return inner
@@ -82,10 +91,42 @@ def scheduled_action(
 
         setattr(inner, "__ryvus_action__", metadata)
 
-        module_name = getattr(inner, "__module__", None)
-
-        if module_name == "__main__":
+        if _should_run(inner):
             run_schedule(inner)
+
+        return inner
+
+    if func is not None:
+        return decorate(func)
+
+    return decorate
+
+
+@overload
+def flow_action(func: F) -> F:
+    ...
+
+
+@overload
+def flow_action(*, name: Optional[str] = None) -> Callable[[F], F]:
+    ...
+
+
+def flow_action(
+    func: Optional[F] = None,
+    *,
+    name: Optional[str] = None,
+):
+    def decorate(inner: F) -> F:
+        metadata = {
+            "type": "flow",
+            "name": name or inner.__name__,
+        }
+
+        setattr(inner, "__ryvus_action__", metadata)
+
+        if _should_run(inner):
+            run_flow(inner)
 
         return inner
 

@@ -13,7 +13,7 @@ import { useMemo, useState } from "react";
 import type { Artifacts, FlowDefinition, FlowStep } from "../artifacts/types";
 import { Badge, Button, CodeBlock, EmptyState, Page, Panel, cn } from "../components/ui";
 
-type ExecutionStatus = "running" | "succeeded" | "failed" | "canceled";
+type ExecutionStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
 type NodeExecution = {
   key: string;
@@ -75,11 +75,23 @@ export function Flows({ artifacts }: { artifacts: Artifacts }) {
             setSelectedNodeKey(execution.nodes[0]?.key ?? "");
           }}
           onSelectNode={setSelectedNodeKey}
-          onStartExecution={(input) => {
-            const execution = createMockExecution(selectedFlow, input);
-            setExecutions((current) => [execution, ...current]);
+          onStartExecution={async (input) => {
+            const execution = await startFlowExecution(selectedFlow.key, input);
+            setExecutions((current) => upsertExecution(current, execution));
             setSelectedExecutionId(execution.id);
             setSelectedNodeKey(execution.nodes[0]?.key ?? "");
+            void pollFlowExecution(execution.id, (updated) => {
+              setExecutions((current) => upsertExecution(current, updated));
+              setSelectedNodeKey((current) => current || (updated.nodes[0]?.key ?? ""));
+            }).catch((error) => {
+              setExecutions((current) => upsertExecution(current, {
+                ...execution,
+                status: "failed",
+                error: error instanceof Error ? error.message : "Flow execution failed.",
+                finished_at: new Date().toISOString(),
+              }));
+            });
+            return execution;
           }}
         />
       ) : (
@@ -156,10 +168,11 @@ function FlowDetail({
   selectedNodeKey: string;
   onSelectExecution: (execution: FlowExecution) => void;
   onSelectNode: (key: string) => void;
-  onStartExecution: (input: unknown) => void;
+  onStartExecution: (input: unknown) => Promise<FlowExecution>;
 }) {
   const [inputText, setInputText] = useState("{\n  \"input\": true\n}");
   const [inputError, setInputError] = useState("");
+  const [isStarting, setIsStarting] = useState(false);
   const [isStartOpen, setIsStartOpen] = useState(false);
   const [activeView, setActiveView] = useState<"diagram" | "source">("diagram");
   const selectedExecution =
@@ -172,15 +185,18 @@ function FlowDetail({
     [flow, selectedExecution, selectedNode?.key, selectedNodeKey, onSelectNode],
   );
 
-  function startExecution() {
+  async function startExecution() {
     try {
       const input = inputText.trim() ? JSON.parse(inputText) : {};
       setInputError("");
-      onStartExecution(input);
+      setIsStarting(true);
+      await onStartExecution(input);
       return true;
     } catch (error) {
-      setInputError(error instanceof Error ? error.message : "Invalid JSON input.");
+      setInputError(error instanceof Error ? error.message : "Flow execution failed.");
       return false;
+    } finally {
+      setIsStarting(false);
     }
   }
 
@@ -210,8 +226,9 @@ function FlowDetail({
               setInputError("");
             }}
             onInputTextChange={setInputText}
-            onStart={() => {
-              if (startExecution()) {
+            isStarting={isStarting}
+            onStart={async () => {
+              if (await startExecution()) {
                 setIsStartOpen(false);
               }
             }}
@@ -291,6 +308,7 @@ function StartExecution({
   onOpen,
   onClose,
   onInputTextChange,
+  isStarting,
   onStart,
 }: {
   inputText: string;
@@ -299,6 +317,7 @@ function StartExecution({
   onOpen: () => void;
   onClose: () => void;
   onInputTextChange: (value: string) => void;
+  isStarting: boolean;
   onStart: () => void;
 }) {
   return (
@@ -329,7 +348,9 @@ function StartExecution({
             {inputError && <p className="text-xs text-red-200">{inputError}</p>}
             <div className="flex justify-end gap-2">
               <Button type="button" className="bg-white/10 hover:bg-white/15" onClick={onClose}>Cancel</Button>
-              <Button type="button" onClick={onStart}>Run flow</Button>
+              <Button type="button" onClick={onStart} disabled={isStarting}>
+                {isStarting ? "Running..." : "Run flow"}
+              </Button>
             </div>
           </div>
         </div>
@@ -390,9 +411,11 @@ function ExecutionList({
                 execution.id === selectedExecutionId && "bg-blue-500/10",
               )}
             >
-              <span className="flex items-center justify-between gap-3">
-                <code className="truncate text-xs text-slate-300">{execution.id}</code>
-                <StatusBadge status={execution.status} />
+              <span className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                <code className="min-w-0 truncate text-xs text-slate-300">{execution.id}</code>
+                <span className="min-w-0 max-w-full overflow-hidden">
+                  <StatusBadge status={execution.status} />
+                </span>
               </span>
               <span className="text-xs text-slate-500">
                 {new Date(execution.started_at).toLocaleString()}
@@ -511,8 +534,6 @@ function DetailSection({ title, value }: { title: string; value: unknown }) {
 }
 
 function WatchLog({ node }: { node?: NodeExecution }) {
-  const lines = node ? fakeLogsForNode(node) : [];
-
   return (
     <div className="grid min-w-0 gap-3 rounded-xl border border-white/10 bg-black/20 p-4">
       <div className="flex items-start justify-between gap-3">
@@ -523,59 +544,17 @@ function WatchLog({ node }: { node?: NodeExecution }) {
         {node && <StatusBadge status={node.status} />}
       </div>
       <div className="h-[560px] overflow-auto rounded-lg border border-white/10 bg-slate-950/80 p-3 font-mono text-xs leading-5">
-        {lines.length === 0 ? (
-          <p className="text-slate-500">Start an execution to watch node output.</p>
-        ) : (
-          lines.map((line) => (
-            <div
-              key={`${line.time}-${line.message}`}
-              className={cn(
-                "grid grid-cols-[54px_minmax(0,1fr)] gap-2",
-                line.level === "error" ? "text-red-200" : line.level === "warn" ? "text-amber-200" : "text-slate-300",
-              )}
-            >
-              <span className="text-slate-600">{line.time}</span>
-              <span className="min-w-0 break-words">{line.message}</span>
-            </div>
-          ))
-        )}
+        <p className="text-slate-500">
+          {node ? "Runtime logs are not attached to flow run state yet." : "Start an execution to watch node output."}
+        </p>
       </div>
     </div>
   );
 }
 
-function fakeLogsForNode(node: NodeExecution) {
-  const base = [
-    { time: "00:00", level: "info", message: `started ${node.action}` },
-    { time: "00:01", level: "info", message: `input accepted for ${node.key}` },
-  ];
-
-  if (node.status === "running") {
-    return [
-      ...base,
-      { time: "00:02", level: "info", message: "waiting for manual decision" },
-      { time: "00:03", level: "warn", message: "node still active, streaming output" },
-    ];
-  }
-
-  if (node.status === "failed") {
-    return [
-      ...base,
-      { time: "00:02", level: "error", message: node.error ?? "node failed" },
-      { time: "00:03", level: "warn", message: "failure path selected" },
-    ];
-  }
-
-  return [
-    ...base,
-    { time: "00:02", level: "info", message: `output: ${JSON.stringify(node.output)}` },
-    { time: "00:03", level: "info", message: "node completed successfully" },
-  ];
-}
-
 function StatusBadge({ status }: { status: ExecutionStatus }) {
   const tone =
-    status === "succeeded" ? "green" : status === "failed" ? "red" : status === "running" ? "blue" : "slate";
+    status === "succeeded" ? "green" : status === "failed" ? "red" : status === "running" || status === "queued" ? "blue" : "slate";
   return <Badge tone={tone}>{status}</Badge>;
 }
 
@@ -729,75 +708,123 @@ function StepNode({
   );
 }
 
-function createMockExecution(flow: FlowDefinition, input: unknown): FlowExecution {
-  const startedAt = new Date();
-  const nodes = flow.steps.map((step, index) => {
-    const nodeStarted = new Date(startedAt.getTime() + index * 120);
-    const nodeFinished = new Date(nodeStarted.getTime() + 80);
-    const status = mockNodeStatus(step);
-    return {
+async function startFlowExecution(flowKey: string, input: unknown): Promise<FlowExecution> {
+  const started = await requestJson<StartFlowResponse>(`/internal/flows/${encodeURIComponent(flowKey)}/runs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input ?? {}),
+  });
+
+  return toFlowExecution({
+    id: started.id,
+    flow_key: started.flow_key,
+    status: started.status,
+    input,
+    output: null,
+    error: null,
+    steps: [],
+  });
+}
+
+async function pollFlowExecution(id: string, onUpdate: (execution: FlowExecution) => void): Promise<void> {
+  const deadline = Date.now() + 10_000;
+
+  while (true) {
+    const execution = toFlowExecution(await requestJson<RawFlowExecution>(`/internal/flows/runs/${encodeURIComponent(id)}`));
+    onUpdate(execution);
+
+    if (execution.status !== "queued" && execution.status !== "running") {
+      return;
+    }
+
+    if (Date.now() > deadline) {
+      return;
+    }
+
+    await sleep(250);
+  }
+}
+
+async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, init);
+  const body = await response.json();
+
+  if (!response.ok) {
+    throw new Error(body?.message ?? body?.error ?? "Request failed.");
+  }
+
+  return body as T;
+}
+
+function toFlowExecution(execution: RawFlowExecution): FlowExecution {
+  const now = new Date().toISOString();
+  const status = normalizeStatus(execution.status);
+  const finishedAt = status === "queued" || status === "running" ? null : now;
+
+  return {
+    id: execution.id,
+    flow_key: execution.flow_key,
+    status,
+    input: execution.input ?? null,
+    output: execution.output ?? null,
+    error: execution.error ?? null,
+    started_at: now,
+    finished_at: finishedAt,
+    nodes: (execution.steps ?? []).map((step) => ({
       key: step.key,
       action: step.action,
-      status,
-      input: mockNodeInput(step, input, flow.steps[index - 1]?.key),
-      output: status === "failed" ? null : mockNodeOutput(step, status),
-      error: status === "failed" ? mockNodeError(step) : null,
-      started_at: nodeStarted.toISOString(),
-      finished_at: status === "running" ? null : nodeFinished.toISOString(),
-    };
-  });
-  const finishedAt = nodes.some((node) => node.status === "running")
-    ? null
-    : new Date(startedAt.getTime() + Math.max(nodes.length, 1) * 120);
-  const failed = nodes.some((node) => node.status === "failed");
-  const running = nodes.some((node) => node.status === "running");
-
-  return {
-    id: `flowexec_${Date.now().toString(36)}`,
-    flow_key: flow.key,
-    status: running ? "running" : failed ? "failed" : "succeeded",
-    input,
-    output: nodes.at(-1)?.output ?? null,
-    error: failed ? "Billing workflow moved through failure handling." : null,
-    started_at: startedAt.toISOString(),
-    finished_at: finishedAt?.toISOString() ?? null,
-    nodes,
+      status: normalizeStatus(step.status),
+      input: step.input ?? null,
+      output: step.output ?? null,
+      error: step.error ?? null,
+      started_at: now,
+      finished_at: finishedAt,
+    })),
   };
 }
 
-function mockNodeStatus(step: FlowStep): ExecutionStatus {
-  if (
-    step.key.includes("failure") ||
-    step.key.includes("failed") ||
-    step.key.includes("error") ||
-    step.key.includes("collections")
-  ) {
-    return "failed";
+function normalizeStatus(status: string): ExecutionStatus {
+  return status === "queued" || status === "running" || status === "succeeded" || status === "failed"
+    ? status
+    : "canceled";
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function upsertExecution(executions: FlowExecution[], execution: FlowExecution) {
+  const index = executions.findIndex((current) => current.id === execution.id);
+
+  if (index === -1) {
+    return [execution, ...executions];
   }
-  if (step.key.includes("manual_review")) {
-    return "running";
-  }
-  return "succeeded";
+
+  return executions.map((current) => current.id === execution.id ? execution : current);
 }
 
-function mockNodeInput(step: FlowStep, flowInput: unknown, previousStep?: string) {
-  return step.key.includes("receive")
-    ? flowInput
-    : { from: previousStep, action: step.action };
-}
+type StartFlowResponse = {
+  id: string;
+  flow_key: string;
+  status: string;
+};
 
-function mockNodeOutput(step: FlowStep, status: ExecutionStatus) {
-  return {
-    ok: status === "succeeded",
-    status,
-    action: step.action,
-    step: step.key,
-  };
-}
-
-function mockNodeError(step: FlowStep) {
-  return `${step.action} returned a simulated billing error.`;
-}
+type RawFlowExecution = {
+  id: string;
+  flow_key: string;
+  status: string;
+  input?: unknown;
+  output?: unknown;
+  error?: string | null;
+  steps?: Array<{
+    key: string;
+    action: string;
+    status: string;
+    input?: unknown;
+    output?: unknown;
+    error?: string | null;
+  }>;
+};
 
 function executionDuration(execution: FlowExecution) {
   if (!execution.finished_at) {

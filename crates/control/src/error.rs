@@ -20,5 +20,8 @@ pub enum ControlError {
     Docs(#[from] ryvus_docs::DocsError),
 
     #[error(transparent)]
+    Flow(#[from] ryvus_flow::FlowError),
+
+    #[error(transparent)]
     Schedules(#[from] ryvus_scheduler::SchedulerError),
 }

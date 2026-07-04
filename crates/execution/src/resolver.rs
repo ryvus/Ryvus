@@ -87,7 +87,8 @@ impl RuntimeResolver for LocalRuntimeResolver {
                 Ok(ProcessTarget::new(command)
                     .arg(source_path.to_string_lossy().to_string())
                     .working_dir(&self.project_root)
-                    .env("PYTHONPATH", self.python_path()))
+                    .env("PYTHONPATH", self.python_path())
+                    .env("RYVUS_ENTRYPOINT", &action.entrypoint))
             }
 
             RuntimeKind::Node => {

@@ -79,6 +79,10 @@ def discover_actions(project_root: Path, source_root: Path) -> list[dict[str, An
                         "expression": metadata["expression"],
                     },
                 }
+            elif metadata.get("type") == "flow":
+                kind = {
+                    "Flow": {},
+                }
             else:
                 continue
 

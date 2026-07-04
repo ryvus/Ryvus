@@ -8,7 +8,7 @@ import traceback
 from typing import Any, Callable
 
 from .context import Context
-from .events import ApiEvent, ScheduleEvent
+from .events import ApiEvent, FlowEvent, ScheduleEvent
 from .resolver import resolve_handler_args
 
 Handler = Callable[..., dict[str, Any]]
@@ -43,6 +43,10 @@ def run_api(handler: Handler) -> None:
 
 def run_schedule(handler: Handler) -> None:
     run_handler(handler, event_from_schedule_request)
+
+
+def run_flow(handler: Handler) -> None:
+    run_handler(handler, event_from_flow_request)
 
 
 def run_handler(handler: Handler, event_factory) -> None:
@@ -97,7 +101,7 @@ def handle_request(
     context = Context(
         invocation_id=invocation_id,
         protocol_version=request["protocol_version"],
-        metadata=request.get("metadata") or {},
+        metadata=_request_metadata(request),
     )
 
     try:
@@ -186,6 +190,19 @@ def event_from_schedule_request(raw_event: dict[str, Any]) -> ScheduleEvent:
         scheduled_at=raw_event.get("scheduled_at"),
         expression=raw_event.get("expression") or "",
     )
+
+
+def event_from_flow_request(raw_event: Any) -> FlowEvent:
+    return FlowEvent(data=raw_event)
+
+
+def _request_metadata(request: dict[str, Any]) -> dict[str, Any]:
+    context = request.get("context")
+
+    if isinstance(context, dict) and isinstance(context.get("metadata"), dict):
+        return context["metadata"]
+
+    return request.get("metadata") or {}
 
 
 def _map_python_log_level(level: int) -> str:

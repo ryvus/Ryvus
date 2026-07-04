@@ -14,6 +14,7 @@ ryvus-protocol = { workspace = true }
 ryvus-gateway = { workspace = true }
 ryvus-control = { workspace = true }
 ryvus-action-catalog = { workspace = true }
+ryvus-flow = { workspace = true }
 ryvus-scheduler = { workspace = true }
 ryvus-docs = { workspace = true }
 serde = { workspace = true }

@@ -145,7 +145,13 @@ def _is_pydantic_model(annotation: Any) -> bool:
 
 
 def _merged_payload(event) -> dict[str, Any]:
-    body = event.body if getattr(event, "body", None) is not None else {}
+    body = getattr(event, "body", None)
+
+    if body is None and hasattr(event, "data"):
+        body = event.data
+
+    if body is None:
+        body = {}
 
     if not isinstance(body, dict):
         body = {"body": body}
