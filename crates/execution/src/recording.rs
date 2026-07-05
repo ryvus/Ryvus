@@ -2,7 +2,9 @@ use std::time::SystemTime;
 
 use ryvus_protocol::InvocationRequest;
 
-use crate::{ExecutionRecord, ExecutionTarget, Executor, ExecutorResult, ProcessTarget};
+use crate::{
+    ExecutionOptions, ExecutionRecord, ExecutionTarget, Executor, ExecutorResult, ProcessTarget,
+};
 
 pub struct RecordingExecutor<E> {
     inner: E,
@@ -19,9 +21,10 @@ impl<E: Executor> RecordingExecutor<E> {
         &self,
         target: &ProcessTarget,
         request: &InvocationRequest,
+        options: &ExecutionOptions,
     ) -> ExecutorResult<ExecutionRecord> {
         let started_at = SystemTime::now();
-        let result = self.inner.invoke(target, request)?;
+        let result = self.inner.invoke(target, request, options)?;
         let finished_at = SystemTime::now();
 
         let execution_target = ExecutionTarget::Process {
@@ -38,6 +41,10 @@ impl<E: Executor> RecordingExecutor<E> {
             started_at,
             finished_at,
         ))
+    }
+
+    pub fn cancel(&self, invocation_id: &str) -> ExecutorResult<bool> {
+        self.inner.cancel(invocation_id)
     }
 }
 
@@ -61,7 +68,13 @@ mod tests {
         let executor = RecordingExecutor::new(LocalProcessExecutor::new());
 
         let record = executor
-            .invoke_recorded(&target, &request)
+            .invoke_recorded(
+                &target,
+                &request,
+                &crate::ExecutionOptions {
+                    timeout: std::time::Duration::from_secs(3),
+                },
+            )
             .expect("recorded invocation should succeed");
         match &record.target {
             ExecutionTarget::Process { command, .. } => {

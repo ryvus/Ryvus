@@ -129,7 +129,20 @@ pub async fn handle_dynamic_route(
         context: InvocationContext::default(),
     };
 
-    let record = match state.execution_service.execute(action, &request) {
+    let policy = match ryvus_execution::ExecutionPolicy::from_action_policy(&action.policy) {
+        Ok(policy) => policy,
+        Err(error) => {
+            return public_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &invocation_id,
+                "invalid_execution_policy",
+                error.to_string(),
+                None,
+            );
+        }
+    };
+
+    let record = match state.execution_service.execute(action, &request, &policy) {
         Ok(record) => record,
         Err(error) => {
             let status = execution_error_status(&error);

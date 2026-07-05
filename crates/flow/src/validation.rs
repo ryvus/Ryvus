@@ -84,6 +84,9 @@ fn validate_flow(flow: &FlowDefinition) -> FlowResult<()> {
             return Err(step_error(flow, step, "duplicate step key"));
         }
 
+        ryvus_execution::ExecutionPolicy::from_action_policy(&step.policy)
+            .map_err(|error| step_error(flow, step, &error.to_string()))?;
+
         for branch in &step.next_when {
             validate_condition(&flow.key, step, &branch.when)?;
         }
@@ -170,11 +173,11 @@ mod tests {
     #[test]
     fn validates_current_example_flow_files() {
         let restock: FlowDefinition = serde_json::from_str(include_str!(
-            "../../../../my-project/flows/restock_flow.json"
+            "../../../../my-project/src/modules/petstore/flows/restock/restock.flows.json"
         ))
         .expect("restock flow should parse");
         let billing: FlowDefinition = serde_json::from_str(include_str!(
-            "../../../../my-project/flows/billing_workflow.json"
+            "../../../../my-project/src/modules/billing/flows/billing_workflow/billing_workflow.flows.json"
         ))
         .expect("billing flow should parse");
         let spec = FlowSpec {
@@ -307,6 +310,7 @@ mod tests {
             source: "src/action.py".into(),
             entrypoint: "handler".to_string(),
             name: Some("named_action".to_string()),
+            policy: ryvus_protocol::ActionExecutionPolicy::default(),
         };
 
         validate_flow_actions(&spec, [&action]).expect("actions should resolve");
@@ -338,6 +342,7 @@ mod tests {
             source: "src/action.py".into(),
             entrypoint: "handler".to_string(),
             name: Some("named_action".to_string()),
+            policy: ryvus_protocol::ActionExecutionPolicy::default(),
         };
 
         assert!(matches!(

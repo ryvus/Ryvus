@@ -1,188 +1,214 @@
 # Ryvus
 
-Ryvus is a modern, modular, and scalable automation and data-orchestration framework designed for reliability, simplicity, and long-term evolution. This monorepo contains all foundational components required to build and run automation pipelines locally or within self-hosted environments.
+Ryvus is an open execution platform that makes building distributed applications as simple as writing code, while remaining portable across local development, cloud, and on-premises environments.
 
-At its core, Ryvus provides:
+Developers should not have to choose between an excellent developer experience and production-grade infrastructure. Ryvus aims to provide both through a code-first platform that abstracts infrastructure without hiding its capabilities.
 
-* A **predictable execution engine**
-* A structured **flow orchestration layer**
-* Strong **typing**, **async safety**, and **deterministic behavior**
-* A lightweight and ergonomic development experience
+The goal is not to become another cloud provider. The goal is to become the execution layer that applications target regardless of where they ultimately run.
 
-Ryvus focuses on core orchestration and execution mechanics.
+That is the long-term direction. The current implementation is v0 and is focused on local developer workflow.
 
-## 🚀 Vision
+The current v0 path is intentionally narrow:
 
-Ryvus aims to make automation and workflow orchestration accessible, predictable, and powerful,without unnecessary complexity.
-
-Key principles guiding the project:
-
-* **Modularity**: Each part of the system exists in its own crate, with clear boundaries.
-* **Predictability**: Deterministic execution models and consistent error handling.
-* **Developer-first ergonomics**: Minimal boilerplate, intuitive APIs, strong safety.
-* **Scalability by design**: Data structures and architecture built for future distributed execution.
-* **Ecosystem-ready**: Foundation designed to evolve without breaking stability.
-
-Plugins and advanced integrations will be layered on top once the foundations are fully stable.
-
-## 📦 Repository Structure
-
-All crates are organized inside a unified workspace at `crates/`.
-
-```
-ryvus/
-│
-├── Cargo.toml                 # Workspace definition
-│
-└── crates/
-    ├── ryvus/                 # Umbrella crate (public entrypoint)
-    ├── ryvus-core/            # Core shared types, primitives, and utilities
-    ├── ryvus-engine/          # Execution engine and action runtime
-    └── ryvus-flow/            # Pipeline and flow orchestration
+```text
+ApiActions -> Scheduled actions -> Flow
 ```
 
-### **Umbrella Crate (`ryvus`)**
+The canonical local command is:
 
-External consumers depend on this single crate:
-
-```toml
-[dependencies]
-ryvus = { git = "https://github.com/ryvus/ryvus" }
+```bash
+ryvus start
 ```
 
-It re-exports:
+`ryvus start` discovers a project, writes generated runtime artifacts, starts the gateway, starts the control/Portal service, runs the local scheduler, and executes actions through one shared `ExecutionService` path.
 
-* `ryvus::core`
-* `ryvus::engine`
-* `ryvus::flow`
+## What Works Now
 
-This keeps the external API clean and stable, independent of internal crate layout.
+- Python and Node/TypeScript ApiActions
+- Python and Node/TypeScript scheduled actions
+- local Flow definitions from recursive `*.flows.json` files
+- generated `.ryvus/action-manifest.json`
+- generated `.ryvus/flows.json`
+- public gateway routes for ApiActions
+- local scheduler for `every <number><s|m|h>`
+- internal scheduler list/manual-run routes
+- internal Flow start/get/cancel/retry-step routes
+- Portal pages for APIs, schedules, docs, and flows
+- request/query/body/schema validation
+- OpenAPI generation for public API docs
+- local process execution through `ExecutionService`
+- default local timeout/retry execution policy
+- console-default logging/persistence
 
-## 🔧 Crate Overview
+## Not Done Yet
 
-### **ryvus-core**
+The vision includes portability across local, cloud, and on-premises environments, but v0 does not provide all of that yet.
 
-Contains the essential building blocks:
+Not done:
 
-* ExecutionContext
-* ActionResult
-* Error and result types
-* Metric and metadata structures
-* Core traits shared across the system
+- on-premises deployment runtime
+- distributed scheduler ownership and leases
+- durable Flow run persistence by default
+- queue trigger runtime
+- object storage trigger runtime
+- provider marketplace
+- infrastructure provider plugins
+- deployment service
+- governance/admin controls
+- OpenTelemetry exporter
+- production multi-node execution
+- Rust code-first SDK/discovery parity
 
-This crate is intentionally minimal and dependency-light.
+Current v0 is local-first: ApiActions, scheduled actions, Flow, Portal, generated artifacts, and shared local process execution.
 
-### **ryvus-engine**
+## Workspace Layout
 
-Implements the runtime responsible for:
+```text
+crates/
+  protocol/        shared action and invocation protocol types
+  execution/       runtime resolution, process execution, policy, recording
+  persistence/     console and filesystem persistence boundaries
+  action-catalog/  file-backed and in-memory action catalogs
+  gateway/         public HTTP ApiAction adapter
+  scheduler/       local scheduled-action runtime
+  flow/            local Flow runtime
+  control/         control/Portal service composition
+  docs/            OpenAPI/docs artifact providers
+  cli/             ryvus command line entrypoint
 
-* Executing actions
-* Managing resolvers
-* Handling hooks
-* Step lifecycle management
+sdk/
+  python/          Python decorators, discovery, and runtime protocol
+  node/            TypeScript/JavaScript definitions, discovery, runtime protocol
 
-It prioritizes correctness, async behavior, and clear control flow.
+apps/
+  portal/          React Portal served by the control service
+```
 
-### **ryvus-flow**
+Older parked/reference crates may still exist in the repository. The active v0 implementation is the crate set above.
 
-Defines the high-level orchestration model:
+## Running A Project
 
-* Pipeline definitions
-* Steps and control structures (`next_when`, `else`, routing)
-* JSONPath condition evaluation
-* Flow-level utilities
+From this workspace, build the CLI:
 
-The flow crate sits above the engine, turning low-level execution into structured workflows.
+```bash
+cargo build -p ryvus-cli
+```
 
-### **ryvus (umbrella)**
+Then run Ryvus from a project directory. If the CLI is not on `PATH`, use the built binary by absolute path:
 
-A convenience entrypoint that unifies all internal crates under one public-facing facade.
+```bash
+ryvus start
+```
 
-## 🧪 Example: Simple `steps.json`
+Services:
 
-Below is a minimal example of a Ryvus flow defined in JSON. This demonstrates how a simple pipeline with two steps might look:
+```text
+Gateway: http://127.0.0.1:8080
+Portal:  http://127.0.0.1:8079
+Control: http://127.0.0.1:8079
+```
+
+## ApiAction Example
+
+```python
+from ryvus import api_action
+
+@api_action(method="GET", path="/hello")
+def hello(event, context):
+    return {"message": "Hello from Ryvus"}
+```
+
+## Scheduled Action Example
+
+```python
+from ryvus import scheduled_action
+
+@scheduled_action(every="10s")
+def restock_report(context):
+    print("checking stock")
+    return {"ok": True}
+```
+
+## Flow Example
 
 ```json
 {
-  "name": "example_pipeline",
+  "key": "retry_probe_flow",
   "steps": [
     {
-      "id": "fetch_user",
-      "action": "http.get",
-      "config": {
-        "url": "https://api.example.com/user/123"
+      "key": "probe_dependency",
+      "action": "system/retry_probe",
+      "retry": {
+        "max_attempts": 2,
+        "initial_delay": "250ms",
+        "backoff": 1
       },
-      "next": "process_user"
+      "next": "done"
     },
     {
-      "id": "process_user",
-      "action": "transform.json",
-      "config": {
-        "select": "$.data.name"
-      }
+      "key": "done",
+      "action": "ryvus/log",
+      "end": "succeeded"
     }
   ]
 }
 ```
 
-This example shows two steps:
+## Internal Runtime Routes
 
-* **fetch_user** , Calls an HTTP GET endpoint.
-* **process_user** , Extracts the user's name using a JSON selection.
+Scheduler routes are mounted on the control service:
 
-More complex routing, conditions, and branching will be built on top of this structure as the project evolves.
-
-## 🛠 Development
-
-### **Prerequisites**
-
-* Rust 1.75+ (stable)
-* Cargo
-
-### **Build everything**
-
+```text
+GET  /internal/scheduler/schedules
+POST /internal/scheduler/schedules/{id}/run
 ```
+
+Flow routes are mounted on the control service:
+
+```text
+GET  /internal/flows
+POST /internal/flows/{key}/runs
+GET  /internal/flows/runs/{id}
+POST /internal/flows/runs/{id}/cancel
+POST /internal/flows/runs/{id}/steps/{step_key}/retry
+```
+
+Schedules and Flows do not execute through the public gateway.
+
+## Development
+
+Build:
+
+```bash
 cargo build --workspace
 ```
 
-### **Run tests**
+Test:
 
-```
+```bash
 cargo test --workspace
 ```
 
-### **Formatting & linting**
+Format:
 
+```bash
+cargo fmt
 ```
-cargo fmt --all
-cargo clippy --workspace --all-targets
+
+Portal build:
+
+```bash
+npm --prefix apps/portal run build
 ```
 
-## 🌱 Roadmap Foundation
+Node SDK build:
 
-(Future features , not yet implemented, but guiding the architecture)
+```bash
+pnpm --dir sdk/node build
+```
 
-* Expanded flow control patterns
-* Stronger execution reporting and introspection
-* Local runner improvements
-* Configurable serialization and storage strategies
+Python SDK tests:
 
-## 📘 Documentation
-
-A dedicated documentation site will be introduced in the future. Until then, each crate's `examples/` directory serves as a practical collection of how‑tos and reference implementations.
-
-## 🤝 Contributing
-
-Contributions of any size are welcome. Whether improving documentation, refining APIs, or adding tests,every addition helps.
-
-For large changes, please open an issue first to discuss alignment with project direction.
-
-## 📄 License
-
-Ryvus is licensed under the MIT License.
-
-## ❤️ Acknowledgements
-
-Ryvus is inspired by the simplicity and power of workflow engines, orchestration frameworks, and event-driven systems. It aims to bring clarity and reliability to automation without the heavyweight overhead.
-
-Thanks for being part of its early evolution.
+```bash
+pytest sdk/python/tests
+```

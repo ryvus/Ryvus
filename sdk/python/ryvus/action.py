@@ -28,7 +28,12 @@ def api_action(*, name: str) -> Callable[[F], F]:
 
 @overload
 def api_action(
-    *, method: str, path: str, name: Optional[str] = None
+    *,
+    method: str,
+    path: str,
+    name: Optional[str] = None,
+    timeout: Optional[str] = None,
+    retry: Optional[dict[str, Any]] = None,
 ) -> Callable[[F], F]:
     ...
 
@@ -39,6 +44,8 @@ def api_action(
     method: Optional[str] = None,
     path: Optional[str] = None,
     name: Optional[str] = None,
+    timeout: Optional[str] = None,
+    retry: Optional[dict[str, Any]] = None,
 ):
     if func is None and ((method is None) != (path is None)):
         raise ValueError(
@@ -52,6 +59,9 @@ def api_action(
             "method": method or "GET",
             "path": path or f"/{inner.__name__.replace('_', '-')}",
         }
+        policy = optional_policy(timeout, retry)
+        if policy is not None:
+            metadata["policy"] = policy
 
         setattr(inner, "__ryvus_action__", metadata)
 
@@ -72,7 +82,13 @@ def scheduled_action(func: F) -> F:
 
 
 @overload
-def scheduled_action(*, every: str = "60s", name: Optional[str] = None) -> Callable[[F], F]:
+def scheduled_action(
+    *,
+    every: str = "60s",
+    name: Optional[str] = None,
+    timeout: Optional[str] = None,
+    retry: Optional[dict[str, Any]] = None,
+) -> Callable[[F], F]:
     ...
 
 
@@ -81,6 +97,8 @@ def scheduled_action(
     *,
     every: str = "60s",
     name: Optional[str] = None,
+    timeout: Optional[str] = None,
+    retry: Optional[dict[str, Any]] = None,
 ):
     def decorate(inner: F) -> F:
         metadata = {
@@ -88,6 +106,9 @@ def scheduled_action(
             "name": name or inner.__name__,
             "expression": f"every {every}" if not every.startswith("every ") else every,
         }
+        policy = optional_policy(timeout, retry)
+        if policy is not None:
+            metadata["policy"] = policy
 
         setattr(inner, "__ryvus_action__", metadata)
 
@@ -134,3 +155,17 @@ def flow_action(
         return decorate(func)
 
     return decorate
+
+
+def optional_policy(
+    timeout: Optional[str], retry: Optional[dict[str, Any]]
+) -> Optional[dict[str, Any]]:
+    if timeout is None and retry is None:
+        return None
+
+    policy: dict[str, Any] = {}
+    if timeout is not None:
+        policy["timeout"] = timeout
+    if retry is not None:
+        policy["retry"] = retry
+    return policy

@@ -47,7 +47,14 @@ where
         action: &ActionDefinition,
         request: &InvocationRequest,
     ) -> SchedulerResult<InvocationResult> {
-        self.execute(action, request)
+        let policy = ryvus_execution::ExecutionPolicy::from_action_policy(&action.policy).map_err(
+            |error| SchedulerError::ExecutionFailed {
+                action: action_key(action),
+                message: error.to_string(),
+            },
+        )?;
+
+        self.execute(action, request, &policy)
             .map(|execution| execution.result.invocation_result)
             .map_err(|error| SchedulerError::ExecutionFailed {
                 action: action_key(action),
@@ -535,6 +542,7 @@ mod tests {
             source: "src/schedule.py".into(),
             entrypoint: "tick".to_string(),
             name: None,
+            policy: ryvus_protocol::ActionExecutionPolicy::default(),
         }
     }
 
@@ -552,6 +560,7 @@ mod tests {
             source: source.into(),
             entrypoint: entrypoint.to_string(),
             name: name.map(str::to_string),
+            policy: ryvus_protocol::ActionExecutionPolicy::default(),
         }
     }
 
@@ -568,6 +577,7 @@ mod tests {
             source: "src/hello.py".into(),
             entrypoint: "hello".to_string(),
             name: None,
+            policy: ryvus_protocol::ActionExecutionPolicy::default(),
         }
     }
 

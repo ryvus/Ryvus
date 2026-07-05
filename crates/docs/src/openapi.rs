@@ -307,6 +307,7 @@ mod tests {
             source: PathBuf::from(source),
             entrypoint: entrypoint.to_string(),
             name: None,
+            policy: ryvus_protocol::ActionExecutionPolicy::default(),
         }
     }
 
@@ -410,6 +411,7 @@ mod tests {
             source: PathBuf::from("src/hello.py"),
             entrypoint: "hello".to_string(),
             name: None,
+            policy: ryvus_protocol::ActionExecutionPolicy::default(),
         };
 
         let schedule_action = ActionDefinition {
@@ -420,6 +422,7 @@ mod tests {
             source: PathBuf::from("src/modules/petstore/schedules/restock.py"),
             entrypoint: "restock_report".to_string(),
             name: Some("restock_report".to_string()),
+            policy: ryvus_protocol::ActionExecutionPolicy::default(),
         };
 
         let openapi = build_public_openapi_json_from_actions([&api_action, &schedule_action]);

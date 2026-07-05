@@ -21,6 +21,8 @@ pub struct FlowDefinition {
 pub struct FlowStep {
     pub key: String,
     pub action: String,
+    #[serde(default, flatten)]
+    pub policy: ryvus_protocol::ActionExecutionPolicy,
     #[serde(default)]
     pub params: Value,
     #[serde(default)]
@@ -57,6 +59,7 @@ pub enum FlowExecutionStatus {
     Running,
     Succeeded,
     Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -67,6 +70,14 @@ pub enum FlowStepStatus {
     Succeeded,
     Failed,
     Skipped,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct FlowStepLog {
+    pub level: String,
+    pub message: String,
+    pub fields: Value,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -74,12 +85,20 @@ pub struct FlowStepExecution {
     pub key: String,
     pub action: String,
     pub status: FlowStepStatus,
+    #[serde(default = "default_attempts")]
+    pub attempts: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
     pub input: Value,
     pub output: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default)]
+    pub logs: Vec<FlowStepLog>,
+}
+
+fn default_attempts() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -139,11 +158,34 @@ mod tests {
     #[test]
     fn parses_single_current_example_flow_shape() {
         let flow: FlowDefinition = serde_json::from_str(include_str!(
-            "../../../../my-project/flows/restock_flow.json"
+            "../../../../my-project/src/modules/petstore/flows/restock/restock.flows.json"
         ))
         .expect("current example flow should parse");
 
         assert_eq!(flow.key, "restock_flow");
         assert_eq!(flow.steps[0].key, "restock");
+    }
+
+    #[test]
+    fn flow_step_defaults_policy_and_attempts() {
+        let flow: FlowDefinition = serde_json::from_value(json!({
+            "key": "billing",
+            "steps": [{ "key": "charge", "action": "charge" }]
+        }))
+        .expect("flow should parse");
+
+        assert_eq!(flow.steps[0].policy.timeout, "3s");
+        assert_eq!(flow.steps[0].policy.retry.max_attempts, 1);
+
+        let step: FlowStepExecution = serde_json::from_value(json!({
+            "key": "charge",
+            "action": "charge",
+            "status": "succeeded",
+            "input": {},
+            "output": {}
+        }))
+        .expect("step execution should parse");
+
+        assert_eq!(step.attempts, 1);
     }
 }

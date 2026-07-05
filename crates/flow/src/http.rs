@@ -31,6 +31,11 @@ where
         .route("/internal/flows", get(list_flows::<S, E>))
         .route("/internal/flows/{key}/runs", post(start_flow::<S, E>))
         .route("/internal/flows/runs/{id}", get(get_run::<S, E>))
+        .route("/internal/flows/runs/{id}/cancel", post(cancel_run::<S, E>))
+        .route(
+            "/internal/flows/runs/{id}/steps/{step_key}/retry",
+            post(retry_failed_step::<S, E>),
+        )
         .with_state(FlowHttpState { service })
 }
 
@@ -73,6 +78,36 @@ where
         .map_err(flow_error_response)
 }
 
+async fn cancel_run<S, E>(
+    State(state): State<FlowHttpState<S, E>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)>
+where
+    S: FlowStateStore,
+    E: FlowStepExecutor,
+{
+    state
+        .service
+        .cancel_run(&id)
+        .map(|execution| Json(json!(execution)))
+        .map_err(flow_error_response)
+}
+
+async fn retry_failed_step<S, E>(
+    State(state): State<FlowHttpState<S, E>>,
+    Path((id, step_key)): Path<(String, String)>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)>
+where
+    S: FlowStateStore,
+    E: FlowStepExecutor,
+{
+    state
+        .service
+        .retry_failed_step(&id, &step_key)
+        .map(|execution| Json(json!(execution)))
+        .map_err(flow_error_response)
+}
+
 fn flow_error_response(error: FlowError) -> (StatusCode, Json<Value>) {
     let status = match error {
         FlowError::FlowNotFound { .. } | FlowError::RunNotFound { .. } => StatusCode::NOT_FOUND,
@@ -92,12 +127,13 @@ fn flow_error_response(error: FlowError) -> (StatusCode, Json<Value>) {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
 
     use axum::{
         body::{to_bytes, Body},
         http::{Method, Request, StatusCode},
     };
+    use ryvus_execution::{ExecutionRecord, ExecutionResult, ExecutionTarget};
     use ryvus_protocol::{
         ActionDefinition, ActionKind, ApiAction, InvocationRequest, InvocationResult,
         InvocationStatus, RuntimeKind, PROTOCOL_VERSION,
@@ -124,6 +160,7 @@ mod tests {
                         steps: vec![FlowStep {
                             key: "sync".to_string(),
                             action: "sync".to_string(),
+                            policy: ryvus_protocol::ActionExecutionPolicy::default(),
                             params: json!({}),
                             config: json!({}),
                             next: None,
@@ -208,6 +245,7 @@ mod tests {
             source: format!("src/{entrypoint}.py").into(),
             entrypoint: entrypoint.to_string(),
             name: Some(entrypoint.to_string()),
+            policy: ryvus_protocol::ActionExecutionPolicy::default(),
         }
     }
 
@@ -221,19 +259,48 @@ mod tests {
             &self,
             _action: &ActionDefinition,
             request: &InvocationRequest,
-        ) -> FlowResult<InvocationResult> {
+            _policy: &ryvus_execution::ExecutionPolicy,
+        ) -> FlowResult<ExecutionRecord> {
             self.requests
                 .lock()
                 .expect("requests should lock")
                 .push(request.clone());
 
-            Ok(InvocationResult {
-                protocol_version: PROTOCOL_VERSION.to_string(),
-                invocation_id: request.invocation_id.clone(),
-                status: InvocationStatus::Success,
-                output: Some(json!({ "ok": true })),
-                error: None,
-            })
+            Ok(execution_record(
+                request,
+                InvocationResult {
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                    invocation_id: request.invocation_id.clone(),
+                    status: InvocationStatus::Success,
+                    output: Some(json!({ "ok": true })),
+                    error: None,
+                },
+            ))
         }
+    }
+
+    fn execution_record(
+        request: &InvocationRequest,
+        invocation_result: InvocationResult,
+    ) -> ExecutionRecord {
+        let now = SystemTime::now();
+        ExecutionRecord::new(
+            request.clone(),
+            ExecutionTarget::Process {
+                command: "test".to_string(),
+                args: Vec::new(),
+                working_dir: None,
+                env: Default::default(),
+            },
+            ExecutionResult {
+                invocation_result,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration: Duration::from_millis(1),
+                exit_code: Some(0),
+            },
+            now,
+            now,
+        )
     }
 }

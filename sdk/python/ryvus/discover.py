@@ -86,15 +86,16 @@ def discover_actions(project_root: Path, source_root: Path) -> list[dict[str, An
             else:
                 continue
 
-            actions.append(
-                {
-                    "runtime": "Python",
-                    "kind": kind,
-                    "source": str(path.relative_to(project_root)),
-                    "entrypoint": obj.__name__,
-                    "name": metadata.get("name", obj.__name__),
-                }
-            )
+            action = {
+                "runtime": "Python",
+                "kind": kind,
+                "source": str(path.relative_to(project_root)),
+                "entrypoint": obj.__name__,
+                "name": metadata.get("name", obj.__name__),
+            }
+            if "policy" in metadata:
+                action["policy"] = metadata["policy"]
+            actions.append(action)
 
     return actions
 

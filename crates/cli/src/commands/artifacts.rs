@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -59,25 +60,79 @@ fn schedules_json(manifest: &ActionManifest) -> serde_json::Value {
 
 fn flows_json(project_root: &Path) -> Result<serde_json::Value> {
     let mut flows = Vec::new();
+
+    for path in flow_spec_paths(project_root)? {
+        flows.extend(read_flows_file(&path)?);
+    }
+
+    Ok(json!({ "flows": flows }))
+}
+
+fn flow_spec_paths(project_root: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = BTreeSet::new();
     let root_file = project_root.join("flows.json");
 
     if root_file.is_file() {
-        flows.extend(read_flows_file(&root_file)?);
+        paths.insert(root_file);
     }
 
     let flows_dir = project_root.join("flows");
-    let Ok(entries) = fs::read_dir(flows_dir) else {
-        return Ok(json!({ "flows": flows }));
+    if let Ok(entries) = fs::read_dir(&flows_dir) {
+        for entry in entries {
+            let path = entry.map_err(CliError::Io)?.path();
+            if path.is_file() && path.extension().and_then(|value| value.to_str()) == Some("json") {
+                paths.insert(path);
+            }
+        }
+    }
+
+    collect_recursive_flow_specs(project_root, &mut paths)?;
+
+    Ok(paths.into_iter().collect())
+}
+
+fn collect_recursive_flow_specs(dir: &Path, paths: &mut BTreeSet<PathBuf>) -> Result<()> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Ok(());
     };
 
     for entry in entries {
         let path = entry.map_err(CliError::Io)?.path();
-        if path.extension().and_then(|value| value.to_str()) == Some("json") {
-            flows.extend(read_flows_file(&path)?);
+
+        if path.is_dir() {
+            if !is_ignored_flow_dir(&path) {
+                collect_recursive_flow_specs(&path, paths)?;
+            }
+        } else if is_recursive_flow_spec(&path) {
+            paths.insert(path);
         }
     }
 
-    Ok(json!({ "flows": flows }))
+    Ok(())
+}
+
+fn is_recursive_flow_spec(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| name.ends_with(".flows.json"))
+}
+
+fn is_ignored_flow_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| {
+            matches!(
+                name,
+                ".ryvus"
+                    | ".git"
+                    | "dist"
+                    | "target"
+                    | "node_modules"
+                    | ".venv"
+                    | "venv"
+                    | "__pycache__"
+            )
+        })
 }
 
 fn read_flows_file(path: &Path) -> Result<Vec<serde_json::Value>> {

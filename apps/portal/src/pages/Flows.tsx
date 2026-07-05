@@ -13,17 +13,23 @@ import { useMemo, useState } from "react";
 import type { Artifacts, FlowDefinition, FlowStep } from "../artifacts/types";
 import { Badge, Button, CodeBlock, EmptyState, Page, Panel, cn } from "../components/ui";
 
-type ExecutionStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
+type ExecutionStatus = "queued" | "running" | "succeeded" | "failed" | "skipped" | "cancelled";
 
-type NodeExecution = {
+type StepExecution = {
   key: string;
   action: string;
   status: ExecutionStatus;
   input: unknown;
   output: unknown;
   error: string | null;
-  started_at: string;
-  finished_at: string | null;
+  invocation_id: string | null;
+  logs: FlowStepLog[];
+};
+
+type FlowStepLog = {
+  level: string;
+  message: string;
+  fields: unknown;
 };
 
 type FlowExecution = {
@@ -33,9 +39,7 @@ type FlowExecution = {
   input: unknown;
   output: unknown;
   error: string | null;
-  started_at: string;
-  finished_at: string | null;
-  nodes: NodeExecution[];
+  steps: StepExecution[];
 };
 
 const nodeTypes = {
@@ -47,7 +51,7 @@ export function Flows({ artifacts }: { artifacts: Artifacts }) {
   const [selectedFlowKey, setSelectedFlowKey] = useState("");
   const [executions, setExecutions] = useState<FlowExecution[]>([]);
   const [selectedExecutionId, setSelectedExecutionId] = useState("");
-  const [selectedNodeKey, setSelectedNodeKey] = useState("");
+  const [selectedStepKey, setSelectedStepKey] = useState("");
   const selectedFlow = flows.find((flow) => flow.key === selectedFlowKey);
 
   return (
@@ -69,27 +73,44 @@ export function Flows({ artifacts }: { artifacts: Artifacts }) {
           flow={selectedFlow}
           executions={executions.filter((execution) => execution.flow_key === selectedFlow.key)}
           selectedExecutionId={selectedExecutionId}
-          selectedNodeKey={selectedNodeKey}
+          selectedStepKey={selectedStepKey}
           onSelectExecution={(execution) => {
             setSelectedExecutionId(execution.id);
-            setSelectedNodeKey(execution.nodes[0]?.key ?? "");
+            setSelectedStepKey(execution.steps[0]?.key ?? "");
           }}
-          onSelectNode={setSelectedNodeKey}
+          onSelectStep={setSelectedStepKey}
           onStartExecution={async (input) => {
             const execution = await startFlowExecution(selectedFlow.key, input);
             setExecutions((current) => upsertExecution(current, execution));
             setSelectedExecutionId(execution.id);
-            setSelectedNodeKey(execution.nodes[0]?.key ?? "");
+            setSelectedStepKey(execution.steps[0]?.key ?? "");
             void pollFlowExecution(execution.id, (updated) => {
               setExecutions((current) => upsertExecution(current, updated));
-              setSelectedNodeKey((current) => current || (updated.nodes[0]?.key ?? ""));
+              setSelectedStepKey((current) => current || (updated.steps[0]?.key ?? ""));
             }).catch((error) => {
               setExecutions((current) => upsertExecution(current, {
                 ...execution,
                 status: "failed",
                 error: error instanceof Error ? error.message : "Flow execution failed.",
-                finished_at: new Date().toISOString(),
               }));
+            });
+            return execution;
+          }}
+          onCancelExecution={async (id) => {
+            const execution = await cancelFlowExecution(id);
+            setExecutions((current) => upsertExecution(current, execution));
+            setSelectedExecutionId(execution.id);
+            setSelectedStepKey((current) => current || (execution.steps[0]?.key ?? ""));
+            return execution;
+          }}
+          onRetryStep={async (id, stepKey) => {
+            const execution = await retryFlowStep(id, stepKey);
+            setExecutions((current) => upsertExecution(current, execution));
+            setSelectedExecutionId(execution.id);
+            setSelectedStepKey(stepKey);
+            void pollFlowExecution(execution.id, (updated) => {
+              setExecutions((current) => upsertExecution(current, updated));
+              setSelectedStepKey(stepKey);
             });
             return execution;
           }}
@@ -157,32 +178,38 @@ function FlowDetail({
   flow,
   executions,
   selectedExecutionId,
-  selectedNodeKey,
+  selectedStepKey,
   onSelectExecution,
-  onSelectNode,
+  onSelectStep,
   onStartExecution,
+  onCancelExecution,
+  onRetryStep,
 }: {
   flow: FlowDefinition;
   executions: FlowExecution[];
   selectedExecutionId: string;
-  selectedNodeKey: string;
+  selectedStepKey: string;
   onSelectExecution: (execution: FlowExecution) => void;
-  onSelectNode: (key: string) => void;
+  onSelectStep: (key: string) => void;
   onStartExecution: (input: unknown) => Promise<FlowExecution>;
+  onCancelExecution: (id: string) => Promise<FlowExecution>;
+  onRetryStep: (id: string, stepKey: string) => Promise<FlowExecution>;
 }) {
   const [inputText, setInputText] = useState("{\n  \"input\": true\n}");
   const [inputError, setInputError] = useState("");
   const [isStarting, setIsStarting] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [isRetryingStep, setIsRetryingStep] = useState(false);
   const [isStartOpen, setIsStartOpen] = useState(false);
   const [activeView, setActiveView] = useState<"diagram" | "source">("diagram");
   const selectedExecution =
     executions.find((execution) => execution.id === selectedExecutionId) ?? executions[0];
-  const selectedNode =
-    selectedExecution?.nodes.find((node) => node.key === selectedNodeKey) ??
-    selectedExecution?.nodes[0];
+  const selectedStep =
+    [...(selectedExecution?.steps ?? [])].reverse().find((step) => step.key === selectedStepKey) ??
+    selectedExecution?.steps[0];
   const graph = useMemo(
-    () => flowToGraph(flow, selectedExecution, selectedNode?.key ?? selectedNodeKey, onSelectNode),
-    [flow, selectedExecution, selectedNode?.key, selectedNodeKey, onSelectNode],
+    () => flowToGraph(flow, selectedExecution, selectedStep?.key ?? selectedStepKey, onSelectStep),
+    [flow, selectedExecution, selectedStep?.key, selectedStepKey, onSelectStep],
   );
 
   async function startExecution() {
@@ -197,6 +224,32 @@ function FlowDetail({
       return false;
     } finally {
       setIsStarting(false);
+    }
+  }
+
+  async function cancelExecution() {
+    if (!selectedExecution || !isActiveExecution(selectedExecution)) {
+      return;
+    }
+
+    setIsCancelling(true);
+    try {
+      await onCancelExecution(selectedExecution.id);
+    } finally {
+      setIsCancelling(false);
+    }
+  }
+
+  async function retryStep() {
+    if (!selectedExecution || !selectedStep || !canRetryStep(selectedExecution, selectedStep)) {
+      return;
+    }
+
+    setIsRetryingStep(true);
+    try {
+      await onRetryStep(selectedExecution.id, selectedStep.key);
+    } finally {
+      setIsRetryingStep(false);
     }
   }
 
@@ -233,7 +286,13 @@ function FlowDetail({
               }
             }}
           />
-          {selectedExecution && <ExecutionSummary execution={selectedExecution} />}
+          {selectedExecution && (
+            <ExecutionSummary
+              execution={selectedExecution}
+              isCancelling={isCancelling}
+              onCancel={cancelExecution}
+            />
+          )}
           <div className="overflow-hidden rounded-xl border border-white/10 bg-slate-950/80">
             <div className="flex items-center gap-1 border-b border-white/10 bg-black/20 p-2">
               {(["diagram", "source"] as const).map((view) => (
@@ -283,16 +342,18 @@ function FlowDetail({
               <div className="grid min-w-0 gap-4">
                 <ExecutionDetail
                   execution={selectedExecution}
-                  selectedNode={selectedNode}
-                  onSelectNode={onSelectNode}
+                  selectedStep={selectedStep}
+                  onSelectStep={onSelectStep}
+                  isRetryingStep={isRetryingStep}
+                  onRetryStep={retryStep}
                 />
               </div>
-              <WatchLog node={selectedNode} />
+              <WatchLog step={selectedStep} />
             </div>
           ) : (
             <EmptyState
               title="No executions"
-              message="Start a flow execution to inspect input, output, node state, and timeline."
+              message="Start a flow execution to inspect input, output, step state, and timeline."
             />
           )}
         </div>
@@ -382,10 +443,10 @@ function ExecutionList({
           type="search"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search id, status, date, node, action"
+          placeholder="Search id, status, step, action"
         />
         <div className="mt-2 flex flex-wrap gap-1.5">
-          {["id", "status", "date/time", "node", "action"].map((field) => (
+          {["id", "status", "step", "action"].map((field) => (
             <span
               key={field}
               className="rounded-md border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[11px] font-medium text-slate-500"
@@ -417,9 +478,7 @@ function ExecutionList({
                   <StatusBadge status={execution.status} />
                 </span>
               </span>
-              <span className="text-xs text-slate-500">
-                {new Date(execution.started_at).toLocaleString()}
-              </span>
+              <span className="text-xs text-slate-500">{execution.steps.length} step(s)</span>
             </button>
           ))}
         </div>
@@ -437,12 +496,21 @@ function executionMatches(execution: FlowExecution, query: string) {
   return [
     execution.id,
     execution.status,
-    new Date(execution.started_at).toLocaleString(),
-    ...execution.nodes.map((node) => `${node.key} ${node.action} ${node.status}`),
+    ...execution.steps.map((step) => `${step.key} ${step.action} ${step.status}`),
   ].some((field) => field.toLowerCase().includes(value));
 }
 
-function ExecutionSummary({ execution }: { execution: FlowExecution }) {
+function ExecutionSummary({
+  execution,
+  isCancelling,
+  onCancel,
+}: {
+  execution: FlowExecution;
+  isCancelling: boolean;
+  onCancel: () => void;
+}) {
+  const canCancel = isActiveExecution(execution);
+
   return (
     <div className="grid min-w-0 gap-4 rounded-xl border border-white/10 bg-black/20 p-4">
       <div className="flex items-start justify-between gap-3">
@@ -450,24 +518,36 @@ function ExecutionSummary({ execution }: { execution: FlowExecution }) {
           <h3 className="text-sm font-semibold text-white">Flow execution details</h3>
           <code className="mt-1 block truncate text-xs text-slate-400">{execution.id}</code>
         </div>
-        <StatusBadge status={execution.status} />
+        <div className="flex shrink-0 items-center gap-2">
+          {canCancel && (
+            <Button
+              type="button"
+              className="min-h-8 bg-red-500/90 px-2.5 hover:bg-red-400"
+              disabled={isCancelling}
+              onClick={onCancel}
+            >
+              {isCancelling ? "Cancelling..." : "Cancel"}
+            </Button>
+          )}
+          <StatusBadge status={execution.status} />
+        </div>
       </div>
       <dl className="grid gap-3 text-xs sm:grid-cols-4">
         <div>
-          <dt className="text-slate-500">Started</dt>
-          <dd className="mt-1 text-slate-300">{new Date(execution.started_at).toLocaleTimeString()}</dd>
+          <dt className="text-slate-500">Flow input</dt>
+          <dd className="mt-1 truncate text-slate-300">{shortJson(execution.input)}</dd>
         </div>
         <div>
-          <dt className="text-slate-500">Duration</dt>
-          <dd className="mt-1 text-slate-300">{executionDuration(execution)}</dd>
+          <dt className="text-slate-500">Flow output</dt>
+          <dd className="mt-1 truncate text-slate-300">{shortJson(execution.output)}</dd>
         </div>
         <div>
-          <dt className="text-slate-500">Nodes</dt>
-          <dd className="mt-1 text-slate-300">{execution.nodes.length}</dd>
+          <dt className="text-slate-500">Steps</dt>
+          <dd className="mt-1 text-slate-300">{execution.steps.length}</dd>
         </div>
         <div>
           <dt className="text-slate-500">Errors</dt>
-          <dd className="mt-1 text-slate-300">{execution.nodes.filter((node) => node.status === "failed").length}</dd>
+          <dd className="mt-1 text-slate-300">{execution.steps.filter((step) => step.status === "failed").length}</dd>
         </div>
       </dl>
     </div>
@@ -476,27 +556,50 @@ function ExecutionSummary({ execution }: { execution: FlowExecution }) {
 
 function ExecutionDetail({
   execution,
-  selectedNode,
-  onSelectNode,
+  selectedStep,
+  onSelectStep,
+  isRetryingStep,
+  onRetryStep,
 }: {
   execution: FlowExecution;
-  selectedNode?: NodeExecution;
-  onSelectNode: (key: string) => void;
+  selectedStep?: StepExecution;
+  onSelectStep: (key: string) => void;
+  isRetryingStep: boolean;
+  onRetryStep: () => void;
 }) {
+  const canRetry = selectedStep ? canRetryStep(execution, selectedStep) : false;
+
   return (
     <div className="grid min-w-0 gap-4 rounded-xl border border-white/10 bg-black/20 p-4">
-      <h3 className="text-sm font-semibold text-white">Selected node details</h3>
+      <h3 className="text-sm font-semibold text-white">Selected step details</h3>
       <DetailSection title="Input" value={execution.input} />
       <DetailSection title="Output" value={execution.output} />
-      {selectedNode && (
-        <div className="grid min-w-0 gap-3 rounded-lg border border-white/10 bg-slate-950/70 p-3">
+      {selectedStep && (
+        <div
+          className={cn(
+            "grid min-w-0 gap-3 rounded-lg border bg-slate-950/70 p-3",
+            isTimeoutStep(selectedStep) ? "border-amber-300/45" : "border-white/10",
+          )}
+        >
           <div className="flex items-center justify-between gap-3">
-            <h4 className="min-w-0 truncate text-sm font-semibold text-white">{selectedNode.key}</h4>
-            <StatusBadge status={selectedNode.status} />
+            <h4 className="min-w-0 truncate text-sm font-semibold text-white">{selectedStep.key}</h4>
+            <div className="flex shrink-0 items-center gap-2">
+              {canRetry && (
+                <Button
+                  type="button"
+                  className="min-h-8 px-2.5"
+                  disabled={isRetryingStep}
+                  onClick={onRetryStep}
+                >
+                  {isRetryingStep ? "Retrying..." : "Retry step"}
+                </Button>
+              )}
+              <StatusBadge status={selectedStep.status} />
+            </div>
           </div>
-          <DetailSection title="Node input" value={selectedNode.input} />
-          <DetailSection title="Node output" value={selectedNode.output} />
-          {selectedNode.error && <DetailSection title="Node error" value={selectedNode.error} />}
+          <DetailSection title="Step input" value={selectedStep.input} />
+          <DetailSection title="Step output" value={selectedStep.output} />
+          {selectedStep.error && <DetailSection title="Step error" value={selectedStep.error} />}
         </div>
       )}
       <details className="rounded-lg border border-white/10 bg-slate-950/45 p-3">
@@ -504,18 +607,18 @@ function ExecutionDetail({
           Timeline
         </summary>
         <div className="mt-3 grid gap-2">
-          {execution.nodes.map((node) => (
+          {execution.steps.map((step, index) => (
             <button
-              key={node.key}
+              key={`${step.key}-${index}`}
               type="button"
-              onClick={() => onSelectNode(node.key)}
+              onClick={() => onSelectStep(step.key)}
               className={cn(
                 "flex min-w-0 items-center justify-between gap-3 rounded-lg border border-white/10 bg-slate-950/55 px-3 py-2 text-left transition hover:border-blue-400/35 hover:bg-blue-500/10",
-                selectedNode?.key === node.key && "border-blue-400/45 bg-blue-500/10",
+                selectedStep?.key === step.key && "border-blue-400/45 bg-blue-500/10",
               )}
             >
-              <span className="truncate text-sm text-slate-300">{node.key}</span>
-              <StatusBadge status={node.status} />
+              <span className="truncate text-sm text-slate-300">{step.key}</span>
+              <StatusBadge status={step.status} />
             </button>
           ))}
         </div>
@@ -533,20 +636,38 @@ function DetailSection({ title, value }: { title: string; value: unknown }) {
   );
 }
 
-function WatchLog({ node }: { node?: NodeExecution }) {
+function shortJson(value: unknown): string {
+  const text = typeof value === "string" ? value : JSON.stringify(value ?? null);
+  return text.length > 80 ? `${text.slice(0, 77)}...` : text;
+}
+
+function WatchLog({ step }: { step?: StepExecution }) {
   return (
     <div className="grid min-w-0 gap-3 rounded-xl border border-white/10 bg-black/20 p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold text-white">Watch log</h3>
-          <p className="mt-1 truncate text-xs text-slate-500">{node?.key ?? "No active node"}</p>
+          <p className="mt-1 truncate text-xs text-slate-500">{step?.key ?? "No active step"}</p>
         </div>
-        {node && <StatusBadge status={node.status} />}
+        {step && <StatusBadge status={step.status} />}
       </div>
       <div className="h-[560px] overflow-auto rounded-lg border border-white/10 bg-slate-950/80 p-3 font-mono text-xs leading-5">
-        <p className="text-slate-500">
-          {node ? "Runtime logs are not attached to flow run state yet." : "Start an execution to watch node output."}
-        </p>
+        {!step ? (
+          <p className="text-slate-500">Start an execution to watch step output.</p>
+        ) : step.logs.length === 0 ? (
+          <p className="text-slate-500">No logs were emitted for this step.</p>
+        ) : (
+          <div className="grid gap-2">
+            {step.logs.map((log, index) => (
+              <div key={`${step.key}-${index}`} className="rounded-md border border-white/10 bg-black/25 p-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-semibold uppercase text-blue-200">{log.level}</span>
+                  <span className="min-w-0 truncate text-slate-200">{log.message}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -554,17 +675,28 @@ function WatchLog({ node }: { node?: NodeExecution }) {
 
 function StatusBadge({ status }: { status: ExecutionStatus }) {
   const tone =
-    status === "succeeded" ? "green" : status === "failed" ? "red" : status === "running" || status === "queued" ? "blue" : "slate";
+    status === "succeeded"
+      ? "green"
+      : status === "failed"
+        ? "red"
+        : status === "running" || status === "queued"
+          ? "blue"
+          : "slate";
   return <Badge tone={tone}>{status}</Badge>;
+}
+
+function TimeoutBadge() {
+  return <Badge tone="amber">timeout</Badge>;
 }
 
 function flowToGraph(
   flow: FlowDefinition,
   execution: FlowExecution | undefined,
-  selectedNodeKey: string,
-  onSelectNode: (key: string) => void,
+  selectedStepKey: string,
+  onSelectStep: (key: string) => void,
 ): { nodes: Node[]; edges: Edge[] } {
-  const nodeStates = new Map(execution?.nodes.map((node) => [node.key, node]));
+  const stepStates = new Map(execution?.steps.map((step) => [step.key, step]));
+  const activeEdges = executionEdges(execution);
   const positions = layoutSteps(flow.steps);
 
   return {
@@ -573,45 +705,78 @@ function flowToGraph(
       position: positions.get(step.key) ?? { x: 0, y: 0 },
       data: {
         step,
-        execution: nodeStates.get(step.key),
-        selected: step.key === selectedNodeKey,
-        onSelectNode,
+        execution: stepStates.get(step.key),
+        selected: step.key === selectedStepKey,
+        onSelectStep,
       },
       type: "step",
     })),
-    edges: flow.steps.flatMap(stepEdges),
+    edges: flow.steps.flatMap((step) => stepEdges(step, activeEdges)),
   };
 }
 
+function executionEdges(execution: FlowExecution | undefined): Set<string> {
+  const edges = new Set<string>();
+  for (let index = 1; index < (execution?.steps.length ?? 0); index += 1) {
+    edges.add(`${execution!.steps[index - 1].key}->${execution!.steps[index].key}`);
+  }
+
+  return edges;
+}
+
 function layoutSteps(steps: FlowStep[]): Map<string, { x: number; y: number }> {
-  const levels = new Map(steps.map((step) => [step.key, 0]));
-
-  for (let pass = 0; pass < steps.length; pass += 1) {
-    for (const step of steps) {
-      const level = levels.get(step.key) ?? 0;
-      for (const target of stepTargets(step)) {
-        levels.set(target, Math.max(levels.get(target) ?? 0, level + 1));
-      }
-    }
-  }
-
-  const columns = new Map<number, FlowStep[]>();
-  for (const step of steps) {
-    const level = levels.get(step.key) ?? 0;
-    columns.set(level, [...(columns.get(level) ?? []), step]);
-  }
-
+  const stepByKey = new Map(steps.map((step) => [step.key, step]));
   const positions = new Map<string, { x: number; y: number }>();
-  for (const [level, column] of columns) {
-    column.forEach((step, index) => {
-      positions.set(step.key, {
-        x: level * 330,
-        y: (index - (column.length - 1) / 2) * 190,
-      });
+  const occupied = new Set<string>();
+  const xGap = 280;
+  const yGap = 145;
+
+  function openRow(column: number, row: number) {
+    while (occupied.has(`${column}:${row}`)) {
+      row += 1;
+    }
+
+    return row;
+  }
+
+  function place(key: string | undefined, column: number, row: number) {
+    if (!key || positions.has(key)) {
+      return;
+    }
+
+    const step = stepByKey.get(key);
+    if (!step) {
+      return;
+    }
+
+    row = openRow(column, row);
+    occupied.add(`${column}:${row}`);
+    positions.set(key, { x: column * xGap, y: row * yGap });
+
+    const primary = primaryTarget(step);
+    place(primary, column, row + 1);
+
+    const branches = branchTargets(step).filter((branch) => branch.target !== primary);
+    uniqueBy(branches, (branch) => branch.target).forEach((branch, index) => {
+      const branchColumn =
+        branch.label === "error"
+          ? column + 4
+          : column + (index % 2 === 0 ? 1 : -1) * (Math.floor(index / 2) + 2);
+      place(branch.target, branchColumn, row + (branch.label === "error" ? 3 : 2));
     });
   }
 
+  place(steps[0]?.key, 0, 0);
+
+  for (const step of steps) {
+    place(step.key, 0, positions.size);
+  }
+
   return positions;
+}
+
+function primaryTarget(step: FlowStep): string | undefined {
+  return step.next ?? step.next_when?.[0]?.next ?? step.otherwise;
 }
 
 function stepTargets(step: FlowStep): string[] {
@@ -623,41 +788,81 @@ function stepTargets(step: FlowStep): string[] {
   ].filter((target): target is string => Boolean(target));
 }
 
-function stepEdges(step: FlowStep): Edge[] {
+function unique<T>(values: T[]): T[] {
+  return [...new Set(values)];
+}
+
+function branchTargets(step: FlowStep): Array<{ target: string; label: string }> {
+  return [
+    ...(step.next_when ?? []).map((branch) => ({ target: branch.next, label: "success" })),
+    ...(step.otherwise ? [{ target: step.otherwise, label: "otherwise" }] : []),
+    ...(step.on_error ? [{ target: step.on_error, label: "error" }] : []),
+  ];
+}
+
+function uniqueBy<T>(values: T[], key: (value: T) => string): T[] {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const id = key(value);
+    if (seen.has(id)) {
+      return false;
+    }
+    seen.add(id);
+    return true;
+  });
+}
+
+function stepEdges(step: FlowStep, activeEdges: Set<string>): Edge[] {
   const edges: Edge[] = [];
 
   if (step.next) {
-    edges.push(flowEdge(step.key, step.next, "next"));
+    edges.push(flowEdge(step.key, step.next, "next", activeEdges.has(`${step.key}->${step.next}`)));
   }
 
   for (const branch of step.next_when ?? []) {
-    edges.push(flowEdge(step.key, branch.next, "success"));
+    edges.push(flowEdge(step.key, branch.next, "success", activeEdges.has(`${step.key}->${branch.next}`)));
   }
 
   if (step.otherwise) {
-    edges.push(flowEdge(step.key, step.otherwise, "otherwise"));
+    edges.push(flowEdge(step.key, step.otherwise, "otherwise", activeEdges.has(`${step.key}->${step.otherwise}`)));
   }
 
   if (step.on_error) {
-    edges.push(flowEdge(step.key, step.on_error, "error"));
+    edges.push(flowEdge(step.key, step.on_error, "error", activeEdges.has(`${step.key}->${step.on_error}`)));
   }
 
   return edges;
 }
 
-function flowEdge(source: string, target: string, label: string): Edge {
+function flowEdge(source: string, target: string, label: string, active: boolean): Edge {
+  const color = active ? (label === "error" ? "#f87171" : "#22c55e") : "#60a5fa";
+
   return {
     id: `${source}-${target}-${label}`,
     source,
     target,
+    sourceHandle: `${label}-source`,
+    targetHandle: `${label}-target`,
     label,
     animated: label === "error",
     type: "smoothstep",
     labelBgPadding: [8, 5],
     labelBgBorderRadius: 6,
     labelBgStyle: { fill: "#0f172a", fillOpacity: 0.96 },
-    labelStyle: { fill: "#e2e8f0", fontSize: 12, fontWeight: 700 },
+    labelStyle: { fill: color, fontSize: 12, fontWeight: 700 },
+    style: { stroke: color },
   };
+}
+
+const edgeHandles = [
+  { label: "next", source: Position.Right, target: Position.Left, offset: "42%" },
+  { label: "success", source: Position.Right, target: Position.Left, offset: "30%" },
+  { label: "otherwise", source: Position.Right, target: Position.Left, offset: "58%" },
+  { label: "error", source: Position.Bottom, target: Position.Bottom, offset: "78%" },
+];
+
+function handleStyle(position: Position, offset: string) {
+  return position === Position.Left || position === Position.Right ? { top: offset } : { left: offset };
 }
 
 function StepNode({
@@ -666,20 +871,23 @@ function StepNode({
   Node<
     {
       step: FlowStep;
-      execution?: NodeExecution;
+      execution?: StepExecution;
       selected: boolean;
-      onSelectNode: (key: string) => void;
+      onSelectStep: (key: string) => void;
     },
     "step"
   >
 >) {
   const step = data.step;
   const status = data.execution?.status;
+  const timedOut = data.execution ? isTimeoutStep(data.execution) : false;
   const statusClass =
     status === "succeeded"
       ? "border-emerald-400/35"
       : status === "failed"
-        ? "border-red-400/35"
+        ? timedOut
+          ? "border-amber-300/60"
+          : "border-red-400/35"
         : status === "running"
           ? "border-blue-400/45"
           : "border-blue-400/20";
@@ -687,23 +895,46 @@ function StepNode({
   return (
     <button
       type="button"
-      onClick={() => data.onSelectNode(step.key)}
+      onClick={() => data.onSelectStep(step.key)}
       className={cn(
         "min-w-[190px] rounded-xl border bg-slate-950/95 p-3 text-left shadow-[0_18px_50px_rgba(2,6,23,0.38)] transition hover:bg-slate-900",
         statusClass,
         data.selected && "ring-2 ring-blue-400/50",
       )}
     >
-      <Handle type="target" position={Position.Left} className="!h-2.5 !w-2.5 !border-2 !border-slate-950 !bg-blue-400" />
+      {edgeHandles.map((handle) => (
+        <Handle
+          key={`${handle.label}-target`}
+          id={`${handle.label}-target`}
+          type="target"
+          position={handle.target}
+          style={handleStyle(handle.target, handle.offset)}
+          className="!h-2 !w-2 !border-2 !border-slate-950 !bg-blue-400"
+        />
+      ))}
       <div className="mb-2 flex items-center gap-2">
         <span className="h-2 w-2 rounded-full bg-gradient-to-br from-blue-400 to-violet-500 shadow-[0_0_0_4px_rgba(37,99,255,0.14)]" />
         <strong className="truncate text-sm font-semibold text-white">{step.key}</strong>
-        {status && <span className="ml-auto"><StatusBadge status={status} /></span>}
+        {status && (
+          <span className="ml-auto flex items-center gap-1">
+            {timedOut && <TimeoutBadge />}
+            <StatusBadge status={status} />
+          </span>
+        )}
       </div>
       <code className="block truncate rounded-md border border-white/10 bg-black/25 px-2 py-1 text-xs text-slate-300">
         {step.action}
       </code>
-      <Handle type="source" position={Position.Right} className="!h-2.5 !w-2.5 !border-2 !border-slate-950 !bg-violet-400" />
+      {edgeHandles.map((handle) => (
+        <Handle
+          key={`${handle.label}-source`}
+          id={`${handle.label}-source`}
+          type="source"
+          position={handle.source}
+          style={handleStyle(handle.source, handle.offset)}
+          className="!h-2 !w-2 !border-2 !border-slate-950 !bg-violet-400"
+        />
+      ))}
     </button>
   );
 }
@@ -724,6 +955,19 @@ async function startFlowExecution(flowKey: string, input: unknown): Promise<Flow
     error: null,
     steps: [],
   });
+}
+
+async function cancelFlowExecution(id: string): Promise<FlowExecution> {
+  return toFlowExecution(await requestJson<RawFlowExecution>(`/internal/flows/runs/${encodeURIComponent(id)}/cancel`, {
+    method: "POST",
+  }));
+}
+
+async function retryFlowStep(id: string, stepKey: string): Promise<FlowExecution> {
+  return toFlowExecution(await requestJson<RawFlowExecution>(
+    `/internal/flows/runs/${encodeURIComponent(id)}/steps/${encodeURIComponent(stepKey)}/retry`,
+    { method: "POST" },
+  ));
 }
 
 async function pollFlowExecution(id: string, onUpdate: (execution: FlowExecution) => void): Promise<void> {
@@ -757,36 +1001,47 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 function toFlowExecution(execution: RawFlowExecution): FlowExecution {
-  const now = new Date().toISOString();
-  const status = normalizeStatus(execution.status);
-  const finishedAt = status === "queued" || status === "running" ? null : now;
-
   return {
     id: execution.id,
     flow_key: execution.flow_key,
-    status,
+    status: normalizeStatus(execution.status),
     input: execution.input ?? null,
     output: execution.output ?? null,
     error: execution.error ?? null,
-    started_at: now,
-    finished_at: finishedAt,
-    nodes: (execution.steps ?? []).map((step) => ({
+    steps: (execution.steps ?? []).map((step) => ({
       key: step.key,
       action: step.action,
       status: normalizeStatus(step.status),
       input: step.input ?? null,
       output: step.output ?? null,
       error: step.error ?? null,
-      started_at: now,
-      finished_at: finishedAt,
+      invocation_id: step.invocation_id ?? null,
+      logs: step.logs ?? [],
     })),
   };
 }
 
 function normalizeStatus(status: string): ExecutionStatus {
-  return status === "queued" || status === "running" || status === "succeeded" || status === "failed"
+  return status === "queued" ||
+    status === "running" ||
+    status === "succeeded" ||
+    status === "failed" ||
+    status === "skipped" ||
+    status === "cancelled"
     ? status
-    : "canceled";
+    : "failed";
+}
+
+function isActiveExecution(execution: FlowExecution): boolean {
+  return execution.status === "queued" || execution.status === "running";
+}
+
+function canRetryStep(execution: FlowExecution, step: StepExecution): boolean {
+  return execution.status === "failed" && step.status === "failed";
+}
+
+function isTimeoutStep(step: StepExecution): boolean {
+  return step.status === "failed" && (step.error ?? "").toLowerCase().includes("timed out");
 }
 
 function sleep(ms: number) {
@@ -820,19 +1075,10 @@ type RawFlowExecution = {
     key: string;
     action: string;
     status: string;
+    invocation_id?: string | null;
     input?: unknown;
     output?: unknown;
     error?: string | null;
+    logs?: FlowStepLog[];
   }>;
 };
-
-function executionDuration(execution: FlowExecution) {
-  if (!execution.finished_at) {
-    return "running";
-  }
-
-  return `${Math.max(
-    0,
-    new Date(execution.finished_at).getTime() - new Date(execution.started_at).getTime(),
-  )}ms`;
-}

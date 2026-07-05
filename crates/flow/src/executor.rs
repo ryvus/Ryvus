@@ -1,9 +1,12 @@
 use std::{collections::HashMap, sync::Arc};
 
-use ryvus_execution::{ExecutionPersistence, ExecutionService, Executor, RuntimeResolver};
+use ryvus_execution::{
+    ExecutionPersistence, ExecutionPolicy, ExecutionRecord, ExecutionService, Executor,
+    RuntimeResolver,
+};
 use ryvus_protocol::{
-    ActionDefinition, InvocationContext, InvocationRequest, InvocationResult, InvocationStatus,
-    PROTOCOL_VERSION,
+    ActionDefinition, InvocationContext, InvocationEvent, InvocationMessage, InvocationRequest,
+    InvocationStatus, LogLevel, PROTOCOL_VERSION,
 };
 use serde_json::{json, Value};
 
@@ -12,7 +15,7 @@ use crate::{
     jsonpath::{evaluate_condition, resolve_jsonpaths, FlowContext},
     model::{
         FlowDefinition, FlowEndStatus, FlowExecution, FlowExecutionStatus, FlowSpec, FlowStep,
-        FlowStepExecution, FlowStepStatus, StartFlowResponse,
+        FlowStepExecution, FlowStepLog, FlowStepStatus, StartFlowResponse,
     },
     store::FlowStateStore,
     validation::validate_flow_spec,
@@ -23,7 +26,12 @@ pub trait FlowStepExecutor: Send + Sync + 'static {
         &self,
         action: &ActionDefinition,
         request: &InvocationRequest,
-    ) -> FlowResult<InvocationResult>;
+        policy: &ExecutionPolicy,
+    ) -> FlowResult<ExecutionRecord>;
+
+    fn cancel_flow_step(&self, _invocation_id: &str) -> FlowResult<bool> {
+        Ok(false)
+    }
 }
 
 impl<RR, E, EP> FlowStepExecutor for ExecutionService<RR, E, EP>
@@ -36,11 +44,19 @@ where
         &self,
         action: &ActionDefinition,
         request: &InvocationRequest,
-    ) -> FlowResult<InvocationResult> {
-        self.execute(action, request)
-            .map(|record| record.result.invocation_result)
+        policy: &ExecutionPolicy,
+    ) -> FlowResult<ExecutionRecord> {
+        self.execute(action, request, policy)
             .map_err(|error| FlowError::ExecutionFailed {
                 action: action_key(action),
+                message: error.to_string(),
+            })
+    }
+
+    fn cancel_flow_step(&self, invocation_id: &str) -> FlowResult<bool> {
+        self.cancel(invocation_id)
+            .map_err(|error| FlowError::ExecutionFailed {
+                action: invocation_id.to_string(),
                 message: error.to_string(),
             })
     }
@@ -82,6 +98,14 @@ where
 
     pub fn list_runs(&self) -> FlowResult<Vec<FlowExecution>> {
         self.runner.store.list()
+    }
+
+    pub fn cancel_run(&self, id: &str) -> FlowResult<FlowExecution> {
+        self.runner.cancel_run(id)
+    }
+
+    pub fn retry_failed_step(&self, id: &str, step_key: &str) -> FlowResult<FlowExecution> {
+        self.runner.retry_failed_step(id, step_key)
     }
 }
 
@@ -179,6 +203,84 @@ where
             status: FlowExecutionStatus::Queued,
         })
     }
+
+    pub fn cancel_run(&self, id: &str) -> FlowResult<FlowExecution> {
+        if let Some(invocation_id) = self.store.active_invocation(id)? {
+            let _ = self.executor.cancel_flow_step(&invocation_id);
+        }
+
+        self.store.cancel(id)
+    }
+
+    pub fn retry_failed_step(&self, id: &str, step_key: &str) -> FlowResult<FlowExecution> {
+        let execution = self.store.get(id)?;
+
+        if execution.status == FlowExecutionStatus::Cancelled {
+            return Err(FlowError::InvalidFlow {
+                flow: execution.flow_key,
+                message: "cancelled flow runs cannot be retried".to_string(),
+            });
+        }
+
+        if execution.status != FlowExecutionStatus::Failed {
+            return Err(FlowError::InvalidFlow {
+                flow: execution.flow_key,
+                message: "only failed flow runs can retry failed steps".to_string(),
+            });
+        }
+
+        let failed_step_index = execution
+            .steps
+            .iter()
+            .rposition(|step| step.key == step_key)
+            .ok_or_else(|| FlowError::InvalidStep {
+                flow: execution.flow_key.clone(),
+                step: step_key.to_string(),
+                message: "step was not recorded in this run".to_string(),
+            })?;
+        let failed_step = &execution.steps[failed_step_index];
+
+        if failed_step.status != FlowStepStatus::Failed {
+            return Err(FlowError::InvalidStep {
+                flow: execution.flow_key.clone(),
+                step: step_key.to_string(),
+                message: "latest step entry is not failed".to_string(),
+            });
+        }
+
+        let flow = self
+            .spec
+            .flows
+            .iter()
+            .find(|flow| flow.key == execution.flow_key)
+            .cloned()
+            .ok_or_else(|| FlowError::FlowNotFound {
+                key: execution.flow_key.clone(),
+            })?;
+
+        let mut context = FlowContext::new(execution.input.clone());
+        for step in execution.steps.iter().take(failed_step_index) {
+            context.record_step(
+                &step.key,
+                flow_step_status_label(step.status),
+                step.output.clone(),
+                step.error.clone(),
+            );
+        }
+
+        run_flow_steps_from(
+            id,
+            &flow,
+            step_key,
+            failed_step.input.clone(),
+            context,
+            &self.actions,
+            self.store.as_ref(),
+            self.executor.as_ref(),
+        )?;
+
+        self.store.get(id)
+    }
 }
 
 fn run_flow_steps<S, E>(
@@ -193,18 +295,58 @@ where
     S: FlowStateStore,
     E: FlowStepExecutor,
 {
+    let context = FlowContext::new(input.clone());
+    let start_step = flow
+        .steps
+        .first()
+        .ok_or_else(|| FlowError::InvalidFlow {
+            flow: flow.key.clone(),
+            message: "at least one step is required".to_string(),
+        })?
+        .key
+        .clone();
+
+    run_flow_steps_from(
+        run_id,
+        flow,
+        &start_step,
+        input,
+        context,
+        actions,
+        store,
+        executor,
+    )
+}
+
+fn run_flow_steps_from<S, E>(
+    run_id: &str,
+    flow: &FlowDefinition,
+    start_step: &str,
+    input: Value,
+    mut context: FlowContext,
+    actions: &[ActionDefinition],
+    store: &S,
+    executor: &E,
+) -> FlowResult<()>
+where
+    S: FlowStateStore,
+    E: FlowStepExecutor,
+{
     store.update_status(run_id, FlowExecutionStatus::Running, Value::Null, None)?;
     let steps = flow
         .steps
         .iter()
         .map(|step| (step.key.as_str(), step))
         .collect::<HashMap<_, _>>();
-    let mut current = flow.steps.first().ok_or_else(|| FlowError::InvalidFlow {
-        flow: flow.key.clone(),
-        message: "at least one step is required".to_string(),
-    })?;
-    let mut step_input = input.clone();
-    let mut context = FlowContext::new(input);
+    let mut current = steps
+        .get(start_step)
+        .copied()
+        .ok_or_else(|| FlowError::InvalidStep {
+            flow: flow.key.clone(),
+            step: start_step.to_string(),
+            message: "retry start step was not found".to_string(),
+        })?;
+    let mut step_input = input;
 
     loop {
         let action = resolve_action(actions, &current.action)?;
@@ -222,7 +364,56 @@ where
             params,
             config,
         );
-        let result = executor.execute_flow_step(action, &request)?;
+        let policy = ExecutionPolicy::from_action_policy(&current.policy).map_err(|error| {
+            FlowError::InvalidStep {
+                flow: flow.key.clone(),
+                step: current.key.clone(),
+                message: error.to_string(),
+            }
+        })?;
+        store.set_active_invocation(run_id, Some(request.invocation_id.clone()))?;
+        let record = match executor.execute_flow_step(action, &request, &policy) {
+            Ok(record) => record,
+            Err(_error) if store.is_cancelled(run_id)? => {
+                store.set_active_invocation(run_id, None)?;
+                store.push_step(
+                    run_id,
+                    FlowStepExecution {
+                        key: current.key.clone(),
+                        action: current.action.clone(),
+                        status: FlowStepStatus::Cancelled,
+                        attempts: 1,
+                        invocation_id: Some(request.invocation_id),
+                        input: step_input,
+                        output: Value::Null,
+                        error: None,
+                        logs: Vec::new(),
+                    },
+                )?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        store.set_active_invocation(run_id, None)?;
+        if store.is_cancelled(run_id)? {
+            store.push_step(
+                run_id,
+                FlowStepExecution {
+                    key: current.key.clone(),
+                    action: current.action.clone(),
+                    status: FlowStepStatus::Cancelled,
+                    attempts: 1,
+                    invocation_id: Some(request.invocation_id),
+                    input: step_input,
+                    output: Value::Null,
+                    error: None,
+                    logs: Vec::new(),
+                },
+            )?;
+            return Ok(());
+        }
+        let logs = flow_step_logs(&record);
+        let result = record.result.invocation_result;
         let output = result.output.clone().unwrap_or(Value::Null);
         let error = result.error.as_ref().map(|error| error.message.clone());
         let step_status = match result.status {
@@ -236,19 +427,21 @@ where
                 key: current.key.clone(),
                 action: current.action.clone(),
                 status: step_status,
+                attempts: current.policy.retry.max_attempts,
                 invocation_id: Some(result.invocation_id.clone()),
                 input: step_input.clone(),
                 output: output.clone(),
                 error: error.clone(),
+                logs,
             },
         )?;
 
-        let status_label = if step_status == FlowStepStatus::Succeeded {
-            "succeeded"
-        } else {
-            "failed"
-        };
-        context.record_step(&current.key, status_label, output.clone(), error.clone());
+        context.record_step(
+            &current.key,
+            flow_step_status_label(step_status),
+            output.clone(),
+            error.clone(),
+        );
 
         if step_status == FlowStepStatus::Failed {
             if let Some(next) = &current.on_error {
@@ -317,6 +510,46 @@ fn flow_request(
     }
 }
 
+fn flow_step_logs(record: &ExecutionRecord) -> Vec<FlowStepLog> {
+    record
+        .result
+        .stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<InvocationMessage>(line.trim()).ok())
+        .filter_map(|message| match message {
+            InvocationMessage::Event {
+                event: InvocationEvent::Log(log),
+            } if log.invocation_id == record.invocation_id => Some(FlowStepLog {
+                level: log_level_label(log.level).to_string(),
+                message: log.message,
+                fields: log.fields,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn log_level_label(level: LogLevel) -> &'static str {
+    match level {
+        LogLevel::Trace => "trace",
+        LogLevel::Debug => "debug",
+        LogLevel::Info => "info",
+        LogLevel::Warn => "warn",
+        LogLevel::Error => "error",
+    }
+}
+
+fn flow_step_status_label(status: FlowStepStatus) -> &'static str {
+    match status {
+        FlowStepStatus::Pending => "pending",
+        FlowStepStatus::Running => "running",
+        FlowStepStatus::Succeeded => "succeeded",
+        FlowStepStatus::Failed => "failed",
+        FlowStepStatus::Skipped => "skipped",
+        FlowStepStatus::Cancelled => "cancelled",
+    }
+}
+
 fn next_step<'a>(step: &'a FlowStep, context: &Value) -> FlowResult<Option<&'a str>> {
     for branch in &step.next_when {
         if evaluate_condition(&branch.when, context)? {
@@ -358,8 +591,9 @@ fn missing_step(flow: &FlowDefinition, step: &FlowStep, next: &str) -> FlowError
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
 
+    use ryvus_execution::{ExecutionResult, ExecutionTarget};
     use ryvus_protocol::{ActionKind, ApiAction, InvocationError, RuntimeKind};
     use serde_json::json;
 
@@ -379,6 +613,8 @@ mod tests {
         let execution = wait_for_status(&service, &start.id, FlowExecutionStatus::Succeeded).await;
         assert_eq!(execution.steps.len(), 2);
         assert_eq!(execution.steps[0].key, "charge");
+        assert_eq!(execution.steps[0].logs[0].level, "info");
+        assert_eq!(execution.steps[0].logs[0].message, "charged invoice");
         assert_eq!(execution.steps[1].key, "receipt");
         assert_eq!(execution.output["receipt_sent"], true);
 
@@ -423,6 +659,43 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn retries_failed_step_in_same_run() {
+        let executor = Arc::new(FlakyChargeExecutor::default());
+        let service = FlowService::new(
+            flow_spec(true),
+            vec![
+                api_action("charge"),
+                api_action("decline_charge"),
+                api_action("receipt"),
+                api_action("failure_handler"),
+            ],
+            Arc::new(InMemoryFlowStateStore::default()),
+            Arc::clone(&executor),
+        )
+        .expect("service should build");
+
+        let start = service
+            .start_flow("billing", json!({ "invoice": "inv_1" }))
+            .expect("flow should start");
+        wait_for_status(&service, &start.id, FlowExecutionStatus::Failed).await;
+
+        let retried = service
+            .retry_failed_step(&start.id, "charge")
+            .expect("failed step should retry");
+
+        assert_eq!(retried.status, FlowExecutionStatus::Succeeded);
+        assert_eq!(
+            retried
+                .steps
+                .iter()
+                .filter(|step| step.key == "charge")
+                .count(),
+            2
+        );
+        assert_eq!(retried.output["receipt_sent"], true);
+    }
+
     fn test_service(
         spec: FlowSpec,
     ) -> (
@@ -461,6 +734,7 @@ mod tests {
                             "charge"
                         }
                         .to_string(),
+                        policy: ryvus_protocol::ActionExecutionPolicy::default(),
                         params: json!({ "invoice": "$.input.invoice" }),
                         config: json!({}),
                         next: None,
@@ -475,6 +749,7 @@ mod tests {
                     FlowStep {
                         key: "receipt".to_string(),
                         action: "receipt".to_string(),
+                        policy: ryvus_protocol::ActionExecutionPolicy::default(),
                         params: json!({}),
                         config: json!({}),
                         next: None,
@@ -486,6 +761,7 @@ mod tests {
                     FlowStep {
                         key: "failure_handler".to_string(),
                         action: "failure_handler".to_string(),
+                        policy: ryvus_protocol::ActionExecutionPolicy::default(),
                         params: json!({ "failed_status": "$.output.status" }),
                         config: json!({}),
                         next: None,
@@ -499,11 +775,14 @@ mod tests {
         }
     }
 
-    async fn wait_for_status(
-        service: &FlowService<InMemoryFlowStateStore, RecordingFlowExecutor>,
+    async fn wait_for_status<E>(
+        service: &FlowService<InMemoryFlowStateStore, E>,
         id: &str,
         status: FlowExecutionStatus,
-    ) -> FlowExecution {
+    ) -> FlowExecution
+    where
+        E: FlowStepExecutor,
+    {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let execution = service.get_run(id).expect("run should exist");
@@ -531,6 +810,7 @@ mod tests {
             source: format!("src/{entrypoint}.py").into(),
             entrypoint: entrypoint.to_string(),
             name: Some(entrypoint.to_string()),
+            policy: ryvus_protocol::ActionExecutionPolicy::default(),
         }
     }
 
@@ -544,54 +824,152 @@ mod tests {
             &self,
             action: &ActionDefinition,
             request: &InvocationRequest,
-        ) -> FlowResult<InvocationResult> {
+            _policy: &ryvus_execution::ExecutionPolicy,
+        ) -> FlowResult<ExecutionRecord> {
             self.requests
                 .lock()
                 .expect("requests should lock")
                 .push(request.clone());
 
             if action.entrypoint == "charge" && request.event["invoice"] == "inv_1" {
-                return Ok(InvocationResult {
-                    protocol_version: PROTOCOL_VERSION.to_string(),
-                    invocation_id: request.invocation_id.clone(),
-                    status: InvocationStatus::Success,
-                    output: Some(json!({ "status": "paid" })),
-                    error: None,
-                });
+                return Ok(execution_record_with_stdout(
+                    request,
+                    ryvus_protocol::InvocationResult {
+                        protocol_version: PROTOCOL_VERSION.to_string(),
+                        invocation_id: request.invocation_id.clone(),
+                        status: InvocationStatus::Success,
+                        output: Some(json!({ "status": "paid" })),
+                        error: None,
+                    },
+                    &format!(
+                        "{}\n",
+                        json!({
+                            "type": "event",
+                            "event": {
+                                "type": "log",
+                                "invocation_id": request.invocation_id,
+                                "level": "info",
+                                "message": "charged invoice",
+                                "fields": {}
+                            }
+                        })
+                    ),
+                ));
             }
 
             if action.entrypoint == "decline_charge" {
-                return Ok(InvocationResult {
-                    protocol_version: PROTOCOL_VERSION.to_string(),
-                    invocation_id: request.invocation_id.clone(),
-                    status: InvocationStatus::Failed,
-                    output: Some(json!({ "status": "declined" })),
-                    error: Some(InvocationError::new(
-                        "payment_declined",
-                        "payment was declined",
-                        false,
-                    )),
-                });
+                return Ok(execution_record(
+                    request,
+                    ryvus_protocol::InvocationResult {
+                        protocol_version: PROTOCOL_VERSION.to_string(),
+                        invocation_id: request.invocation_id.clone(),
+                        status: InvocationStatus::Failed,
+                        output: Some(json!({ "status": "declined" })),
+                        error: Some(InvocationError::new(
+                            "payment_declined",
+                            "payment was declined",
+                            false,
+                        )),
+                    },
+                ));
             }
 
             let output = match action.entrypoint.as_str() {
                 "receipt" => json!({ "receipt_sent": true }),
                 "failure_handler" => json!({ "handled": true }),
                 _ => {
-                    return Ok(InvocationResult::failed(
-                        request.invocation_id.clone(),
-                        InvocationError::new("failed", "step failed", false),
+                    return Ok(execution_record(
+                        request,
+                        ryvus_protocol::InvocationResult::failed(
+                            request.invocation_id.clone(),
+                            InvocationError::new("failed", "step failed", false),
+                        ),
                     ));
                 }
             };
 
-            Ok(InvocationResult {
-                protocol_version: PROTOCOL_VERSION.to_string(),
-                invocation_id: request.invocation_id.clone(),
-                status: InvocationStatus::Success,
-                output: Some(output),
-                error: None,
-            })
+            Ok(execution_record(
+                request,
+                ryvus_protocol::InvocationResult {
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                    invocation_id: request.invocation_id.clone(),
+                    status: InvocationStatus::Success,
+                    output: Some(output),
+                    error: None,
+                },
+            ))
+        }
+    }
+
+    #[derive(Default)]
+    struct FlakyChargeExecutor {
+        charge_attempts: Mutex<u32>,
+    }
+
+    impl FlowStepExecutor for FlakyChargeExecutor {
+        fn execute_flow_step(
+            &self,
+            action: &ActionDefinition,
+            request: &InvocationRequest,
+            _policy: &ryvus_execution::ExecutionPolicy,
+        ) -> FlowResult<ExecutionRecord> {
+            if action.entrypoint == "decline_charge" {
+                let mut attempts = self.charge_attempts.lock().unwrap();
+                *attempts += 1;
+
+                if *attempts == 1 {
+                    return Ok(execution_record(
+                        request,
+                        ryvus_protocol::InvocationResult {
+                            protocol_version: PROTOCOL_VERSION.to_string(),
+                            invocation_id: request.invocation_id.clone(),
+                            status: InvocationStatus::Failed,
+                            output: Some(json!({ "status": "declined" })),
+                            error: Some(InvocationError {
+                                code: "payment_declined".to_string(),
+                                message: "payment was declined".to_string(),
+                                details: Value::Null,
+                                retryable: true,
+                            }),
+                        },
+                    ));
+                }
+
+                return Ok(execution_record(
+                    request,
+                    ryvus_protocol::InvocationResult {
+                        protocol_version: PROTOCOL_VERSION.to_string(),
+                        invocation_id: request.invocation_id.clone(),
+                        status: InvocationStatus::Success,
+                        output: Some(json!({ "status": "paid" })),
+                        error: None,
+                    },
+                ));
+            }
+
+            if action.entrypoint == "receipt" {
+                return Ok(execution_record(
+                    request,
+                    ryvus_protocol::InvocationResult {
+                        protocol_version: PROTOCOL_VERSION.to_string(),
+                        invocation_id: request.invocation_id.clone(),
+                        status: InvocationStatus::Success,
+                        output: Some(json!({ "receipt_sent": true })),
+                        error: None,
+                    },
+                ));
+            }
+
+            Ok(execution_record(
+                request,
+                ryvus_protocol::InvocationResult {
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                    invocation_id: request.invocation_id.clone(),
+                    status: InvocationStatus::Success,
+                    output: Some(json!({ "handled": true })),
+                    error: None,
+                },
+            ))
         }
     }
 
@@ -599,5 +977,38 @@ mod tests {
         fn requests(&self) -> Vec<InvocationRequest> {
             self.requests.lock().expect("requests should lock").clone()
         }
+    }
+
+    fn execution_record(
+        request: &InvocationRequest,
+        invocation_result: ryvus_protocol::InvocationResult,
+    ) -> ExecutionRecord {
+        execution_record_with_stdout(request, invocation_result, "")
+    }
+
+    fn execution_record_with_stdout(
+        request: &InvocationRequest,
+        invocation_result: ryvus_protocol::InvocationResult,
+        stdout: &str,
+    ) -> ExecutionRecord {
+        let now = SystemTime::now();
+        ExecutionRecord::new(
+            request.clone(),
+            ExecutionTarget::Process {
+                command: "test".to_string(),
+                args: Vec::new(),
+                working_dir: None,
+                env: Default::default(),
+            },
+            ExecutionResult {
+                invocation_result,
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+                duration: Duration::from_millis(1),
+                exit_code: Some(0),
+            },
+            now,
+            now,
+        )
     }
 }

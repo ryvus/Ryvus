@@ -12,6 +12,10 @@ pub trait FlowStateStore: Send + Sync + 'static {
     fn create(&self, execution: FlowExecution) -> FlowResult<()>;
     fn get(&self, id: &str) -> FlowResult<FlowExecution>;
     fn list(&self) -> FlowResult<Vec<FlowExecution>>;
+    fn cancel(&self, id: &str) -> FlowResult<FlowExecution>;
+    fn is_cancelled(&self, id: &str) -> FlowResult<bool>;
+    fn set_active_invocation(&self, id: &str, invocation_id: Option<String>) -> FlowResult<()>;
+    fn active_invocation(&self, id: &str) -> FlowResult<Option<String>>;
     fn update_status(
         &self,
         id: &str,
@@ -25,6 +29,7 @@ pub trait FlowStateStore: Send + Sync + 'static {
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryFlowStateStore {
     executions: Arc<Mutex<HashMap<String, FlowExecution>>>,
+    active_invocations: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl FlowStateStore for InMemoryFlowStateStore {
@@ -55,6 +60,72 @@ impl FlowStateStore for InMemoryFlowStateStore {
             .collect::<Vec<_>>();
         executions.sort_by(|left, right| left.id.cmp(&right.id));
         Ok(executions)
+    }
+
+    fn cancel(&self, id: &str) -> FlowResult<FlowExecution> {
+        let mut executions = self.executions.lock().expect("flow executions should lock");
+        let execution = executions
+            .get_mut(id)
+            .ok_or_else(|| FlowError::RunNotFound { id: id.to_string() })?;
+
+        if matches!(
+            execution.status,
+            FlowExecutionStatus::Succeeded
+                | FlowExecutionStatus::Failed
+                | FlowExecutionStatus::Cancelled
+        ) {
+            return Ok(execution.clone());
+        }
+
+        execution.status = FlowExecutionStatus::Cancelled;
+        execution.error = None;
+        Ok(execution.clone())
+    }
+
+    fn is_cancelled(&self, id: &str) -> FlowResult<bool> {
+        Ok(self.get(id)?.status == FlowExecutionStatus::Cancelled)
+    }
+
+    fn set_active_invocation(&self, id: &str, invocation_id: Option<String>) -> FlowResult<()> {
+        if !self
+            .executions
+            .lock()
+            .expect("flow executions should lock")
+            .contains_key(id)
+        {
+            return Err(FlowError::RunNotFound { id: id.to_string() });
+        }
+
+        let mut active = self
+            .active_invocations
+            .lock()
+            .expect("active invocations should lock");
+
+        if let Some(invocation_id) = invocation_id {
+            active.insert(id.to_string(), invocation_id);
+        } else {
+            active.remove(id);
+        }
+
+        Ok(())
+    }
+
+    fn active_invocation(&self, id: &str) -> FlowResult<Option<String>> {
+        if !self
+            .executions
+            .lock()
+            .expect("flow executions should lock")
+            .contains_key(id)
+        {
+            return Err(FlowError::RunNotFound { id: id.to_string() });
+        }
+
+        Ok(self
+            .active_invocations
+            .lock()
+            .expect("active invocations should lock")
+            .get(id)
+            .cloned())
     }
 
     fn update_status(
@@ -114,10 +185,12 @@ mod tests {
                     key: "receive_invoice".to_string(),
                     action: "billing/receive_invoice".to_string(),
                     status: FlowStepStatus::Succeeded,
+                    attempts: 1,
                     invocation_id: Some("invocation_1".to_string()),
                     input: json!({ "invoice": "inv_1" }),
                     output: json!({ "received": true }),
                     error: None,
+                    logs: Vec::new(),
                 },
             )
             .expect("step should be stored");

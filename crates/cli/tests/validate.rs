@@ -257,6 +257,175 @@ def sync_inventory(context):
 }
 
 #[test]
+fn validate_writes_nested_flows_artifact() {
+    let project = TestProject::new("validate-nested-flows");
+    project.add_schedule_action(
+        "sync.py",
+        r#"
+@scheduled_action(every="10s")
+def sync_inventory(context):
+    return {"ok": True}
+"#,
+    );
+    project.add_flow(
+        "src/modules/billing/flows/invoice_payment/invoice_payment.flows.json",
+        r#"{
+  "key": "billing/invoice_payment",
+  "steps": [
+    {
+      "key": "sync",
+      "action": "sync_inventory"
+    }
+  ]
+}
+"#,
+    );
+    project.add_flow(
+        "src/modules/billing/flows/invoice_payment/draft.json",
+        r#"{
+  "key": "billing/draft",
+  "steps": [
+    {
+      "key": "sync",
+      "action": "sync_inventory"
+    }
+  ]
+}
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ryvus"))
+        .arg("validate")
+        .current_dir(&project.root)
+        .output()
+        .expect("validate command should run");
+
+    assert!(
+        output.status.success(),
+        "validate failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let flows: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project.root.join(".ryvus/flows.json"))
+            .expect("flows should be written"),
+    )
+    .expect("flows should parse");
+    let loaded = flows["flows"].as_array().expect("flows should be an array");
+
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0]["key"], "billing/invoice_payment");
+}
+
+#[test]
+fn validate_ignores_generated_flow_artifacts() {
+    let project = TestProject::new("validate-ignored-flows");
+    project.add_schedule_action(
+        "sync.py",
+        r#"
+@scheduled_action(every="10s")
+def sync_inventory(context):
+    return {"ok": True}
+"#,
+    );
+    project.add_flow(
+        "src/modules/billing/flows/invoice_payment/invoice_payment.flows.json",
+        r#"{
+  "key": "billing/invoice_payment",
+  "steps": [
+    {
+      "key": "sync",
+      "action": "sync_inventory"
+    }
+  ]
+}
+"#,
+    );
+    project.add_flow(
+        ".ryvus/generated.flows.json",
+        r#"{
+  "key": "generated/should_not_load",
+  "steps": [
+    {
+      "key": "sync",
+      "action": "sync_inventory"
+    }
+  ]
+}
+"#,
+    );
+    project.add_flow(
+        "node_modules/package/vendor.flows.json",
+        r#"{
+  "key": "vendor/should_not_load",
+  "steps": [
+    {
+      "key": "sync",
+      "action": "sync_inventory"
+    }
+  ]
+}
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ryvus"))
+        .arg("validate")
+        .current_dir(&project.root)
+        .output()
+        .expect("validate command should run");
+
+    assert!(
+        output.status.success(),
+        "validate failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let flows: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project.root.join(".ryvus/flows.json"))
+            .expect("flows should be written"),
+    )
+    .expect("flows should parse");
+    let loaded = flows["flows"].as_array().expect("flows should be an array");
+
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0]["key"], "billing/invoice_payment");
+}
+
+#[test]
+fn validate_reports_nested_flow_json_path() {
+    let project = TestProject::new("validate-bad-nested-flow");
+    project.add_schedule_action(
+        "sync.py",
+        r#"
+@scheduled_action(every="10s")
+def sync_inventory(context):
+    return {"ok": True}
+"#,
+    );
+    project.add_flow(
+        "src/modules/billing/flows/invoice_payment/bad.flows.json",
+        r#"{
+  "key": "billing/invoice_payment",
+  "steps": [
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ryvus"))
+        .arg("validate")
+        .current_dir(&project.root)
+        .output()
+        .expect("validate command should run");
+
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid flow spec"));
+    assert!(stderr.contains("src/modules/billing/flows/invoice_payment/bad.flows.json"));
+}
+
+#[test]
 fn validate_rejects_invalid_scheduled_actions() {
     let project = TestProject::new("validate-bad-schedule");
     project.add_schedule_action(

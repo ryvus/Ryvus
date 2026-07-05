@@ -153,6 +153,7 @@ mod tests {
             source: "src/missing.js".into(),
             entrypoint: "default".to_string(),
             name: None,
+            policy: ryvus_protocol::ActionExecutionPolicy::default(),
         };
 
         let resolver = LocalRuntimeResolver::with_project_root(root);

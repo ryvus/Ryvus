@@ -2,17 +2,22 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
+use std::{collections::HashMap, sync::Mutex};
 
 use crate::{
     error::{ExecutorError, ExecutorResult},
-    ConsoleInvocationEventSink, ExecutionResult, Executor, InvocationEventSink, ProcessTarget,
+    ConsoleInvocationEventSink, ExecutionOptions, ExecutionResult, Executor, InvocationEventSink,
+    ProcessTarget,
 };
-use ryvus_protocol::{InvocationMessage, InvocationRequest, InvocationResult, PROTOCOL_VERSION};
+use ryvus_protocol::{
+    InvocationError, InvocationMessage, InvocationRequest, InvocationResult, PROTOCOL_VERSION,
+};
 
 #[derive(Clone)]
 pub struct LocalProcessExecutor {
     event_sink: Arc<dyn InvocationEventSink>,
     timeout: Duration,
+    active: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 impl std::fmt::Debug for LocalProcessExecutor {
@@ -31,14 +36,16 @@ impl LocalProcessExecutor {
     pub fn new() -> Self {
         Self {
             event_sink: Arc::new(ConsoleInvocationEventSink),
-            timeout: Duration::from_secs(30),
+            timeout: Duration::from_secs(3),
+            active: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn with_event_sink(event_sink: Arc<dyn InvocationEventSink>) -> Self {
         Self {
             event_sink,
-            timeout: Duration::from_secs(30),
+            timeout: Duration::from_secs(3),
+            active: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -53,10 +60,12 @@ impl Executor for LocalProcessExecutor {
         &self,
         target: &ProcessTarget,
         request: &InvocationRequest,
+        options: &ExecutionOptions,
     ) -> ExecutorResult<ExecutionResult> {
         use std::time::Instant;
 
         let started = Instant::now();
+        let timeout = options.timeout;
 
         if request.protocol_version != PROTOCOL_VERSION {
             return Err(ExecutorError::InvalidProtocolVersion {
@@ -84,6 +93,10 @@ impl Executor for LocalProcessExecutor {
                 command: target.command.clone(),
                 io_error,
             })?;
+        self.active
+            .lock()
+            .expect("active processes should lock")
+            .insert(request.invocation_id.clone(), child.id());
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(&request_json)?;
@@ -94,12 +107,31 @@ impl Executor for LocalProcessExecutor {
                 break;
             }
 
-            if started.elapsed() >= self.timeout {
+            if started.elapsed() >= timeout {
                 let _ = child.kill();
                 let _ = child.wait_with_output();
-                return Err(ExecutorError::ProcessTimedOut {
-                    command: target.command.clone(),
-                    timeout_ms: self.timeout.as_millis(),
+                self.active
+                    .lock()
+                    .expect("active processes should lock")
+                    .remove(&request.invocation_id);
+
+                return Ok(ExecutionResult {
+                    invocation_result: InvocationResult::failed(
+                        request.invocation_id.clone(),
+                        InvocationError::new(
+                            "Timeout",
+                            format!(
+                                "process timed out: command={}, timeout_ms={}",
+                                target.command,
+                                timeout.as_millis()
+                            ),
+                            true,
+                        ),
+                    ),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration: started.elapsed(),
+                    exit_code: None,
                 });
             }
 
@@ -107,6 +139,10 @@ impl Executor for LocalProcessExecutor {
         }
 
         let output = child.wait_with_output()?;
+        self.active
+            .lock()
+            .expect("active processes should lock")
+            .remove(&request.invocation_id);
 
         if !output.status.success() {
             return Err(ExecutorError::ProcessFailed {
@@ -150,6 +186,33 @@ impl Executor for LocalProcessExecutor {
             exit_code: output.status.code(),
         })
     }
+
+    fn cancel(&self, invocation_id: &str) -> ExecutorResult<bool> {
+        let Some(pid) = self
+            .active
+            .lock()
+            .expect("active processes should lock")
+            .get(invocation_id)
+            .copied()
+        else {
+            return Ok(false);
+        };
+
+        #[cfg(unix)]
+        {
+            Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status()?;
+            Ok(true)
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+            Ok(false)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -174,7 +237,13 @@ mod tests {
         let executor = LocalProcessExecutor::new();
 
         let result = executor
-            .invoke(&target, &request)
+            .invoke(
+                &target,
+                &request,
+                &crate::ExecutionOptions {
+                    timeout: std::time::Duration::from_secs(3),
+                },
+            )
             .expect("process should succeed");
 
         assert_eq!(result.invocation_result.invocation_id, "inv_test");
@@ -197,7 +266,13 @@ mod tests {
         let executor = LocalProcessExecutor::new();
 
         let result = executor
-            .invoke(&target, &request)
+            .invoke(
+                &target,
+                &request,
+                &crate::ExecutionOptions {
+                    timeout: std::time::Duration::from_secs(3),
+                },
+            )
             .expect("process should succeed");
 
         assert_eq!(result.invocation_result.invocation_id, "inv_test");
@@ -215,13 +290,23 @@ mod tests {
         let executor =
             LocalProcessExecutor::new().with_timeout(std::time::Duration::from_millis(20));
 
-        let error = executor
-            .invoke(&target, &request)
-            .expect_err("process should time out");
+        let result = executor
+            .invoke(
+                &target,
+                &request,
+                &crate::ExecutionOptions {
+                    timeout: std::time::Duration::from_millis(20),
+                },
+            )
+            .expect("process should return timeout result");
 
-        assert!(matches!(
-            error,
-            crate::ExecutorError::ProcessTimedOut { .. }
-        ));
+        assert_eq!(
+            result.invocation_result.status,
+            ryvus_protocol::InvocationStatus::Failed
+        );
+        assert_eq!(
+            result.invocation_result.error.expect("timeout error").code,
+            "Timeout"
+        );
     }
 }

@@ -45,6 +45,9 @@ pub enum ExecutionServiceError {
     #[error("executor error: {0}")]
     Executor(#[from] ExecutorError),
 
+    #[error("invalid execution policy: {0}")]
+    InvalidPolicy(String),
+
     #[error("persistence error: {0}")]
     Persistence(Box<dyn std::error::Error + Send + Sync + 'static>),
 }

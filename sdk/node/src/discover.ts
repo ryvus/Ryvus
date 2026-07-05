@@ -44,6 +44,7 @@ for (const file of await sourceFiles(sourceRoot)) {
       source: relative(projectRoot, file),
       entrypoint: "default",
       name,
+      ...(action.policy ? { policy: action.policy } : {}),
     });
   } else {
     const name = action.name ?? actionNameFromFile(file);
@@ -58,6 +59,7 @@ for (const file of await sourceFiles(sourceRoot)) {
       source: relative(projectRoot, file),
       entrypoint: "default",
       name,
+      ...(action.policy ? { policy: action.policy } : {}),
     });
   }
 }

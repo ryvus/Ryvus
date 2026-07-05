@@ -22,6 +22,26 @@ type QueryShape = Record<string, Schema>;
 type BodySchema = Schema | undefined;
 type ResponseSchema = Schema | undefined;
 
+export interface RetryPolicyInput {
+  max_attempts?: number;
+  initial_delay?: string;
+  backoff?: number;
+}
+
+export interface ActionPolicyInput {
+  timeout?: string;
+  retry?: RetryPolicyInput;
+}
+
+export interface ActionExecutionPolicy {
+  timeout: string;
+  retry: {
+    max_attempts: number;
+    initial_delay: string;
+    backoff: number;
+  };
+}
+
 export interface ApiActionInput<
   Query extends QueryShape = QueryShape,
   Body extends BodySchema = undefined,
@@ -52,6 +72,8 @@ export interface ApiActionOptions<
   query?: Query;
   body?: Body;
   response?: Response;
+  timeout?: string;
+  retry?: RetryPolicyInput;
 }
 
 export interface ApiActionDefinition {
@@ -63,6 +85,7 @@ export interface ApiActionDefinition {
   query: QueryShape;
   body?: Schema;
   response?: Schema;
+  policy?: ActionPolicyInput;
   handler: ApiActionHandler | BoundApiActionHandler;
 }
 
@@ -80,6 +103,7 @@ export interface ScheduledActionDefinition {
   type: "schedule";
   name?: string;
   expression: string;
+  policy?: ActionPolicyInput;
   handler: ScheduledActionHandler;
 }
 
@@ -117,6 +141,10 @@ export function apiAction(
     query: options.query ?? {},
     handler,
   };
+  const policy = actionPolicy(options.timeout, options.retry);
+  if (policy !== undefined) {
+    action.policy = policy;
+  }
 
   if (options.body !== undefined) {
     action.body = options.body;
@@ -136,6 +164,8 @@ export function apiAction(
 export function scheduledAction(options: {
   name?: string;
   every: string;
+  timeout?: string;
+  retry?: RetryPolicyInput;
   handler: ScheduledActionHandler;
 }): ScheduledActionDefinition {
   const action: ScheduledActionDefinition = {
@@ -147,12 +177,30 @@ export function scheduledAction(options: {
       : `every ${options.every}`,
     handler: options.handler,
   };
+  const policy = actionPolicy(options.timeout, options.retry);
+  if (policy !== undefined) {
+    action.policy = policy;
+  }
 
   if (process.env.RYVUS_DISCOVER !== "1") {
     void runScheduledAction(options.handler);
   }
 
   return action;
+}
+
+function actionPolicy(
+  timeout: string | undefined,
+  retry: RetryPolicyInput | undefined,
+): ActionPolicyInput | undefined {
+  if (timeout === undefined && retry === undefined) {
+    return undefined;
+  }
+
+  return {
+    ...(timeout !== undefined ? { timeout } : {}),
+    ...(retry !== undefined ? { retry } : {}),
+  };
 }
 
 async function runApiAction(handler: ApiActionHandler | BoundApiActionHandler): Promise<void> {

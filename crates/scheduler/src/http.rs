@@ -190,6 +190,7 @@ mod tests {
             source: "src/restock.py".into(),
             entrypoint: "restock_report".to_string(),
             name: Some("restock_report".to_string()),
+            policy: ryvus_protocol::ActionExecutionPolicy::default(),
         }
     }
 

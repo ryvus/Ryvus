@@ -36,7 +36,9 @@ pub fn execution_error_status(error: &ExecutionServiceError) -> StatusCode {
 }
 
 pub fn action_error_status(code: &str) -> StatusCode {
-    if code == "TypeError" || code.ends_with("ValidationError") {
+    if code == "Timeout" {
+        StatusCode::GATEWAY_TIMEOUT
+    } else if code == "TypeError" || code.ends_with("ValidationError") {
         StatusCode::BAD_REQUEST
     } else {
         StatusCode::INTERNAL_SERVER_ERROR

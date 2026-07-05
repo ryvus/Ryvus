@@ -113,6 +113,7 @@ mod tests {
                 source: PathBuf::from("src/hello.py"),
                 entrypoint: "hello".to_string(),
                 name: None,
+                policy: ryvus_protocol::ActionExecutionPolicy::default(),
             }],
         };
 
@@ -181,6 +182,7 @@ mod tests {
                     steps: vec![ryvus_flow::FlowStep {
                         key: "hello".to_string(),
                         action: "src/hello.py::hello".to_string(),
+                        policy: ryvus_protocol::ActionExecutionPolicy::default(),
                         params: Value::Null,
                         config: Value::Null,
                         next: None,
@@ -214,6 +216,7 @@ mod tests {
                 source: PathBuf::from("src/hello.py"),
                 entrypoint: "hello".to_string(),
                 name: None,
+                policy: ryvus_protocol::ActionExecutionPolicy::default(),
             }],
         };
 

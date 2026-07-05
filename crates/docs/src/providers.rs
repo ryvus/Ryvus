@@ -85,6 +85,7 @@ mod tests {
             source: PathBuf::from("src/hello.py"),
             entrypoint: "hello".to_string(),
             name: None,
+            policy: ryvus_protocol::ActionExecutionPolicy::default(),
         }];
 
         let pages = GeneratedCatalogDocsSource::new(&actions)

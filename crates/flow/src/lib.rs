@@ -10,7 +10,7 @@ pub use error::{FlowError, FlowResult};
 pub use executor::{FlowRunner, FlowService, FlowStepExecutor};
 pub use model::{
     ConditionalNext, FlowDefinition, FlowEndStatus, FlowExecution, FlowExecutionStatus, FlowSpec,
-    FlowStep, FlowStepExecution, FlowStepStatus, StartFlowResponse,
+    FlowStep, FlowStepExecution, FlowStepLog, FlowStepStatus, StartFlowResponse,
 };
 pub use store::{FlowStateStore, InMemoryFlowStateStore};
 pub use validation::{validate_flow_actions, validate_flow_spec};
