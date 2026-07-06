@@ -238,6 +238,8 @@ mod tests {
             kind: ActionKind::Api(ApiAction {
                 method: "POST".to_string(),
                 path: format!("/{entrypoint}"),
+                consumes: vec!["application/json".to_string()],
+                produces: vec!["application/json".to_string()],
                 request_schema: None,
                 response_schema: None,
                 query_params: Vec::new(),

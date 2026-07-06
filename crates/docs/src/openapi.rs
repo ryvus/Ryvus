@@ -39,6 +39,8 @@ pub fn build_public_openapi_json_from_actions<'a>(
                 &tag,
                 &api.path,
                 &api.method,
+                &api.consumes,
+                &api.produces,
                 api.request_schema.as_ref(),
                 api.response_schema.as_ref(),
                 &api.query_params,
@@ -64,6 +66,8 @@ fn build_operation(
     tag: &str,
     path: &str,
     method: &str,
+    consumes: &[String],
+    produces: &[String],
     request_schema: Option<&Value>,
     response_schema: Option<&Value>,
     query_params: &[ApiQueryParam],
@@ -74,13 +78,7 @@ fn build_operation(
     let responses = json!({
         "200": {
             "description": "Successful response",
-            "content": {
-                "application/json": {
-                    "schema": response_schema
-                        .map(resolve_local_schema_refs)
-                        .unwrap_or_else(default_object_schema)
-                }
-            }
+            "content": media_content(produces, response_schema, true)
         },
         "400": error_response("Invalid request"),
         "405": error_response("Method not allowed"),
@@ -103,24 +101,56 @@ fn build_operation(
             .expect("operation should be an object")
             .insert(
                 "requestBody".to_string(),
-                request_body_schema(request_schema),
+                request_body_schema(consumes, request_schema),
             );
     }
 
     operation
 }
 
-fn request_body_schema(schema: Option<&Value>) -> Value {
+fn request_body_schema(consumes: &[String], schema: Option<&Value>) -> Value {
     json!({
         "required": false,
-        "content": {
-            "application/json": {
-                "schema": schema
-                    .map(resolve_local_schema_refs)
-                    .unwrap_or_else(default_object_schema)
-            }
-        }
+        "content": media_content(consumes, schema, false)
     })
+}
+
+fn media_content(media_types: &[String], schema: Option<&Value>, response: bool) -> Value {
+    let mut content = serde_json::Map::new();
+    let media_types = if media_types.is_empty() {
+        vec!["application/json".to_string()]
+    } else {
+        media_types.to_vec()
+    };
+
+    for media_type in media_types {
+        content.insert(
+            media_type.clone(),
+            json!({
+                "schema": schema_for_media_type(&media_type, schema, response)
+            }),
+        );
+    }
+
+    Value::Object(content)
+}
+
+fn schema_for_media_type(media_type: &str, schema: Option<&Value>, response: bool) -> Value {
+    if media_type.starts_with("text/") {
+        return schema
+            .map(resolve_local_schema_refs)
+            .unwrap_or_else(|| json!({ "type": "string" }));
+    }
+
+    if media_type == "application/x-www-form-urlencoded" && !response {
+        return schema
+            .map(resolve_local_schema_refs)
+            .unwrap_or_else(default_object_schema);
+    }
+
+    schema
+        .map(resolve_local_schema_refs)
+        .unwrap_or_else(default_object_schema)
 }
 
 fn error_response(description: &str) -> Value {
@@ -300,6 +330,8 @@ mod tests {
             kind: ActionKind::Api(ApiAction {
                 method: method.to_string(),
                 path: path.to_string(),
+                consumes: vec!["application/json".to_string()],
+                produces: vec!["application/json".to_string()],
                 request_schema: None,
                 response_schema: None,
                 query_params: Vec::new(),
@@ -404,6 +436,8 @@ mod tests {
             kind: ActionKind::Api(ApiAction {
                 method: "GET".to_string(),
                 path: "/hello".to_string(),
+                consumes: vec!["application/json".to_string()],
+                produces: vec!["application/json".to_string()],
                 request_schema: None,
                 response_schema: None,
                 query_params: Vec::new(),

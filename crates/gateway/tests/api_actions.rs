@@ -27,7 +27,7 @@ def hello(event, context):
 }
 
 #[tokio::test]
-async fn does_not_serve_docs_or_openapi() {
+async fn serves_openapi_but_not_docs() {
     let project = TestProject::new("docs");
     project.add_action(
         "hello.py",
@@ -54,7 +54,10 @@ def restock_report(context):
     assert_eq!(docs.status, StatusCode::NOT_FOUND);
 
     let openapi = request(&project, Method::GET, "/openapi.json", None).await;
-    assert_eq!(openapi.status, StatusCode::NOT_FOUND);
+    assert_eq!(openapi.status, StatusCode::OK);
+    assert_eq!(openapi.body["openapi"], json!("3.1.0"));
+    assert!(openapi.body["paths"]["/hello"]["get"].is_object());
+    assert!(openapi.body["paths"]["/system/schedules"].is_null());
 }
 
 #[tokio::test]
@@ -310,6 +313,100 @@ def create_user(name: str):
 }
 
 #[tokio::test]
+async fn supports_text_and_form_api_action_media_types() {
+    let project = TestProject::new("content-types");
+    project.add_action(
+        "echo.py",
+        r#"
+@api_action(method="POST", path="/echo", consumes="text/plain", produces="text/plain")
+def echo(body: str):
+    return body
+"#,
+    );
+    project.add_action(
+        "form.py",
+        r#"
+@api_action(method="POST", path="/form")
+def form(name: str, quantity: int):
+    return {"name": name, "quantity": quantity}
+"#,
+    );
+    project.write_manifest(&[
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Api": {
+                    "method": "POST",
+                    "path": "/echo",
+                    "consumes": ["text/plain"],
+                    "produces": ["text/plain"],
+                    "query_params": []
+                }
+            },
+            "source": "src/echo.py",
+            "entrypoint": "echo"
+        }),
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Api": {
+                    "method": "POST",
+                    "path": "/form",
+                    "consumes": ["application/x-www-form-urlencoded"],
+                    "produces": ["application/json"],
+                    "query_params": [],
+                    "request_schema": {
+                        "type": "object",
+                        "required": ["name", "quantity"],
+                        "properties": {
+                            "name": { "type": "string" },
+                            "quantity": { "type": "string" }
+                        }
+                    }
+                }
+            },
+            "source": "src/form.py",
+            "entrypoint": "form"
+        }),
+    ]);
+
+    let text = raw_request_with_content_type(
+        &project,
+        Method::POST,
+        "/echo",
+        "hello ryvus",
+        "text/plain; charset=utf-8",
+    )
+    .await;
+    assert_eq!(text.status, StatusCode::OK);
+    assert_eq!(text.raw_body, "hello ryvus");
+
+    assert_public_error(
+        raw_request_with_content_type(&project, Method::POST, "/echo", "", "text/plain").await,
+        StatusCode::BAD_REQUEST,
+        "invalid_request_body",
+    );
+
+    let form = raw_request_with_content_type(
+        &project,
+        Method::POST,
+        "/form",
+        "name=food_salmon_2kg&quantity=2",
+        "application/x-www-form-urlencoded",
+    )
+    .await;
+    assert_eq!(form.status, StatusCode::OK);
+    assert_eq!(form.body, json!({"name": "food_salmon_2kg", "quantity": 2}));
+
+    assert_public_error(
+        raw_request_with_content_type(&project, Method::POST, "/echo", "{}", "application/json")
+            .await,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "unsupported_media_type",
+    );
+}
+
+#[tokio::test]
 async fn returns_expected_http_errors() {
     let project = TestProject::new("errors");
     project.add_action(
@@ -366,12 +463,12 @@ def needs(required: str):
         StatusCode::BAD_REQUEST,
         "invalid_json_body",
     );
-    assert_public_error(
+    assert_invocation_error(
         request(&project, Method::GET, "/needs", None).await,
         StatusCode::BAD_REQUEST,
         "action_failed",
     );
-    assert_public_error(
+    assert_invocation_error(
         request(&project, Method::GET, "/fails", None).await,
         StatusCode::INTERNAL_SERVER_ERROR,
         "action_failed",
@@ -387,6 +484,14 @@ async fn validates_query_params_and_request_body_before_invocation() {
 @api_action(method="GET", path="/search")
 def search(limit: int):
     return {"limit": limit}
+"#,
+    );
+    project.add_action(
+        "path.py",
+        r#"
+@api_action(method="GET", path="/pets/{id}")
+def find_pet(id: str):
+    return {"id": id}
 "#,
     );
     project.add_action(
@@ -420,6 +525,18 @@ def create_pet(name: str, age: int):
             "runtime": "Python",
             "kind": {
                 "Api": {
+                    "method": "GET",
+                    "path": "/pets/{id}",
+                    "query_params": []
+                }
+            },
+            "source": "src/path.py",
+            "entrypoint": "find_pet"
+        }),
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Api": {
                     "method": "POST",
                     "path": "/pets",
                     "query_params": [],
@@ -444,12 +561,26 @@ def create_pet(name: str, age: int):
         missing_query.body["error"],
         json!("request_validation_failed")
     );
-    assert!(missing_query.body["invocation_id"].is_string());
+    assert!(missing_query.body.get("invocation_id").is_none());
+
+    let empty_query = request(&project, Method::GET, "/search?limit=", None).await;
+    assert_eq!(empty_query.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        empty_query.body["error"],
+        json!("request_validation_failed")
+    );
 
     let invalid_query = request(&project, Method::GET, "/search?limit=nope", None).await;
     assert_eq!(invalid_query.status, StatusCode::BAD_REQUEST);
     assert_eq!(
         invalid_query.body["error"],
+        json!("request_validation_failed")
+    );
+
+    let empty_path = request(&project, Method::GET, "/pets/%20", None).await;
+    assert_eq!(empty_path.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        empty_path.body["error"],
         json!("request_validation_failed")
     );
 

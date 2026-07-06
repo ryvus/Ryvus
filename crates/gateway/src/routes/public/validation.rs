@@ -5,14 +5,27 @@ use serde_json::Value;
 
 pub fn validate_request(
     api: &ApiAction,
+    path_params: &HashMap<String, String>,
     query_params: &HashMap<String, String>,
     body: &Value,
+    media_type: &str,
 ) -> Result<(), String> {
+    validate_path_params(path_params)?;
     validate_query_params(&api.query_params, query_params)?;
 
-    if method_allows_request_body(&api.method) {
+    if method_allows_request_body(&api.method) && media_type != "text/plain" {
         if let Some(schema) = &api.request_schema {
             validate_body(schema, body)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_path_params(path_params: &HashMap<String, String>) -> Result<(), String> {
+    for (name, value) in path_params {
+        if is_blank(value) {
+            return Err(format!("path parameter `{name}` cannot be empty"));
         }
     }
 
@@ -31,6 +44,10 @@ fn validate_query_params(
 
             continue;
         };
+
+        if param.required && is_blank(value) {
+            return Err(format!("query parameter `{}` cannot be empty", param.name));
+        }
 
         validate_query_param(&param.name, value, &param.schema)?;
     }
@@ -77,6 +94,17 @@ fn validate_bool(value: &str) -> bool {
         value.to_ascii_lowercase().as_str(),
         "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off"
     )
+}
+
+fn is_blank(value: &str) -> bool {
+    if value.trim().is_empty() {
+        return true;
+    }
+
+    let encoded = format!("value={value}");
+    url::form_urlencoded::parse(encoded.as_bytes())
+        .next()
+        .is_some_and(|(_, decoded)| decoded.trim().is_empty())
 }
 
 fn method_allows_request_body(method: &str) -> bool {

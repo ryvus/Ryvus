@@ -8,6 +8,24 @@ use serde_json::Value;
 
 pub fn public_error(
     status: StatusCode,
+    error: &str,
+    message: impl Into<String>,
+    details: Option<Value>,
+) -> Response {
+    let mut body = serde_json::json!({
+        "error": error,
+        "message": message.into(),
+    });
+
+    if let Some(details) = details {
+        body["details"] = details;
+    }
+
+    (status, Json(body)).into_response()
+}
+
+pub fn invocation_error(
+    status: StatusCode,
     invocation_id: &str,
     error: &str,
     message: impl Into<String>,

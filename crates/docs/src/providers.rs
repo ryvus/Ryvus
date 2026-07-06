@@ -78,6 +78,8 @@ mod tests {
             kind: ActionKind::Api(ApiAction {
                 method: "GET".to_string(),
                 path: "/hello".to_string(),
+                consumes: vec!["application/json".to_string()],
+                produces: vec!["application/json".to_string()],
                 request_schema: None,
                 response_schema: None,
                 query_params: Vec::new(),

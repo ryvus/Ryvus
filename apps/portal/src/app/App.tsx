@@ -41,20 +41,21 @@ export function App() {
     : artifacts.data
       ? "Artifacts loaded"
       : "Loading";
+  const routeLabel = routes.find(([id]) => id === route)?.[1] ?? "Dashboard";
 
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="grid min-h-screen grid-cols-1 lg:grid-cols-[260px_minmax(0,1fr)]">
-        <aside className="border-b border-white/10 bg-[#07111f] px-4 py-4 lg:border-b-0 lg:border-r lg:px-3">
-          <div className="mb-5 flex items-center gap-3 px-2">
+    <main className="min-h-screen overflow-x-hidden bg-[#08090b] text-slate-100">
+      <div className="grid min-h-screen grid-cols-1 lg:grid-cols-[248px_minmax(0,1fr)]">
+        <aside className="border-b border-white/10 bg-[#090a0c] px-3 py-4 lg:border-b-0 lg:border-r">
+          <div className="mb-8 flex items-center gap-3 px-2">
             <img
               src={ryvusMark}
               alt=""
-              className="h-9 w-9 rounded-xl bg-slate-950 shadow-lg shadow-blue-950/50"
+              className="h-8 w-8 rounded-md bg-[#050506] ring-1 ring-white/10"
             />
             <span className="grid leading-tight">
-              <strong className="text-sm font-semibold text-white">Ryvus</strong>
-              <small className="text-xs font-medium text-slate-400">Portal</small>
+              <strong className="text-sm font-semibold tracking-tight text-white">.ryvus</strong>
+              <small className="font-mono text-[11px] font-medium uppercase text-slate-600">Control</small>
             </span>
           </div>
           <nav className="grid gap-1" aria-label="Portal sections">
@@ -63,9 +64,9 @@ export function App() {
                 key={id}
                 href={`#${id}`}
                 className={cn(
-                  "rounded-lg border border-transparent px-3 py-2 text-sm font-medium text-slate-400 transition hover:bg-white/[0.06] hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-300",
+                  "rounded-md border border-transparent px-3 py-2 text-sm font-semibold text-slate-500 transition hover:bg-white/[0.045] hover:text-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-300",
                   route === id &&
-                    "border-blue-400/20 bg-blue-500/10 text-white shadow-[inset_2px_0_0_#2563ff]",
+                    "border-white/10 bg-[#17181c] text-white shadow-[inset_2px_0_0_#6f3dff]",
                 )}
               >
                 {label}
@@ -74,17 +75,22 @@ export function App() {
           </nav>
         </aside>
 
-        <div className="min-w-0 bg-[radial-gradient(circle_at_top_right,rgba(37,99,255,0.18),transparent_34rem),linear-gradient(180deg,#0b1220_0%,#020617_100%)]">
-          <header className="sticky top-0 z-20 flex min-h-16 items-center justify-between border-b border-white/10 bg-slate-950/75 px-5 backdrop-blur-xl sm:px-8">
-            <div className="grid gap-0.5">
-              <span className="text-[11px] font-semibold uppercase text-blue-400">Local Snapshot</span>
-              <strong className="text-sm font-semibold text-white">
+        <div className="min-w-0 bg-[#0d0e11]">
+          <header className="sticky top-0 z-20 flex min-h-14 items-center justify-between gap-4 border-b border-white/10 bg-[#0d0e11]/95 px-5 backdrop-blur sm:px-8">
+            <div className="flex min-w-0 items-center gap-2 text-sm">
+              <span className="truncate font-semibold text-slate-500">Portal</span>
+              <span className="text-slate-700">/</span>
+              <span className="truncate font-semibold text-slate-400">{routeLabel}</span>
+              <span className="text-slate-700">/</span>
+              <strong className="truncate font-semibold text-white">
                 {artifacts.data?.openapi.info?.title ?? "Ryvus Public API"}
               </strong>
             </div>
-            <Badge tone={artifacts.isError ? "red" : artifacts.data ? "blue" : "slate"}>
-              {status}
-            </Badge>
+            <span className="hidden shrink-0 sm:block">
+              <Badge tone={artifacts.isError ? "red" : artifacts.data ? "blue" : "slate"}>
+                {status}
+              </Badge>
+            </span>
           </header>
 
           <section className="min-w-0 px-5 py-6 sm:px-8 lg:py-8">

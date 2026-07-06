@@ -94,9 +94,17 @@ from ryvus import api_action, scheduled_action
 pub struct TestResponse {
     pub status: StatusCode,
     pub body: Value,
+    pub raw_body: String,
 }
 
 pub fn assert_public_error(response: TestResponse, status: StatusCode, error: &str) {
+    assert_eq!(response.status, status);
+    assert_eq!(response.body["error"], json!(error));
+    assert!(response.body.get("invocation_id").is_none());
+    assert!(response.body["message"].is_string());
+}
+
+pub fn assert_invocation_error(response: TestResponse, status: StatusCode, error: &str) {
     assert_eq!(response.status, status);
     assert_eq!(response.body["error"], json!(error));
     assert!(response.body["invocation_id"].is_string());
@@ -119,13 +127,23 @@ pub async fn raw_request(
     uri: &str,
     body: &str,
 ) -> TestResponse {
+    raw_request_with_content_type(project, method, uri, body, "application/json").await
+}
+
+pub async fn raw_request_with_content_type(
+    project: &TestProject,
+    method: Method,
+    uri: &str,
+    body: &str,
+    content_type: &str,
+) -> TestResponse {
     let app = server::build_app(&project.config()).expect("gateway app should build");
     let response = app
         .oneshot(
             Request::builder()
                 .method(method)
                 .uri(uri)
-                .header("content-type", "application/json")
+                .header("content-type", content_type)
                 .body(Body::from(body.to_string()))
                 .expect("request should build"),
         )
@@ -136,9 +154,14 @@ pub async fn raw_request(
     let bytes = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body should read");
+    let raw_body = String::from_utf8_lossy(&bytes).to_string();
     let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
 
-    TestResponse { status, body }
+    TestResponse {
+        status,
+        body,
+        raw_body,
+    }
 }
 
 pub fn action(method: &str, path: &str, source: &str, entrypoint: &str) -> Value {

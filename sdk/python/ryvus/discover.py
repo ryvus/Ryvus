@@ -61,8 +61,16 @@ def discover_actions(project_root: Path, source_root: Path) -> list[dict[str, An
                 api_config: dict[str, Any] = {
                     "method": metadata["method"],
                     "path": metadata["path"],
-                    "query_params": query_params_from_handler(obj, metadata["path"]),
+                    "query_params": query_params_from_handler(
+                        obj,
+                        metadata["path"],
+                        metadata.get("consumes", ["application/json"]),
+                    ),
                 }
+                if "consumes" in metadata:
+                    api_config["consumes"] = metadata["consumes"]
+                if "produces" in metadata:
+                    api_config["produces"] = metadata["produces"]
 
                 if request_schema is not None:
                     api_config["request_schema"] = request_schema
@@ -132,7 +140,7 @@ def schemas_from_handler(handler) -> tuple[Optional[dict[str, Any]], Optional[di
 
     return request_schema, response_schema
 
-def query_params_from_handler(handler, path: str) -> list[dict[str, Any]]:
+def query_params_from_handler(handler, path: str, consumes: list[str]) -> list[dict[str, Any]]:
     signature = inspect.signature(handler)
     path_param_names = set(extract_path_param_names(path))
 
@@ -143,6 +151,9 @@ def query_params_from_handler(handler, path: str) -> list[dict[str, Any]]:
         annotation = parameter.annotation
 
         if name in ("event", "context"):
+            continue
+
+        if name == "body" and "application/json" not in consumes:
             continue
 
         if name in path_param_names:

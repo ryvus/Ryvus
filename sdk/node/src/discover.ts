@@ -37,6 +37,8 @@ for (const file of await sourceFiles(sourceRoot)) {
             required: schema.required,
             schema: schema.jsonSchema,
           })),
+          ...(action.consumes ? { consumes: action.consumes } : {}),
+          ...(action.produces ? { produces: action.produces } : {}),
           ...(action.body ? { request_schema: action.body.jsonSchema } : {}),
           ...(action.response ? { response_schema: action.response.jsonSchema } : {}),
         },

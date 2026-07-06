@@ -34,6 +34,8 @@ def api_action(
     name: Optional[str] = None,
     timeout: Optional[str] = None,
     retry: Optional[dict[str, Any]] = None,
+    consumes: Optional[str | list[str]] = None,
+    produces: Optional[str | list[str]] = None,
 ) -> Callable[[F], F]:
     ...
 
@@ -46,6 +48,8 @@ def api_action(
     name: Optional[str] = None,
     timeout: Optional[str] = None,
     retry: Optional[dict[str, Any]] = None,
+    consumes: Optional[str | list[str]] = None,
+    produces: Optional[str | list[str]] = None,
 ):
     if func is None and ((method is None) != (path is None)):
         raise ValueError(
@@ -59,6 +63,10 @@ def api_action(
             "method": method or "GET",
             "path": path or f"/{inner.__name__.replace('_', '-')}",
         }
+        if consumes is not None:
+            metadata["consumes"] = normalize_media_types(consumes)
+        if produces is not None:
+            metadata["produces"] = normalize_media_types(produces)
         policy = optional_policy(timeout, retry)
         if policy is not None:
             metadata["policy"] = policy
@@ -169,3 +177,10 @@ def optional_policy(
     if retry is not None:
         policy["retry"] = retry
     return policy
+
+
+def normalize_media_types(value: str | list[str]) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+
+    return value

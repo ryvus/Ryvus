@@ -1,7 +1,7 @@
 use axum::{
     body::{to_bytes, Body},
     extract::State,
-    http::{Request, StatusCode},
+    http::{header::CONTENT_TYPE, Request, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::state::AppState;
 
 use super::{
-    errors::{action_error_status, execution_error_status, public_error},
+    errors::{action_error_status, execution_error_status, invocation_error, public_error},
     validation::validate_request,
 };
 
@@ -43,7 +43,6 @@ pub async fn handle_dynamic_route(
             if state.control_service.route_registry().path_exists(&path) {
                 return public_error(
                     StatusCode::METHOD_NOT_ALLOWED,
-                    &invocation_id,
                     "method_not_allowed",
                     format!("{} is not allowed for {}", method, path),
                     None,
@@ -52,7 +51,6 @@ pub async fn handle_dynamic_route(
 
             return public_error(
                 StatusCode::NOT_FOUND,
-                &invocation_id,
                 "route_not_configured",
                 format!("{} {} is not configured", method, path),
                 None,
@@ -66,7 +64,6 @@ pub async fn handle_dynamic_route(
         Err(error) => {
             return public_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &invocation_id,
                 "action_not_found",
                 format!("{}: {}", route.action, error),
                 None,
@@ -74,12 +71,17 @@ pub async fn handle_dynamic_route(
         }
     };
 
+    let content_type = request
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(normalize_media_type);
+
     let body = match to_bytes(request.into_body(), usize::MAX).await {
         Ok(body) => body,
         Err(error) => {
             return public_error(
                 StatusCode::BAD_REQUEST,
-                &invocation_id,
                 "failed_to_read_request_body",
                 error.to_string(),
                 None,
@@ -87,28 +89,35 @@ pub async fn handle_dynamic_route(
         }
     };
 
-    let input = if body.is_empty() {
-        Value::Null
-    } else {
-        match serde_json::from_slice(&body) {
-            Ok(value) => value,
-            Err(error) => {
+    let (input, request_media_type) = if let ActionKind::Api(api) = &action.kind {
+        match parse_request_body(api, content_type.as_deref(), &body) {
+            Ok(parsed) => parsed,
+            Err(RequestBodyError::UnsupportedMediaType(media_type)) => {
                 return public_error(
-                    StatusCode::BAD_REQUEST,
-                    &invocation_id,
-                    "invalid_json_body",
-                    error.to_string(),
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "unsupported_media_type",
+                    format!("{} is not supported for {}", media_type, route.action),
                     None,
                 );
             }
+            Err(RequestBodyError::InvalidBody { code, message }) => {
+                return public_error(StatusCode::BAD_REQUEST, code, message, None);
+            }
         }
+    } else {
+        (Value::Null, "application/json".to_string())
     };
 
     if let ActionKind::Api(api) = &action.kind {
-        if let Err(error) = validate_request(api, &query_params, &input) {
+        if let Err(error) = validate_request(
+            api,
+            &route_match.path_params,
+            &query_params,
+            &input,
+            &request_media_type,
+        ) {
             return public_error(
                 StatusCode::BAD_REQUEST,
-                &invocation_id,
                 "request_validation_failed",
                 error,
                 None,
@@ -134,7 +143,6 @@ pub async fn handle_dynamic_route(
         Err(error) => {
             return public_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &invocation_id,
                 "invalid_execution_policy",
                 error.to_string(),
                 None,
@@ -147,7 +155,7 @@ pub async fn handle_dynamic_route(
         Err(error) => {
             let status = execution_error_status(&error);
 
-            return public_error(
+            return invocation_error(
                 status,
                 &invocation_id,
                 "execution_failed",
@@ -166,7 +174,7 @@ pub async fn handle_dynamic_route(
             .map(|error| action_error_status(&error.code))
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
-        return public_error(
+        return invocation_error(
             status,
             &invocation_id,
             "action_failed",
@@ -183,5 +191,90 @@ pub async fn handle_dynamic_route(
 
     let output = invocation_result.output.unwrap_or(serde_json::Value::Null);
 
+    if let ActionKind::Api(api) = &action.kind {
+        return encode_response(api, output);
+    }
+
     Json(output).into_response()
+}
+
+enum RequestBodyError {
+    UnsupportedMediaType(String),
+    InvalidBody { code: &'static str, message: String },
+}
+
+fn parse_request_body(
+    api: &ryvus_protocol::ApiAction,
+    content_type: Option<&str>,
+    body: &[u8],
+) -> Result<(Value, String), RequestBodyError> {
+    let media_type = content_type
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| first_media_type(&api.consumes));
+
+    if !api.consumes.iter().any(|declared| declared == &media_type) {
+        return Err(RequestBodyError::UnsupportedMediaType(media_type));
+    }
+
+    match media_type.as_str() {
+        "application/json" if body.is_empty() && api.request_schema.is_none() => {
+            Ok((Value::Null, media_type))
+        }
+        _ if body.is_empty() => Err(RequestBodyError::InvalidBody {
+            code: "invalid_request_body",
+            message: "request body is required".to_string(),
+        }),
+        "application/json" => serde_json::from_slice(body)
+            .map(|value| (value, media_type))
+            .map_err(|error| RequestBodyError::InvalidBody {
+                code: "invalid_json_body",
+                message: error.to_string(),
+            }),
+        "text/plain" => String::from_utf8(body.to_vec())
+            .map(|value| (Value::String(value), media_type))
+            .map_err(|error| RequestBodyError::InvalidBody {
+                code: "invalid_request_body",
+                message: error.to_string(),
+            }),
+        "application/x-www-form-urlencoded" => {
+            let fields = url::form_urlencoded::parse(body)
+                .into_owned()
+                .map(|(name, value)| (name, Value::String(value)))
+                .collect();
+            Ok((Value::Object(fields), media_type))
+        }
+        _ => Err(RequestBodyError::UnsupportedMediaType(media_type)),
+    }
+}
+
+fn encode_response(api: &ryvus_protocol::ApiAction, output: Value) -> Response {
+    match first_media_type(&api.produces).as_str() {
+        "text/plain" => match output {
+            Value::String(value) => {
+                ([(CONTENT_TYPE, "text/plain; charset=utf-8")], value).into_response()
+            }
+            value => (
+                [(CONTENT_TYPE, "text/plain; charset=utf-8")],
+                value.to_string(),
+            )
+                .into_response(),
+        },
+        _ => Json(output).into_response(),
+    }
+}
+
+fn normalize_media_type(value: &str) -> String {
+    value
+        .split(';')
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn first_media_type(values: &[String]) -> String {
+    values
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "application/json".to_string())
 }

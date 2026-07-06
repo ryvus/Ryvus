@@ -21,6 +21,7 @@ export type ApiActionHandler =
 type QueryShape = Record<string, Schema>;
 type BodySchema = Schema | undefined;
 type ResponseSchema = Schema | undefined;
+type MediaTypeInput = string | string[];
 
 export interface RetryPolicyInput {
   max_attempts?: number;
@@ -72,6 +73,8 @@ export interface ApiActionOptions<
   query?: Query;
   body?: Body;
   response?: Response;
+  consumes?: MediaTypeInput;
+  produces?: MediaTypeInput;
   timeout?: string;
   retry?: RetryPolicyInput;
 }
@@ -85,6 +88,8 @@ export interface ApiActionDefinition {
   query: QueryShape;
   body?: Schema;
   response?: Schema;
+  consumes?: string[];
+  produces?: string[];
   policy?: ActionPolicyInput;
   handler: ApiActionHandler | BoundApiActionHandler;
 }
@@ -154,11 +159,23 @@ export function apiAction(
     action.response = options.response;
   }
 
+  if (options.consumes !== undefined) {
+    action.consumes = normalizeMediaTypes(options.consumes);
+  }
+
+  if (options.produces !== undefined) {
+    action.produces = normalizeMediaTypes(options.produces);
+  }
+
   if (process.env.RYVUS_DISCOVER !== "1") {
     void runApiAction(handler);
   }
 
   return action;
+}
+
+function normalizeMediaTypes(value: MediaTypeInput): string[] {
+  return typeof value === "string" ? [value] : value;
 }
 
 export function scheduledAction(options: {

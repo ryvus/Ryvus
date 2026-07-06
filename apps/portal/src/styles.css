@@ -1,10 +1,10 @@
 @import "tailwindcss";
 
 @theme {
-  --color-ryvus-navy: #0f172a;
+  --color-ryvus-navy: #070b18;
   --color-ryvus-blue: #2563ff;
-  --color-ryvus-violet: #7c3aed;
-  --color-ryvus-cyan: #22d3ee;
+  --color-ryvus-violet: #6f3dff;
+  --color-ryvus-cyan: #20d3ee;
   --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
@@ -14,17 +14,22 @@
 }
 
 html {
-  background: #020617;
+  background: #08090b;
 }
 
 body {
   min-width: 320px;
   margin: 0;
-  background: #020617;
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+    #08090b;
+  background-size: 48px 48px;
   color: #f8fafc;
   font-family: var(--font-sans);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
 }
 
 button,
@@ -37,8 +42,8 @@ input,
 textarea {
   width: 100%;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 0.625rem;
-  background: rgba(2, 6, 23, 0.42);
+  border-radius: 0.375rem;
+  background: #08090b;
   color: #f8fafc;
   padding: 0.625rem 0.75rem;
   outline: none;
@@ -50,8 +55,8 @@ textarea {
 
 input:focus,
 textarea:focus {
-  border-color: rgba(96, 165, 250, 0.65);
-  box-shadow: 0 0 0 3px rgba(37, 99, 255, 0.16);
+  border-color: rgba(111, 61, 255, 0.72);
+  box-shadow: 0 0 0 1px rgba(111, 61, 255, 0.32);
 }
 
 button,
@@ -68,8 +73,8 @@ code {
   --xy-node-background-color-default: transparent;
   --xy-node-border-default: 0;
   --xy-node-boxshadow-default: none;
-  --xy-edge-stroke-default: #60a5fa;
-  --xy-edge-stroke-width-default: 1.7;
+  --xy-edge-stroke-default: #64748b;
+  --xy-edge-stroke-width-default: 1.5;
 }
 
 .ryvus-flow .react-flow__node {
@@ -77,8 +82,8 @@ code {
 }
 
 .ryvus-flow .react-flow__handle {
-  border-color: #020617;
-  background: #60a5fa;
+  border-color: #111214;
+  background: #8b5cf6;
 }
 
 .ryvus-flow .react-flow__edge-path {
@@ -86,11 +91,11 @@ code {
 }
 
 .ryvus-flow .react-flow__edge-textbg {
-  fill: #0f172a;
+  fill: #0b0c0e;
 }
 
 .ryvus-flow .react-flow__edge-text {
-  fill: #cbd5e1;
+  fill: #94a3b8;
   font-size: 11px;
   font-weight: 700;
 }
@@ -98,19 +103,18 @@ code {
 .ryvus-flow .react-flow__controls {
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 10px;
-  background: rgba(15, 23, 42, 0.9);
-  box-shadow: 0 18px 50px rgba(2, 6, 23, 0.35);
+  border-radius: 8px;
+  background: #111214;
 }
 
 .ryvus-flow .react-flow__controls-button {
   border-bottom-color: rgba(255, 255, 255, 0.08);
-  background: rgba(15, 23, 42, 0.9);
+  background: #111214;
   color: #e2e8f0;
 }
 
 .ryvus-flow .react-flow__controls-button:hover {
-  background: rgba(37, 99, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .ryvus-flow .react-flow__attribution {
@@ -158,7 +162,7 @@ code {
 
 .portal-markdown code {
   border-radius: 0.375rem;
-  background: rgba(15, 23, 42, 0.8);
+  background: rgba(7, 11, 24, 0.82);
   color: #f8fafc;
   padding: 0.1rem 0.3rem;
   font-size: 0.85em;
@@ -166,9 +170,9 @@ code {
 
 .portal-markdown pre {
   overflow: auto;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 0.75rem;
-  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 0.875rem;
+  background: rgba(0, 0, 0, 0.34);
   padding: 0.875rem;
 }
 

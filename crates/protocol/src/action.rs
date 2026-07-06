@@ -134,6 +134,18 @@ pub struct ApiAction {
     pub method: String,
     pub path: String,
 
+    #[serde(
+        default = "default_media_types",
+        skip_serializing_if = "is_default_media_types"
+    )]
+    pub consumes: Vec<String>,
+
+    #[serde(
+        default = "default_media_types",
+        skip_serializing_if = "is_default_media_types"
+    )]
+    pub produces: Vec<String>,
+
     #[serde(default)]
     pub request_schema: Option<serde_json::Value>,
 
@@ -149,6 +161,14 @@ pub struct ApiQueryParam {
     pub name: String,
     pub required: bool,
     pub schema: serde_json::Value,
+}
+
+fn default_media_types() -> Vec<String> {
+    vec!["application/json".to_string()]
+}
+
+fn is_default_media_types(value: &[String]) -> bool {
+    value == ["application/json"]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,5 +196,17 @@ mod tests {
         assert_eq!(policy.retry.max_attempts, 1);
         assert_eq!(policy.retry.initial_delay, "1s");
         assert_eq!(policy.retry.backoff, 2.0);
+    }
+
+    #[test]
+    fn api_action_defaults_to_json_media_types() {
+        let action: ApiAction = serde_json::from_value(serde_json::json!({
+            "method": "GET",
+            "path": "/hello"
+        }))
+        .expect("api action should deserialize");
+
+        assert_eq!(action.consumes, vec!["application/json"]);
+        assert_eq!(action.produces, vec!["application/json"]);
     }
 }

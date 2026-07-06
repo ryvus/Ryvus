@@ -293,15 +293,15 @@ function FlowDetail({
               onCancel={cancelExecution}
             />
           )}
-          <div className="overflow-hidden rounded-xl border border-white/10 bg-slate-950/80">
-            <div className="flex items-center gap-1 border-b border-white/10 bg-black/20 p-2">
+          <div className="overflow-hidden rounded-lg border border-white/10 bg-[#111214]">
+            <div className="flex items-center gap-1 border-b border-white/10 bg-[#0b0c0e] p-2">
               {(["diagram", "source"] as const).map((view) => (
                 <button
                   key={view}
                   type="button"
                   onClick={() => setActiveView(view)}
                   className={cn(
-                    "rounded-lg px-3 py-1.5 text-sm font-medium capitalize text-slate-400 transition hover:bg-white/5 hover:text-white",
+                    "rounded-md px-3 py-1.5 font-mono text-xs font-bold uppercase text-slate-500 transition hover:bg-white/5 hover:text-white",
                     activeView === view && "bg-white/10 text-white",
                   )}
                 >
@@ -310,7 +310,7 @@ function FlowDetail({
               ))}
             </div>
             {activeView === "diagram" ? (
-              <div className="ryvus-flow h-[620px]">
+              <div className="ryvus-flow h-[620px] bg-[#0d0e11]">
                 <ReactFlow
                   nodes={graph.nodes}
                   edges={graph.edges}
@@ -327,7 +327,7 @@ function FlowDetail({
                     });
                   }}
                 >
-                  <Background color="rgba(148, 163, 184, 0.22)" gap={18} />
+                  <Background color="rgba(148, 163, 184, 0.12)" gap={24} />
                   <Controls showInteractive={false} />
                 </ReactFlow>
               </div>
@@ -383,7 +383,7 @@ function StartExecution({
 }) {
   return (
     <>
-      <div className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-black/20 p-4">
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-[#111214] p-4">
         <div>
           <h3 className="text-sm font-semibold text-white">Start new execution</h3>
           <p className="mt-1 text-xs leading-5 text-slate-400">Open the input editor and start a run.</p>
@@ -391,8 +391,8 @@ function StartExecution({
         <Button type="button" onClick={onOpen}>Start execution</Button>
       </div>
       {isOpen && (
-        <div className="fixed inset-0 z-50 grid items-start justify-items-center overflow-auto bg-slate-950/76 p-4 pt-8 backdrop-blur-sm sm:pt-12">
-          <div className="grid w-full max-w-3xl gap-4 rounded-xl border border-white/10 bg-slate-950 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.55)]">
+        <div className="fixed inset-0 z-50 grid items-start justify-items-center overflow-auto bg-black/70 p-4 pt-8 backdrop-blur-sm sm:pt-12">
+          <div className="grid w-full max-w-3xl gap-4 rounded-lg border border-white/10 bg-[#111214] p-5 shadow-[0_24px_80px_rgba(0,0,0,0.55)]">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h3 className="text-base font-semibold text-white">Start execution</h3>
@@ -433,7 +433,7 @@ function ExecutionList({
   const filteredExecutions = executions.filter((execution) => executionMatches(execution, query));
 
   return (
-    <div className="rounded-xl border border-white/10 bg-black/20">
+    <div className="rounded-lg border border-white/10 bg-[#111214]">
       <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
         <h3 className="text-sm font-semibold text-white">Previous executions</h3>
         <Badge tone="slate">{filteredExecutions.length}</Badge>
@@ -469,7 +469,7 @@ function ExecutionList({
               onClick={() => onSelectExecution(execution)}
               className={cn(
                 "grid w-full gap-1 px-4 py-3 text-left transition hover:bg-white/[0.04]",
-                execution.id === selectedExecutionId && "bg-blue-500/10",
+                execution.id === selectedExecutionId && "bg-[#17181c] shadow-[inset_2px_0_0_#6f3dff]",
               )}
             >
               <span className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
@@ -512,7 +512,7 @@ function ExecutionSummary({
   const canCancel = isActiveExecution(execution);
 
   return (
-    <div className="grid min-w-0 gap-4 rounded-xl border border-white/10 bg-black/20 p-4">
+    <div className="grid min-w-0 gap-4 rounded-lg border border-white/10 bg-[#111214] p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold text-white">Flow execution details</h3>
@@ -570,14 +570,14 @@ function ExecutionDetail({
   const canRetry = selectedStep ? canRetryStep(execution, selectedStep) : false;
 
   return (
-    <div className="grid min-w-0 gap-4 rounded-xl border border-white/10 bg-black/20 p-4">
+    <div className="grid min-w-0 gap-4 rounded-lg border border-white/10 bg-[#111214] p-4">
       <h3 className="text-sm font-semibold text-white">Selected step details</h3>
       <DetailSection title="Input" value={execution.input} />
       <DetailSection title="Output" value={execution.output} />
       {selectedStep && (
         <div
           className={cn(
-            "grid min-w-0 gap-3 rounded-lg border bg-slate-950/70 p-3",
+            "grid min-w-0 gap-3 rounded-md border bg-[#0b0c0e] p-3",
             isTimeoutStep(selectedStep) ? "border-amber-300/45" : "border-white/10",
           )}
         >
@@ -602,7 +602,7 @@ function ExecutionDetail({
           {selectedStep.error && <DetailSection title="Step error" value={selectedStep.error} />}
         </div>
       )}
-      <details className="rounded-lg border border-white/10 bg-slate-950/45 p-3">
+      <details className="rounded-md border border-white/10 bg-[#0b0c0e] p-3">
         <summary className="cursor-pointer text-xs font-semibold uppercase text-slate-500">
           Timeline
         </summary>
@@ -613,8 +613,8 @@ function ExecutionDetail({
               type="button"
               onClick={() => onSelectStep(step.key)}
               className={cn(
-                "flex min-w-0 items-center justify-between gap-3 rounded-lg border border-white/10 bg-slate-950/55 px-3 py-2 text-left transition hover:border-blue-400/35 hover:bg-blue-500/10",
-                selectedStep?.key === step.key && "border-blue-400/45 bg-blue-500/10",
+                "flex min-w-0 items-center justify-between gap-3 rounded-md border border-white/10 bg-[#050506] px-3 py-2 text-left transition hover:border-white/15 hover:bg-white/[0.045]",
+                selectedStep?.key === step.key && "border-violet-400/45 bg-[#17181c]",
               )}
             >
               <span className="truncate text-sm text-slate-300">{step.key}</span>
@@ -643,7 +643,7 @@ function shortJson(value: unknown): string {
 
 function WatchLog({ step }: { step?: StepExecution }) {
   return (
-    <div className="grid min-w-0 gap-3 rounded-xl border border-white/10 bg-black/20 p-4">
+    <div className="grid min-w-0 gap-3 rounded-lg border border-white/10 bg-[#111214] p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold text-white">Watch log</h3>
@@ -651,7 +651,7 @@ function WatchLog({ step }: { step?: StepExecution }) {
         </div>
         {step && <StatusBadge status={step.status} />}
       </div>
-      <div className="h-[560px] overflow-auto rounded-lg border border-white/10 bg-slate-950/80 p-3 font-mono text-xs leading-5">
+      <div className="h-[560px] overflow-auto rounded-md border border-white/10 bg-[#050506] p-3 font-mono text-xs leading-5">
         {!step ? (
           <p className="text-slate-500">Start an execution to watch step output.</p>
         ) : step.logs.length === 0 ? (
@@ -659,9 +659,9 @@ function WatchLog({ step }: { step?: StepExecution }) {
         ) : (
           <div className="grid gap-2">
             {step.logs.map((log, index) => (
-              <div key={`${step.key}-${index}`} className="rounded-md border border-white/10 bg-black/25 p-2">
+              <div key={`${step.key}-${index}`} className="rounded-md border border-white/10 bg-[#111214] p-2">
                 <div className="flex items-center gap-2">
-                  <span className="text-[11px] font-semibold uppercase text-blue-200">{log.level}</span>
+                  <span className="text-[11px] font-semibold uppercase text-violet-200">{log.level}</span>
                   <span className="min-w-0 truncate text-slate-200">{log.message}</span>
                 </div>
               </div>
@@ -680,7 +680,7 @@ function StatusBadge({ status }: { status: ExecutionStatus }) {
       : status === "failed"
         ? "red"
         : status === "running" || status === "queued"
-          ? "blue"
+          ? "violet"
           : "slate";
   return <Badge tone={tone}>{status}</Badge>;
 }
@@ -835,7 +835,17 @@ function stepEdges(step: FlowStep, activeEdges: Set<string>): Edge[] {
 }
 
 function flowEdge(source: string, target: string, label: string, active: boolean): Edge {
-  const color = active ? (label === "error" ? "#f87171" : "#22c55e") : "#60a5fa";
+  const color = active
+    ? label === "error"
+      ? "#f87171"
+      : label === "success"
+        ? "#34d399"
+        : "#8b5cf6"
+    : label === "error"
+      ? "#7f1d1d"
+      : label === "otherwise"
+        ? "#a16207"
+        : "#475569";
 
   return {
     id: `${source}-${target}-${label}`,
@@ -844,13 +854,13 @@ function flowEdge(source: string, target: string, label: string, active: boolean
     sourceHandle: `${label}-source`,
     targetHandle: `${label}-target`,
     label,
-    animated: label === "error",
+    animated: active,
     type: "smoothstep",
     labelBgPadding: [8, 5],
-    labelBgBorderRadius: 6,
-    labelBgStyle: { fill: "#0f172a", fillOpacity: 0.96 },
-    labelStyle: { fill: color, fontSize: 12, fontWeight: 700 },
-    style: { stroke: color },
+    labelBgBorderRadius: 4,
+    labelBgStyle: { fill: "#0b0c0e", fillOpacity: 0.98 },
+    labelStyle: { fill: color, fontSize: 11, fontWeight: 800 },
+    style: { stroke: color, strokeWidth: active ? 2.2 : 1.4 },
   };
 }
 
@@ -883,23 +893,23 @@ function StepNode({
   const timedOut = data.execution ? isTimeoutStep(data.execution) : false;
   const statusClass =
     status === "succeeded"
-      ? "border-emerald-400/35"
+      ? "border-emerald-400/45"
       : status === "failed"
         ? timedOut
           ? "border-amber-300/60"
-          : "border-red-400/35"
+          : "border-red-400/45"
         : status === "running"
-          ? "border-blue-400/45"
-          : "border-blue-400/20";
+          ? "border-violet-400/55"
+          : "border-white/10";
 
   return (
     <button
       type="button"
       onClick={() => data.onSelectStep(step.key)}
       className={cn(
-        "min-w-[190px] rounded-xl border bg-slate-950/95 p-3 text-left shadow-[0_18px_50px_rgba(2,6,23,0.38)] transition hover:bg-slate-900",
+        "min-w-[198px] rounded-md border bg-[#111214] p-3 text-left shadow-[0_1px_0_rgba(255,255,255,0.03)] transition hover:bg-[#17181c]",
         statusClass,
-        data.selected && "ring-2 ring-blue-400/50",
+        data.selected && "ring-1 ring-violet-400/70",
       )}
     >
       {edgeHandles.map((handle) => (
@@ -909,11 +919,22 @@ function StepNode({
           type="target"
           position={handle.target}
           style={handleStyle(handle.target, handle.offset)}
-          className="!h-2 !w-2 !border-2 !border-slate-950 !bg-blue-400"
+          className="!h-2 !w-2 !rounded-sm !border !border-[#111214] !bg-slate-500"
         />
       ))}
       <div className="mb-2 flex items-center gap-2">
-        <span className="h-2 w-2 rounded-full bg-gradient-to-br from-blue-400 to-violet-500 shadow-[0_0_0_4px_rgba(37,99,255,0.14)]" />
+        <span
+          className={cn(
+            "h-2 w-2 rounded-sm",
+            status === "succeeded"
+              ? "bg-emerald-400"
+              : status === "failed"
+                ? "bg-red-400"
+                : status === "running"
+                  ? "bg-violet-400"
+                  : "bg-slate-500",
+          )}
+        />
         <strong className="truncate text-sm font-semibold text-white">{step.key}</strong>
         {status && (
           <span className="ml-auto flex items-center gap-1">
@@ -922,7 +943,7 @@ function StepNode({
           </span>
         )}
       </div>
-      <code className="block truncate rounded-md border border-white/10 bg-black/25 px-2 py-1 text-xs text-slate-300">
+      <code className="block truncate rounded-sm border border-white/10 bg-[#050506] px-2 py-1 text-xs text-slate-300">
         {step.action}
       </code>
       {edgeHandles.map((handle) => (
@@ -932,7 +953,7 @@ function StepNode({
           type="source"
           position={handle.source}
           style={handleStyle(handle.source, handle.offset)}
-          className="!h-2 !w-2 !border-2 !border-slate-950 !bg-violet-400"
+          className="!h-2 !w-2 !rounded-sm !border !border-[#111214] !bg-violet-400"
         />
       ))}
     </button>
