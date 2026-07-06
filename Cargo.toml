@@ -2,11 +2,6 @@
 resolver = "2"
 
 members = [
-  # "crates/core",
-  # "crates/old_engine",
-  # "crates/old_flow",
-  # "crates/utils",
-  # "crates/ryvus",
   "crates/protocol",
   "crates/execution",
   "crates/persistence",
@@ -17,11 +12,6 @@ members = [
   "crates/scheduler",
   "crates/flow",
   "crates/cli",
-
-  # sdk
-  # Examples
-  "examples/actions/rust-echo",
-
 ]
 
 exclude = []
@@ -35,7 +25,6 @@ repository = "https://github.com/ryvus/ryvus"
 
 [workspace.dependencies]
 # ryvus-engine = { path = "crates/old_engine" }
-# ryvus-core = { path = "crates/core" }
 # ryvus-flow = { path = "crates/old_flow" }
 # ryvus-utils = { path = "crates/utils" }
 ryvus-protocol = { path = "crates/protocol" }
