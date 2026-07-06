@@ -24,9 +24,6 @@ authors = ["Ryvus Team <support@ryvus.dev>"]
 repository = "https://github.com/ryvus/ryvus"
 
 [workspace.dependencies]
-# ryvus-engine = { path = "crates/old_engine" }
-# ryvus-flow = { path = "crates/old_flow" }
-# ryvus-utils = { path = "crates/utils" }
 ryvus-protocol = { path = "crates/protocol" }
 ryvus-execution = { path = "crates/execution" }
 ryvus-persistence = { path = "crates/persistence" }
