@@ -369,6 +369,7 @@ mod tests {
                     kind: ActionKind::Authorizer(AuthorizerAction {
                         security: Vec::new(),
                         parameters: Vec::new(),
+                        cache: None,
                     }),
                     source: PathBuf::from("src/auth.py"),
                     entrypoint: "auth_one".to_string(),
@@ -380,6 +381,7 @@ mod tests {
                     kind: ActionKind::Authorizer(AuthorizerAction {
                         security: Vec::new(),
                         parameters: Vec::new(),
+                        cache: None,
                     }),
                     source: PathBuf::from("src/auth.py"),
                     entrypoint: "auth_two".to_string(),

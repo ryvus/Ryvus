@@ -135,6 +135,7 @@ export interface AuthorizerDefinition {
   name: string;
   security?: AuthorizerSecurity[];
   parameters?: AuthorizerParameter[];
+  cache?: AuthorizerCache;
   policy?: ActionPolicyInput;
   handler: AuthorizerHandler;
 }
@@ -151,6 +152,10 @@ export interface AuthorizerParameter {
   in: "header" | "query" | "cookie";
   required?: boolean;
   type?: string;
+}
+
+export interface AuthorizerCache {
+  ttl_seconds: number;
 }
 
 export function apiAction(handler: ApiActionHandler): ApiActionDefinition;
@@ -255,6 +260,7 @@ export function authorizer(options: {
   name: string;
   security?: AuthorizerSecurity | AuthorizerSecurity[];
   parameters?: AuthorizerParameter[];
+  cacheTtlSeconds?: number;
   timeout?: string;
   retry?: RetryPolicyInput;
   handler: AuthorizerHandler;
@@ -270,6 +276,9 @@ export function authorizer(options: {
   }
   if (options.parameters !== undefined) {
     action.parameters = normalizeAuthorizerParameters(options.parameters);
+  }
+  if (options.cacheTtlSeconds !== undefined) {
+    action.cache = { ttl_seconds: options.cacheTtlSeconds };
   }
   const policy = actionPolicy(options.timeout, options.retry);
   if (policy !== undefined) {

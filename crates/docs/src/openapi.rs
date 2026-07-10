@@ -176,10 +176,7 @@ fn authorizers_by_name<'a>(
         .iter()
         .filter_map(|action| {
             if let ActionKind::Authorizer(authorizer) = &action.kind {
-                action
-                    .name
-                    .as_ref()
-                    .map(|name| (name.clone(), authorizer))
+                action.name.as_ref().map(|name| (name.clone(), authorizer))
             } else {
                 None
             }
@@ -616,6 +613,7 @@ mod tests {
                     required: true,
                     parameter_type: "string".to_string(),
                 }],
+                cache: None,
             }),
             source: PathBuf::from("src/auth.py"),
             entrypoint: "auth".to_string(),
@@ -644,17 +642,15 @@ mod tests {
                 { "petstore_header_x_api_key": [] }
             ])
         );
-        assert!(
-            openapi["paths"]["/pets"]["get"]["parameters"]
-                .as_array()
-                .expect("parameters should be an array")
-                .contains(&json!({
-                    "name": "X-Tenant-ID",
-                    "in": "header",
-                    "required": true,
-                    "schema": { "type": "string" }
-                }))
-        );
+        assert!(openapi["paths"]["/pets"]["get"]["parameters"]
+            .as_array()
+            .expect("parameters should be an array")
+            .contains(&json!({
+                "name": "X-Tenant-ID",
+                "in": "header",
+                "required": true,
+                "schema": { "type": "string" }
+            })));
     }
 
     #[test]

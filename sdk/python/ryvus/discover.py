@@ -95,6 +95,8 @@ def discover_actions(project_root: Path, source_root: Path) -> list[dict[str, An
                     authorizer_config["security"] = metadata["security"]
                 if "parameters" in metadata:
                     authorizer_config["parameters"] = metadata["parameters"]
+                if "cache" in metadata:
+                    authorizer_config["cache"] = metadata["cache"]
 
                 kind = {
                     "Authorizer": authorizer_config,

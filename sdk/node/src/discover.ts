@@ -60,6 +60,7 @@ for (const file of await sourceFiles(sourceRoot)) {
         Authorizer: {
           ...(action.security ? { security: action.security } : {}),
           ...(action.parameters ? { parameters: action.parameters } : {}),
+          ...(action.cache ? { cache: action.cache } : {}),
         },
       },
       source: relative(projectRoot, file),

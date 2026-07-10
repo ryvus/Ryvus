@@ -51,3 +51,4 @@ axum = "0.8"
 utoipa = { version = "5", features = ["axum_extras"] }
 clap = { version = "4", features = ["derive"] }
 url = "2"
+mockall = "0.13"

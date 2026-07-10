@@ -57,12 +57,11 @@ impl FileActionCatalog {
     }
 
     pub fn resolve_authorizer(&self, name: &str) -> ActionCatalogResult<&ActionDefinition> {
-        let key = self
-            .authorizers_by_name
-            .get(name)
-            .ok_or_else(|| ActionCatalogError::ActionNotFound {
+        let key = self.authorizers_by_name.get(name).ok_or_else(|| {
+            ActionCatalogError::ActionNotFound {
                 action: name.to_string(),
-            })?;
+            }
+        })?;
 
         self.resolve(key)
     }
@@ -99,6 +98,7 @@ mod tests {
             kind: ActionKind::Authorizer(AuthorizerAction {
                 security: Vec::new(),
                 parameters: Vec::new(),
+                cache: None,
             }),
             source: PathBuf::from("src/auth.py"),
             entrypoint: "auth".to_string(),

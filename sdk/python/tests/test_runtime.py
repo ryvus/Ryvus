@@ -162,6 +162,7 @@ def test_discovers_authorizer_and_api_reference(tmp_path):
                 "        {'name': 'X-Tenant-ID', 'in': 'header', 'required': True},",
                 "        {'name': 'session', 'in': 'cookie', 'required': False, 'type': 'string'},",
                 "    ],",
+                "    cache_ttl_seconds=60,",
                 ")",
                 "def auth(event):",
                 "    return {'effect': 'allow'}",
@@ -195,6 +196,7 @@ def test_discovers_authorizer_and_api_reference(tmp_path):
                             "type": "string",
                         },
                     ],
+                    "cache": {"ttl_seconds": 60},
                 }
             },
             "source": "src/auth.py",

@@ -187,6 +187,14 @@ pub struct AuthorizerAction {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parameters: Vec<AuthorizerParameter>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<AuthorizerCacheConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorizerCacheConfig {
+    pub ttl_seconds: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -288,7 +296,8 @@ mod tests {
             ActionKind::Authorizer(AuthorizerAction {
                 security,
                 parameters,
-            }) if security.is_empty() && parameters.is_empty()
+                cache,
+            }) if security.is_empty() && parameters.is_empty() && cache.is_none()
         ));
     }
 
@@ -303,6 +312,8 @@ mod tests {
                 { "name": "X-Tenant-ID", "in": "header", "required": true },
                 { "name": "session", "in": "cookie", "required": false, "type": "string" }
             ]
+            ,
+            "cache": { "ttl_seconds": 60 }
         }))
         .expect("authorizer action should deserialize");
 
@@ -310,6 +321,10 @@ mod tests {
         assert_eq!(action.security[0].security_type, "http");
         assert_eq!(action.security[0].scheme.as_deref(), Some("bearer"));
         assert_eq!(action.parameters[0].parameter_type, "string");
+        assert_eq!(
+            action.cache.as_ref().map(|cache| cache.ttl_seconds),
+            Some(60)
+        );
         assert_eq!(
             action.parameters[0].location,
             AuthorizerParameterLocation::Header

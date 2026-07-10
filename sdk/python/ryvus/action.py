@@ -94,6 +94,7 @@ def authorizer(
     name: Optional[str] = None,
     security: Optional[dict[str, Any] | list[dict[str, Any]]] = None,
     parameters: Optional[list[dict[str, Any]]] = None,
+    cache_ttl_seconds: Optional[int] = None,
     timeout: Optional[str] = None,
     retry: Optional[dict[str, Any]] = None,
 ):
@@ -106,6 +107,8 @@ def authorizer(
             metadata["security"] = normalize_authorizer_security(security)
         if parameters is not None:
             metadata["parameters"] = normalize_authorizer_parameters(parameters)
+        if cache_ttl_seconds is not None:
+            metadata["cache"] = {"ttl_seconds": cache_ttl_seconds}
         policy = optional_policy(timeout, retry)
         if policy is not None:
             metadata["policy"] = policy

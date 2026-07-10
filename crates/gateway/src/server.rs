@@ -11,6 +11,7 @@ use ryvus_protocol::{ActionDefinition, ActionKind};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::{
+    cache::InMemoryAuthorizerCache,
     routes::{public::dynamic::handle_dynamic_route, system::system_routes},
     state::{AppState, GatewayExecutionService},
 };
@@ -67,6 +68,7 @@ pub fn build_app_with_execution_service(
     let state = AppState {
         control_service: Arc::clone(&control_service),
         execution_service,
+        authorizer_cache: Arc::new(InMemoryAuthorizerCache::default()),
     };
 
     Ok(Router::<AppState>::new()

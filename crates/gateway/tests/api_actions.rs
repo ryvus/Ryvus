@@ -315,6 +315,151 @@ def pets(context):
 }
 
 #[tokio::test]
+async fn cached_authorizer_allow_skips_second_authorizer_run() {
+    let project = TestProject::new("authorizer-cache-allow");
+    project.add_action(
+        "auth.py",
+        r#"
+from pathlib import Path
+
+@authorizer(name="petstore")
+def auth(event):
+    count_file = Path(".auth_count")
+    if count_file.exists():
+        return {"effect": "deny", "reason": "authorizer ran twice"}
+    count_file.write_text("1")
+    return {"effect": "allow", "principal_id": "cached-user", "context": {"role": "cached"}}
+"#,
+    );
+    project.add_action(
+        "pets.py",
+        r#"
+@api_action(method="GET", path="/pets", authorizer="petstore")
+def pets(context):
+    return context.metadata["authorizer"]
+"#,
+    );
+    project.write_manifest(&[
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Authorizer": {
+                    "security": [{ "type": "http", "scheme": "bearer" }],
+                    "cache": { "ttl_seconds": 60 }
+                }
+            },
+            "source": "src/auth.py",
+            "entrypoint": "auth",
+            "name": "petstore"
+        }),
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Api": {
+                    "method": "GET",
+                    "path": "/pets",
+                    "query_params": [],
+                    "authorizer": "petstore"
+                }
+            },
+            "source": "src/pets.py",
+            "entrypoint": "pets"
+        }),
+    ]);
+
+    let app = server::build_app(&project.config()).expect("gateway app should build");
+
+    for _ in 0..2 {
+        let response = raw_request_with_headers_on_app(
+            app.clone(),
+            Method::GET,
+            "/pets",
+            "",
+            &[("authorization", "Bearer dev")],
+        )
+        .await;
+
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.body["principal_id"], json!("cached-user"));
+    }
+}
+
+#[tokio::test]
+async fn authorizer_denies_are_not_cached() {
+    let project = TestProject::new("authorizer-cache-deny");
+    project.add_action(
+        "auth.py",
+        r#"
+from pathlib import Path
+
+@authorizer(name="petstore")
+def auth(event):
+    count_file = Path(".auth_count")
+    if count_file.exists():
+        return {"effect": "allow", "principal_id": "second-run"}
+    count_file.write_text("1")
+    return {"effect": "deny", "reason": "first run denied"}
+"#,
+    );
+    project.add_action(
+        "pets.py",
+        r#"
+@api_action(method="GET", path="/pets", authorizer="petstore")
+def pets(context):
+    return context.metadata["authorizer"]
+"#,
+    );
+    project.write_manifest(&[
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Authorizer": {
+                    "security": [{ "type": "http", "scheme": "bearer" }],
+                    "cache": { "ttl_seconds": 60 }
+                }
+            },
+            "source": "src/auth.py",
+            "entrypoint": "auth",
+            "name": "petstore"
+        }),
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Api": {
+                    "method": "GET",
+                    "path": "/pets",
+                    "query_params": [],
+                    "authorizer": "petstore"
+                }
+            },
+            "source": "src/pets.py",
+            "entrypoint": "pets"
+        }),
+    ]);
+
+    let first = raw_request_with_headers(
+        &project,
+        Method::GET,
+        "/pets",
+        "",
+        &[("authorization", "Bearer dev")],
+    )
+    .await;
+    assert_public_error(first, StatusCode::FORBIDDEN, "forbidden");
+
+    let second = raw_request_with_headers(
+        &project,
+        Method::GET,
+        "/pets",
+        "",
+        &[("authorization", "Bearer dev")],
+    )
+    .await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert_eq!(second.body["principal_id"], json!("second-run"));
+}
+
+#[tokio::test]
 async fn authorizer_denies_without_invoking_action() {
     let project = TestProject::new("authorizer-deny");
     project.add_action(
@@ -552,7 +697,9 @@ def pets():
     let response = request(&project, Method::GET, "/pets", None).await;
 
     assert!(
-        response.raw_body.contains("authorizer security credentials are required"),
+        response
+            .raw_body
+            .contains("authorizer security credentials are required"),
         "{}",
         response.raw_body
     );
@@ -701,11 +848,7 @@ def pets():
 
     let response = request(&project, Method::GET, "/pets", None).await;
 
-    assert_public_error(
-        response,
-        StatusCode::GATEWAY_TIMEOUT,
-        "authorizer_failed",
-    );
+    assert_public_error(response, StatusCode::GATEWAY_TIMEOUT, "authorizer_failed");
 }
 
 #[tokio::test]
@@ -1106,10 +1249,7 @@ def create_pet(name: str, age: int):
 
     let empty_path = request(&project, Method::GET, "/pets/%20", None).await;
     assert_eq!(empty_path.status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        empty_path.body["error"],
-        json!("request_validation_failed")
-    );
+    assert_eq!(empty_path.body["error"], json!("request_validation_failed"));
 
     let missing_body_field = request(
         &project,

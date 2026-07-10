@@ -7,6 +7,7 @@ use std::{
 use axum::{
     body::{to_bytes, Body},
     http::{Method, Request, StatusCode},
+    Router,
 };
 use ryvus_gateway::{server, server::GatewayServerConfig};
 use serde_json::{json, Value};
@@ -173,6 +174,16 @@ pub async fn raw_request_with_headers(
     headers: &[(&str, &str)],
 ) -> TestResponse {
     let app = server::build_app(&project.config()).expect("gateway app should build");
+    raw_request_with_headers_on_app(app, method, uri, body, headers).await
+}
+
+pub async fn raw_request_with_headers_on_app(
+    app: Router,
+    method: Method,
+    uri: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> TestResponse {
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)

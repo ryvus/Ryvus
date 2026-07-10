@@ -6,6 +6,7 @@ export {
   type ApiActionHandler,
   type ApiActionOptions,
   type AuthorizerDefinition,
+  type AuthorizerCache,
   type AuthorizerHandler,
   type AuthorizerInput,
   type AuthorizerParameter,
