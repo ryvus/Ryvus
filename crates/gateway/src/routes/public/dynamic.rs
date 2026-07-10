@@ -5,12 +5,11 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 
-use crate::cache::AuthorizerCacheKey;
+use crate::authorization::{AuthorizationDecision, AuthorizationRequest};
 use ryvus_protocol::{
-    ActionKind, AuthorizerParameter, AuthorizerParameterLocation, AuthorizerSecurity,
-    InvocationContext, InvocationRequest, InvocationStatus, PROTOCOL_VERSION,
+    ActionKind, InvocationContext, InvocationRequest, InvocationStatus, PROTOCOL_VERSION,
 };
 use serde_json::Value;
 
@@ -134,86 +133,21 @@ pub async fn handle_dynamic_route(
     let mut context = InvocationContext::default();
 
     if let Some(authorizer_name) = &api.authorizer {
-        let authorizer = match state.control_service.resolve_authorizer(authorizer_name) {
-            Ok(authorizer) => authorizer,
-            Err(error) => {
-                return public_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "authorizer_not_found",
-                    format!("{}: {}", authorizer_name, error),
-                    None,
-                );
-            }
+        let authorization_request = AuthorizationRequest {
+            authorizer_name: authorizer_name.clone(),
+            body: input.clone(),
+            path_params: route_match.path_params.clone(),
+            query_params: query_params.clone(),
+            headers: headers.clone(),
+            method: method.as_str().to_string(),
+            path: path.clone(),
         };
 
-        if let Err(error) = validate_authorizer_security(authorizer, &headers, &query_params) {
-            return public_error(StatusCode::UNAUTHORIZED, "unauthorized", error, None);
-        }
-
-        if let Err(error) = validate_authorizer_parameters(authorizer, &headers, &query_params) {
-            return public_error(
-                StatusCode::BAD_REQUEST,
-                "request_validation_failed",
-                error,
-                None,
-            );
-        }
-
-        let authorizer_event = serde_json::json!({
-            "body": input,
-            "path_params": route_match.path_params,
-            "query_params": query_params,
-            "headers": headers,
-            "method": method.as_str(),
-            "path": path,
-        });
-
-        let cache_key = authorizer_cache_key(authorizer, authorizer_name, &headers, &query_params);
-        if let Some(key) = cache_key.as_ref() {
-            if let Some(AuthorizerDecision::Allow {
-                principal_id,
-                context: authorizer_context,
-            }) = state.authorizer_cache.get(key)
-            {
-                context.metadata = serde_json::json!({
-                    "authorizer": {
-                        "name": authorizer_name,
-                        "principal_id": principal_id,
-                        "context": authorizer_context,
-                    }
-                });
-                return invoke_api_action(
-                    &state,
-                    action,
-                    &route.action,
-                    api,
-                    invocation_id,
-                    input,
-                    route_match.path_params,
-                    query_params,
-                    context,
-                );
-            }
-        }
-
-        match execute_authorizer(&state, authorizer, authorizer_name, authorizer_event) {
-            Ok(AuthorizerDecision::Allow {
+        match state.authorization_service.authorize(authorization_request) {
+            Ok(AuthorizationDecision::Allow {
                 principal_id,
                 context: authorizer_context,
             }) => {
-                if let Some((key, ttl)) =
-                    cache_key.and_then(|key| authorizer_cache_ttl(authorizer).map(|ttl| (key, ttl)))
-                {
-                    state.authorizer_cache.put(
-                        key,
-                        AuthorizerDecision::Allow {
-                            principal_id: principal_id.clone(),
-                            context: authorizer_context.clone(),
-                        },
-                        ttl,
-                    );
-                }
-
                 context.metadata = serde_json::json!({
                     "authorizer": {
                         "name": authorizer_name,
@@ -222,7 +156,7 @@ pub async fn handle_dynamic_route(
                     }
                 });
             }
-            Ok(AuthorizerDecision::Deny {
+            Ok(AuthorizationDecision::Deny {
                 status,
                 code,
                 reason,
@@ -230,7 +164,7 @@ pub async fn handle_dynamic_route(
                 return public_error(status, code, reason, None);
             }
             Err(error) => {
-                return public_error(error.status, "authorizer_failed", error.message, None);
+                return public_error(error.status, error.code, error.message, None);
             }
         }
     }
@@ -328,248 +262,9 @@ fn invoke_api_action(
     encode_response(api, output)
 }
 
-#[derive(Clone)]
-pub enum AuthorizerDecision {
-    Allow {
-        principal_id: Option<String>,
-        context: serde_json::Map<String, Value>,
-    },
-    Deny {
-        status: StatusCode,
-        code: &'static str,
-        reason: String,
-    },
-}
-
-fn authorizer_cache_ttl(authorizer: &ryvus_protocol::ActionDefinition) -> Option<Duration> {
-    let ActionKind::Authorizer(authorizer) = &authorizer.kind else {
-        return None;
-    };
-
-    authorizer
-        .cache
-        .as_ref()
-        .filter(|cache| cache.ttl_seconds > 0)
-        .map(|cache| Duration::from_secs(cache.ttl_seconds))
-}
-
-fn authorizer_cache_key(
-    authorizer: &ryvus_protocol::ActionDefinition,
-    authorizer_name: &str,
-    headers: &serde_json::Map<String, Value>,
-    query_params: &HashMap<String, String>,
-) -> Option<AuthorizerCacheKey> {
-    authorizer_cache_ttl(authorizer)?;
-
-    let ActionKind::Authorizer(authorizer) = &authorizer.kind else {
-        return None;
-    };
-
-    if authorizer.security.is_empty() && authorizer.parameters.is_empty() {
-        return None;
-    }
-
-    let cookies = parse_cookies(headers);
-    let mut parts = vec![("authorizer".to_string(), authorizer_name.to_string())];
-
-    for security in &authorizer.security {
-        if security.security_type == "http"
-            && security
-                .scheme
-                .as_deref()
-                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("bearer"))
-        {
-            parts.push((
-                "security:header:authorization".to_string(),
-                headers
-                    .get("authorization")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-            ));
-        } else if security.security_type == "apiKey" {
-            let Some(name) = security.name.as_ref() else {
-                continue;
-            };
-            parts.push((
-                format!(
-                    "security:{}:{}",
-                    security
-                        .location
-                        .as_ref()
-                        .map(authorizer_location_name)
-                        .unwrap_or("unknown"),
-                    name.to_ascii_lowercase()
-                ),
-                value_from_location(
-                    security.location.as_ref(),
-                    name,
-                    headers,
-                    query_params,
-                    &cookies,
-                ),
-            ));
-        }
-    }
-
-    for parameter in &authorizer.parameters {
-        parts.push((
-            format!(
-                "parameter:{}:{}",
-                authorizer_location_name(&parameter.location),
-                parameter.name.to_ascii_lowercase()
-            ),
-            value_from_location(
-                Some(&parameter.location),
-                &parameter.name,
-                headers,
-                query_params,
-                &cookies,
-            ),
-        ));
-    }
-
-    Some(AuthorizerCacheKey(parts))
-}
-
-fn authorizer_location_name(location: &AuthorizerParameterLocation) -> &'static str {
-    match location {
-        AuthorizerParameterLocation::Header => "header",
-        AuthorizerParameterLocation::Query => "query",
-        AuthorizerParameterLocation::Cookie => "cookie",
-    }
-}
-
-fn value_from_location(
-    location: Option<&AuthorizerParameterLocation>,
-    name: &str,
-    headers: &serde_json::Map<String, Value>,
-    query_params: &HashMap<String, String>,
-    cookies: &HashMap<String, String>,
-) -> String {
-    match location {
-        Some(AuthorizerParameterLocation::Header) => headers
-            .get(&name.to_ascii_lowercase())
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        Some(AuthorizerParameterLocation::Query) => {
-            query_params.get(name).cloned().unwrap_or_default()
-        }
-        Some(AuthorizerParameterLocation::Cookie) => cookies.get(name).cloned().unwrap_or_default(),
-        None => String::new(),
-    }
-}
-
-struct AuthorizerFailure {
-    status: StatusCode,
-    message: String,
-}
-
 enum RequestBodyError {
     UnsupportedMediaType(String),
     InvalidBody { code: &'static str, message: String },
-}
-
-fn execute_authorizer(
-    state: &AppState,
-    authorizer: &ryvus_protocol::ActionDefinition,
-    authorizer_name: &str,
-    event: Value,
-) -> Result<AuthorizerDecision, AuthorizerFailure> {
-    let request = InvocationRequest {
-        protocol_version: PROTOCOL_VERSION.to_string(),
-        invocation_id: InvocationRequest::new(Value::Null).invocation_id,
-        event,
-        context: InvocationContext::default(),
-    };
-
-    let policy = ryvus_execution::ExecutionPolicy::from_action_policy(&authorizer.policy).map_err(
-        |error| AuthorizerFailure {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: error.to_string(),
-        },
-    )?;
-
-    let record = state
-        .execution_service
-        .execute(authorizer, &request, &policy)
-        .map_err(|error| AuthorizerFailure {
-            status: execution_error_status(&error),
-            message: error.to_string(),
-        })?;
-
-    let result = record.result.invocation_result;
-
-    if result.status != InvocationStatus::Success {
-        return Err(match result.error {
-            Some(error) => AuthorizerFailure {
-                status: if error.code == "Timeout" {
-                    action_error_status(&error.code)
-                } else {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                },
-                message: error.message,
-            },
-            None => AuthorizerFailure {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                message: format!("authorizer `{authorizer_name}` failed"),
-            },
-        });
-    }
-
-    parse_authorizer_decision(result.output.unwrap_or(Value::Null)).map_err(|message| {
-        AuthorizerFailure {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message,
-        }
-    })
-}
-
-fn parse_authorizer_decision(output: Value) -> Result<AuthorizerDecision, String> {
-    let effect = output
-        .get("effect")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "authorizer output requires string effect".to_string())?;
-
-    match effect {
-        "allow" => {
-            let context = match output.get("context") {
-                Some(Value::Object(context)) => context.clone(),
-                Some(_) => {
-                    return Err("authorizer context must be an object".to_string());
-                }
-                None => serde_json::Map::new(),
-            };
-
-            Ok(AuthorizerDecision::Allow {
-                principal_id: output
-                    .get("principal_id")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned),
-                context,
-            })
-        }
-        "deny" => Ok(AuthorizerDecision::Deny {
-            status: StatusCode::FORBIDDEN,
-            code: "forbidden",
-            reason: output
-                .get("reason")
-                .and_then(Value::as_str)
-                .unwrap_or("forbidden")
-                .to_string(),
-        }),
-        "unauthorized" => Ok(AuthorizerDecision::Deny {
-            status: StatusCode::UNAUTHORIZED,
-            code: "unauthorized",
-            reason: output
-                .get("reason")
-                .and_then(Value::as_str)
-                .unwrap_or("unauthorized")
-                .to_string(),
-        }),
-        other => Err(format!("unsupported authorizer effect `{other}`")),
-    }
 }
 
 fn request_headers(headers: &HeaderMap) -> serde_json::Map<String, Value> {
@@ -582,133 +277,6 @@ fn request_headers(headers: &HeaderMap) -> serde_json::Map<String, Value> {
                     Value::String(value.to_string()),
                 )
             })
-        })
-        .collect()
-}
-
-fn validate_authorizer_parameters(
-    authorizer: &ryvus_protocol::ActionDefinition,
-    headers: &serde_json::Map<String, Value>,
-    query_params: &HashMap<String, String>,
-) -> Result<(), String> {
-    let ActionKind::Authorizer(authorizer) = &authorizer.kind else {
-        return Ok(());
-    };
-
-    let cookies = parse_cookies(headers);
-
-    for parameter in &authorizer.parameters {
-        if !parameter.required {
-            continue;
-        }
-
-        if !authorizer_parameter_exists(parameter, headers, query_params, &cookies) {
-            return Err(format!(
-                "required authorizer parameter `{}` is missing",
-                parameter.name
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_authorizer_security(
-    authorizer: &ryvus_protocol::ActionDefinition,
-    headers: &serde_json::Map<String, Value>,
-    query_params: &HashMap<String, String>,
-) -> Result<(), String> {
-    let ActionKind::Authorizer(authorizer) = &authorizer.kind else {
-        return Ok(());
-    };
-
-    if authorizer.security.is_empty() {
-        return Ok(());
-    }
-
-    let cookies = parse_cookies(headers);
-
-    if authorizer
-        .security
-        .iter()
-        .any(|security| authorizer_security_exists(security, headers, query_params, &cookies))
-    {
-        return Ok(());
-    }
-
-    Err("authorizer security credentials are required".to_string())
-}
-
-fn authorizer_security_exists(
-    security: &AuthorizerSecurity,
-    headers: &serde_json::Map<String, Value>,
-    query_params: &HashMap<String, String>,
-    cookies: &HashMap<String, String>,
-) -> bool {
-    if security.security_type == "http"
-        && security
-            .scheme
-            .as_deref()
-            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("bearer"))
-    {
-        return headers
-            .get("authorization")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value.trim().starts_with("Bearer "));
-    }
-
-    if security.security_type == "apiKey" {
-        let Some(name) = security.name.as_ref() else {
-            return false;
-        };
-
-        return match security.location {
-            Some(AuthorizerParameterLocation::Header) => headers
-                .get(&name.to_ascii_lowercase())
-                .and_then(Value::as_str)
-                .is_some_and(|value| !value.trim().is_empty()),
-            Some(AuthorizerParameterLocation::Query) => query_params
-                .get(name)
-                .is_some_and(|value| !value.trim().is_empty()),
-            Some(AuthorizerParameterLocation::Cookie) => cookies
-                .get(name)
-                .is_some_and(|value| !value.trim().is_empty()),
-            None => false,
-        };
-    }
-
-    false
-}
-
-fn authorizer_parameter_exists(
-    parameter: &AuthorizerParameter,
-    headers: &serde_json::Map<String, Value>,
-    query_params: &HashMap<String, String>,
-    cookies: &HashMap<String, String>,
-) -> bool {
-    match parameter.location {
-        AuthorizerParameterLocation::Header => headers
-            .get(&parameter.name.to_ascii_lowercase())
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty()),
-        AuthorizerParameterLocation::Query => query_params
-            .get(&parameter.name)
-            .is_some_and(|value| !value.is_empty()),
-        AuthorizerParameterLocation::Cookie => cookies
-            .get(&parameter.name)
-            .is_some_and(|value| !value.is_empty()),
-    }
-}
-
-fn parse_cookies(headers: &serde_json::Map<String, Value>) -> HashMap<String, String> {
-    headers
-        .get("cookie")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .split(';')
-        .filter_map(|part| {
-            let (name, value) = part.trim().split_once('=')?;
-            Some((name.to_string(), value.to_string()))
         })
         .collect()
 }

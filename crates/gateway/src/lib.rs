@@ -1,4 +1,4 @@
-pub mod cache;
+pub mod authorization;
 pub mod config;
 pub mod dto;
 pub mod error;

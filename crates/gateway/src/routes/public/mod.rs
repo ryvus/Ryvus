@@ -1,3 +1,3 @@
 pub mod dynamic;
-mod errors;
+pub(crate) mod errors;
 mod validation;
