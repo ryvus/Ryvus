@@ -243,6 +243,7 @@ mod tests {
                 request_schema: None,
                 response_schema: None,
                 query_params: Vec::new(),
+                authorizer: None,
             }),
             source: format!("src/{entrypoint}.py").into(),
             entrypoint: entrypoint.to_string(),

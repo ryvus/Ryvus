@@ -124,6 +124,7 @@ pub enum RuntimeKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActionKind {
     Api(ApiAction),
+    Authorizer(AuthorizerAction),
     Schedule(ScheduleAction),
     Flow(FlowAction),
     Queue(QueueAction),
@@ -154,6 +155,9 @@ pub struct ApiAction {
 
     #[serde(default)]
     pub query_params: Vec<ApiQueryParam>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorizer: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +178,56 @@ fn is_default_media_types(value: &[String]) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduleAction {
     pub expression: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorizerAction {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub security: Vec<AuthorizerSecurity>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<AuthorizerParameter>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorizerSecurity {
+    #[serde(rename = "type")]
+    pub security_type: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+
+    #[serde(rename = "in", default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<AuthorizerParameterLocation>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorizerParameter {
+    pub name: String,
+
+    #[serde(rename = "in")]
+    pub location: AuthorizerParameterLocation,
+
+    #[serde(default)]
+    pub required: bool,
+
+    #[serde(rename = "type", default = "default_authorizer_parameter_type")]
+    pub parameter_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthorizerParameterLocation {
+    Header,
+    Query,
+    Cookie,
+}
+
+fn default_authorizer_parameter_type() -> String {
+    "string".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,5 +262,57 @@ mod tests {
 
         assert_eq!(action.consumes, vec!["application/json"]);
         assert_eq!(action.produces, vec!["application/json"]);
+    }
+
+    #[test]
+    fn api_action_supports_optional_authorizer() {
+        let action: ApiAction = serde_json::from_value(serde_json::json!({
+            "method": "GET",
+            "path": "/hello",
+            "authorizer": "petstore"
+        }))
+        .expect("api action should deserialize");
+
+        assert_eq!(action.authorizer.as_deref(), Some("petstore"));
+    }
+
+    #[test]
+    fn authorizer_action_deserializes() {
+        let kind: ActionKind = serde_json::from_value(serde_json::json!({
+            "Authorizer": {}
+        }))
+        .expect("authorizer kind should deserialize");
+
+        assert!(matches!(
+            kind,
+            ActionKind::Authorizer(AuthorizerAction {
+                security,
+                parameters,
+            }) if security.is_empty() && parameters.is_empty()
+        ));
+    }
+
+    #[test]
+    fn authorizer_action_supports_security_and_parameters() {
+        let action: AuthorizerAction = serde_json::from_value(serde_json::json!({
+            "security": [
+                { "type": "http", "scheme": "bearer" },
+                { "type": "apiKey", "in": "header", "name": "X-API-Key" }
+            ],
+            "parameters": [
+                { "name": "X-Tenant-ID", "in": "header", "required": true },
+                { "name": "session", "in": "cookie", "required": false, "type": "string" }
+            ]
+        }))
+        .expect("authorizer action should deserialize");
+
+        assert_eq!(action.security.len(), 2);
+        assert_eq!(action.security[0].security_type, "http");
+        assert_eq!(action.security[0].scheme.as_deref(), Some("bearer"));
+        assert_eq!(action.parameters[0].parameter_type, "string");
+        assert_eq!(
+            action.parameters[0].location,
+            AuthorizerParameterLocation::Header
+        );
     }
 }

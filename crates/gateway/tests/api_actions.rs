@@ -22,7 +22,7 @@ def hello(event, context):
 
     let response = request(&project, Method::GET, "/hello", None).await;
 
-    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.status, StatusCode::OK, "{}", response.raw_body);
     assert_eq!(response.body, json!({"message": "Hello from Ryvus"}));
 }
 
@@ -258,6 +258,533 @@ export default apiAction({
         invalid_query.body["error"],
         json!("request_validation_failed")
     );
+}
+
+#[tokio::test]
+async fn authorizer_allows_and_passes_metadata() {
+    let project = TestProject::new("authorizer-allow");
+    project.add_action(
+        "auth.py",
+        r#"
+@authorizer(name="petstore")
+def auth(event):
+    assert event.headers["authorization"] == "Bearer dev"
+    assert event.method == "GET"
+    assert event.path == "/pets"
+    return {"effect": "allow", "principal_id": "dev-user", "context": {"role": "dev"}}
+"#,
+    );
+    project.add_action(
+        "pets.py",
+        r#"
+@api_action(method="GET", path="/pets", authorizer="petstore")
+def pets(context):
+    return context.metadata["authorizer"]
+"#,
+    );
+    project.write_manifest(&[
+        authorizer_action("src/auth.py", "auth", "petstore"),
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Api": {
+                    "method": "GET",
+                    "path": "/pets",
+                    "query_params": [],
+                    "authorizer": "petstore"
+                }
+            },
+            "source": "src/pets.py",
+            "entrypoint": "pets"
+        }),
+    ]);
+
+    let response = raw_request_with_headers(
+        &project,
+        Method::GET,
+        "/pets",
+        "",
+        &[("authorization", "Bearer dev")],
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body["name"], json!("petstore"));
+    assert_eq!(response.body["principal_id"], json!("dev-user"));
+    assert_eq!(response.body["context"]["role"], json!("dev"));
+}
+
+#[tokio::test]
+async fn authorizer_denies_without_invoking_action() {
+    let project = TestProject::new("authorizer-deny");
+    project.add_action(
+        "auth.py",
+        r#"
+@authorizer(name="petstore")
+def auth(event):
+    return {"effect": "deny", "reason": "missing scope"}
+"#,
+    );
+    project.add_action(
+        "pets.py",
+        r#"
+@api_action(method="GET", path="/pets", authorizer="petstore")
+def pets():
+    raise RuntimeError("should not run")
+"#,
+    );
+    project.write_manifest(&[
+        authorizer_action("src/auth.py", "auth", "petstore"),
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Api": {
+                    "method": "GET",
+                    "path": "/pets",
+                    "query_params": [],
+                    "authorizer": "petstore"
+                }
+            },
+            "source": "src/pets.py",
+            "entrypoint": "pets"
+        }),
+    ]);
+
+    let response = request(&project, Method::GET, "/pets", None).await;
+
+    assert_public_error(response, StatusCode::FORBIDDEN, "forbidden");
+}
+
+#[tokio::test]
+async fn authorizer_unauthorized_without_invoking_action() {
+    let project = TestProject::new("authorizer-unauthorized");
+    project.add_action(
+        "auth.py",
+        r#"
+@authorizer(name="petstore")
+def auth(event):
+    return {"effect": "unauthorized", "reason": "missing token"}
+"#,
+    );
+    project.add_action(
+        "pets.py",
+        r#"
+@api_action(method="GET", path="/pets", authorizer="petstore")
+def pets():
+    raise RuntimeError("should not run")
+"#,
+    );
+    project.write_manifest(&[
+        authorizer_action("src/auth.py", "auth", "petstore"),
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Api": {
+                    "method": "GET",
+                    "path": "/pets",
+                    "query_params": [],
+                    "authorizer": "petstore"
+                }
+            },
+            "source": "src/pets.py",
+            "entrypoint": "pets"
+        }),
+    ]);
+
+    let response = request(&project, Method::GET, "/pets", None).await;
+
+    assert_public_error(response, StatusCode::UNAUTHORIZED, "unauthorized");
+}
+
+#[tokio::test]
+async fn malformed_authorizer_output_returns_internal_error() {
+    let project = TestProject::new("authorizer-malformed");
+    project.add_action(
+        "auth.py",
+        r#"
+@authorizer(name="petstore")
+def auth(event):
+    return {"ok": True}
+"#,
+    );
+    project.add_action(
+        "pets.py",
+        r#"
+@api_action(method="GET", path="/pets", authorizer="petstore")
+def pets():
+    return {"ok": True}
+"#,
+    );
+    project.write_manifest(&[
+        authorizer_action("src/auth.py", "auth", "petstore"),
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Api": {
+                    "method": "GET",
+                    "path": "/pets",
+                    "query_params": [],
+                    "authorizer": "petstore"
+                }
+            },
+            "source": "src/pets.py",
+            "entrypoint": "pets"
+        }),
+    ]);
+
+    let response = request(&project, Method::GET, "/pets", None).await;
+
+    assert_public_error(
+        response,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "authorizer_failed",
+    );
+}
+
+#[tokio::test]
+async fn missing_required_authorizer_parameter_returns_bad_request() {
+    let project = TestProject::new("authorizer-required-param");
+    project.add_action(
+        "auth.py",
+        r#"
+@authorizer(name="petstore")
+def auth(event):
+    raise RuntimeError("should not run")
+"#,
+    );
+    project.add_action(
+        "pets.py",
+        r#"
+@api_action(method="GET", path="/pets", authorizer="petstore")
+def pets():
+    raise RuntimeError("should not run")
+"#,
+    );
+    project.write_manifest(&[
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Authorizer": {
+                    "parameters": [
+                        { "name": "X-Tenant-ID", "in": "header", "required": true, "type": "string" }
+                    ]
+                }
+            },
+            "source": "src/auth.py",
+            "entrypoint": "auth",
+            "name": "petstore"
+        }),
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Api": {
+                    "method": "GET",
+                    "path": "/pets",
+                    "query_params": [],
+                    "authorizer": "petstore"
+                }
+            },
+            "source": "src/pets.py",
+            "entrypoint": "pets"
+        }),
+    ]);
+
+    let response = request(&project, Method::GET, "/pets", None).await;
+
+    assert_public_error(
+        response,
+        StatusCode::BAD_REQUEST,
+        "request_validation_failed",
+    );
+}
+
+#[tokio::test]
+async fn missing_authorizer_security_returns_unauthorized_before_parameters() {
+    let project = TestProject::new("authorizer-missing-security");
+    project.add_action(
+        "auth.py",
+        r#"
+@authorizer(name="petstore")
+def auth(event):
+    raise RuntimeError("should not run")
+"#,
+    );
+    project.add_action(
+        "pets.py",
+        r#"
+@api_action(method="GET", path="/pets", authorizer="petstore")
+def pets():
+    raise RuntimeError("should not run")
+"#,
+    );
+    project.write_manifest(&[
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Authorizer": {
+                    "security": [
+                        { "type": "http", "scheme": "bearer" }
+                    ],
+                    "parameters": [
+                        { "name": "X-Tenant-ID", "in": "header", "required": true, "type": "string" }
+                    ]
+                }
+            },
+            "source": "src/auth.py",
+            "entrypoint": "auth",
+            "name": "petstore"
+        }),
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Api": {
+                    "method": "GET",
+                    "path": "/pets",
+                    "query_params": [],
+                    "authorizer": "petstore"
+                }
+            },
+            "source": "src/pets.py",
+            "entrypoint": "pets"
+        }),
+    ]);
+
+    let response = request(&project, Method::GET, "/pets", None).await;
+
+    assert!(
+        response.raw_body.contains("authorizer security credentials are required"),
+        "{}",
+        response.raw_body
+    );
+    assert_public_error(response, StatusCode::UNAUTHORIZED, "unauthorized");
+}
+
+#[tokio::test]
+async fn authorizer_exception_returns_internal_error() {
+    let project = TestProject::new("authorizer-exception");
+    project.add_action(
+        "auth.py",
+        r#"
+@authorizer(name="petstore")
+def auth(event):
+    raise TypeError("bad auth")
+"#,
+    );
+    project.add_action(
+        "pets.py",
+        r#"
+@api_action(method="GET", path="/pets", authorizer="petstore")
+def pets():
+    return {"ok": True}
+"#,
+    );
+    project.write_manifest(&[
+        authorizer_action("src/auth.py", "auth", "petstore"),
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Api": {
+                    "method": "GET",
+                    "path": "/pets",
+                    "query_params": [],
+                    "authorizer": "petstore"
+                }
+            },
+            "source": "src/pets.py",
+            "entrypoint": "pets"
+        }),
+    ]);
+
+    let response = request(&project, Method::GET, "/pets", None).await;
+
+    assert_public_error(
+        response,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "authorizer_failed",
+    );
+}
+
+#[tokio::test]
+async fn authorizer_allow_with_non_object_context_returns_internal_error() {
+    let project = TestProject::new("authorizer-bad-context");
+    project.add_action(
+        "auth.py",
+        r#"
+@authorizer(name="petstore")
+def auth(event):
+    return {"effect": "allow", "context": "bad"}
+"#,
+    );
+    project.add_action(
+        "pets.py",
+        r#"
+@api_action(method="GET", path="/pets", authorizer="petstore")
+def pets():
+    return {"ok": True}
+"#,
+    );
+    project.write_manifest(&[
+        authorizer_action("src/auth.py", "auth", "petstore"),
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Api": {
+                    "method": "GET",
+                    "path": "/pets",
+                    "query_params": [],
+                    "authorizer": "petstore"
+                }
+            },
+            "source": "src/pets.py",
+            "entrypoint": "pets"
+        }),
+    ]);
+
+    let response = request(&project, Method::GET, "/pets", None).await;
+
+    assert_public_error(
+        response,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "authorizer_failed",
+    );
+}
+
+#[tokio::test]
+async fn authorizer_timeout_returns_gateway_timeout() {
+    let project = TestProject::new("authorizer-timeout");
+    project.add_action(
+        "auth.py",
+        r#"
+import time
+
+@authorizer(name="petstore")
+def auth(event):
+    time.sleep(1)
+    return {"effect": "allow"}
+"#,
+    );
+    project.add_action(
+        "pets.py",
+        r#"
+@api_action(method="GET", path="/pets", authorizer="petstore")
+def pets():
+    return {"ok": True}
+"#,
+    );
+    project.write_manifest(&[
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Authorizer": {}
+            },
+            "source": "src/auth.py",
+            "entrypoint": "auth",
+            "name": "petstore",
+            "policy": {
+                "timeout": "10ms"
+            }
+        }),
+        json!({
+            "runtime": "Python",
+            "kind": {
+                "Api": {
+                    "method": "GET",
+                    "path": "/pets",
+                    "query_params": [],
+                    "authorizer": "petstore"
+                }
+            },
+            "source": "src/pets.py",
+            "entrypoint": "pets"
+        }),
+    ]);
+
+    let response = request(&project, Method::GET, "/pets", None).await;
+
+    assert_public_error(
+        response,
+        StatusCode::GATEWAY_TIMEOUT,
+        "authorizer_failed",
+    );
+}
+
+#[tokio::test]
+async fn invokes_node_authorizer_with_request_binding() {
+    let project = TestProject::new("node-authorizer");
+    project.add_node_action(
+        "auth.js",
+        r#"
+export default authorizer({
+  name: "store",
+  handler({ headers, method, path, path_params, query_params }) {
+    return {
+      effect: "allow",
+      principal_id: [
+        method,
+        path,
+        path_params.pet_id,
+        query_params.debug,
+        headers.authorization,
+      ].join("|"),
+      context: { runtime: "node" },
+    };
+  },
+});
+"#,
+    );
+    project.add_node_action(
+        "pets.js",
+        r#"
+export default apiAction({
+  method: "GET",
+  path: "/pets/{pet_id}",
+  authorizer: "store",
+  handler({ context }) {
+    return context.metadata.authorizer;
+  },
+});
+"#,
+    );
+    project.write_manifest(&[
+        json!({
+            "runtime": "Node",
+            "kind": {
+                "Authorizer": {}
+            },
+            "source": "src/auth.js",
+            "entrypoint": "default",
+            "name": "store"
+        }),
+        json!({
+            "runtime": "Node",
+            "kind": {
+                "Api": {
+                    "method": "GET",
+                    "path": "/pets/{pet_id}",
+                    "query_params": [],
+                    "authorizer": "store"
+                }
+            },
+            "source": "src/pets.js",
+            "entrypoint": "default"
+        }),
+    ]);
+
+    let response = raw_request_with_headers(
+        &project,
+        Method::GET,
+        "/pets/p1?debug=123",
+        "",
+        &[("authorization", "Bearer dev")],
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        response.body["principal_id"],
+        json!("GET|/pets/p1|p1|123|Bearer dev")
+    );
+    assert_eq!(response.body["context"]["runtime"], json!("node"));
 }
 
 #[tokio::test]

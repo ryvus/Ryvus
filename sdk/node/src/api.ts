@@ -54,6 +54,21 @@ export interface ApiActionInput<
   event: JsonValue;
 }
 
+export interface AuthorizerInput {
+  body: JsonValue | null;
+  path_params: Record<string, string>;
+  query_params: Record<string, string>;
+  headers: Record<string, string>;
+  method: string;
+  path: string;
+  context: InvocationContext;
+  event: JsonValue;
+}
+
+export type AuthorizerHandler = (
+  input: AuthorizerInput,
+) => JsonValue | Promise<JsonValue>;
+
 export type BoundApiActionHandler<
   Query extends QueryShape = QueryShape,
   Body extends BodySchema = undefined,
@@ -75,6 +90,7 @@ export interface ApiActionOptions<
   response?: Response;
   consumes?: MediaTypeInput;
   produces?: MediaTypeInput;
+  authorizer?: string;
   timeout?: string;
   retry?: RetryPolicyInput;
 }
@@ -90,6 +106,7 @@ export interface ApiActionDefinition {
   response?: Schema;
   consumes?: string[];
   produces?: string[];
+  authorizer?: string;
   policy?: ActionPolicyInput;
   handler: ApiActionHandler | BoundApiActionHandler;
 }
@@ -110,6 +127,30 @@ export interface ScheduledActionDefinition {
   expression: string;
   policy?: ActionPolicyInput;
   handler: ScheduledActionHandler;
+}
+
+export interface AuthorizerDefinition {
+  __ryvusAction: true;
+  type: "authorizer";
+  name: string;
+  security?: AuthorizerSecurity[];
+  parameters?: AuthorizerParameter[];
+  policy?: ActionPolicyInput;
+  handler: AuthorizerHandler;
+}
+
+export interface AuthorizerSecurity {
+  type: string;
+  scheme?: string;
+  in?: "header" | "query" | "cookie";
+  name?: string;
+}
+
+export interface AuthorizerParameter {
+  name: string;
+  in: "header" | "query" | "cookie";
+  required?: boolean;
+  type?: string;
 }
 
 export function apiAction(handler: ApiActionHandler): ApiActionDefinition;
@@ -167,6 +208,10 @@ export function apiAction(
     action.produces = normalizeMediaTypes(options.produces);
   }
 
+  if (options.authorizer !== undefined) {
+    action.authorizer = options.authorizer;
+  }
+
   if (process.env.RYVUS_DISCOVER !== "1") {
     void runApiAction(handler);
   }
@@ -204,6 +249,53 @@ export function scheduledAction(options: {
   }
 
   return action;
+}
+
+export function authorizer(options: {
+  name: string;
+  security?: AuthorizerSecurity | AuthorizerSecurity[];
+  parameters?: AuthorizerParameter[];
+  timeout?: string;
+  retry?: RetryPolicyInput;
+  handler: AuthorizerHandler;
+}): AuthorizerDefinition {
+  const action: AuthorizerDefinition = {
+    __ryvusAction: true,
+    type: "authorizer",
+    name: options.name,
+    handler: options.handler,
+  };
+  if (options.security !== undefined) {
+    action.security = normalizeAuthorizerSecurity(options.security);
+  }
+  if (options.parameters !== undefined) {
+    action.parameters = normalizeAuthorizerParameters(options.parameters);
+  }
+  const policy = actionPolicy(options.timeout, options.retry);
+  if (policy !== undefined) {
+    action.policy = policy;
+  }
+
+  if (process.env.RYVUS_DISCOVER !== "1") {
+    void runAuthorizer(options.handler);
+  }
+
+  return action;
+}
+
+function normalizeAuthorizerSecurity(
+  value: AuthorizerSecurity | AuthorizerSecurity[],
+): AuthorizerSecurity[] {
+  return Array.isArray(value) ? value : [value];
+}
+
+function normalizeAuthorizerParameters(
+  parameters: AuthorizerParameter[],
+): AuthorizerParameter[] {
+  return parameters.map((parameter) => ({
+    ...parameter,
+    type: parameter.type ?? "string",
+  }));
 }
 
 function actionPolicy(
@@ -273,6 +365,41 @@ async function runScheduledAction(handler: ScheduledActionHandler): Promise<void
   }
 }
 
+async function runAuthorizer(handler: AuthorizerHandler): Promise<void> {
+  let request: InvocationRequest | null = null;
+
+  try {
+    request = await readInvocationRequest();
+
+    installConsoleCapture(request.invocation_id);
+
+    const context = createInvocationContext(request);
+    const event = eventObject(request.event);
+    const output = await handler({
+      body: event.body ?? null,
+      path_params: event.path_params ?? {},
+      query_params: event.query_params ?? {},
+      headers: event.headers ?? {},
+      method: event.method ?? "",
+      path: event.path ?? "",
+      context,
+      event: request.event,
+    });
+
+    writeInvocationMessage(
+      createResultMessage(createSuccessResult(request, output)),
+    );
+  } catch (error) {
+    if (request === null) {
+      throw error;
+    }
+
+    writeInvocationMessage(
+      createResultMessage(createFailureResult(request, error)),
+    );
+  }
+}
+
 async function callHandler(
   handler: ApiActionHandler | BoundApiActionHandler,
   request: InvocationRequest,
@@ -297,12 +424,18 @@ function eventObject(event: JsonValue): {
   body?: JsonValue;
   query_params?: Record<string, string>;
   path_params?: Record<string, string>;
+  headers?: Record<string, string>;
+  method?: string;
+  path?: string;
 } {
   if (typeof event === "object" && event !== null && !Array.isArray(event)) {
     return event as {
       body?: JsonValue;
       query_params?: Record<string, string>;
       path_params?: Record<string, string>;
+      headers?: Record<string, string>;
+      method?: string;
+      path?: string;
     };
   }
 

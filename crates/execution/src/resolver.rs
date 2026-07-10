@@ -151,6 +151,7 @@ mod tests {
                 request_schema: None,
                 response_schema: None,
                 query_params: Vec::new(),
+                authorizer: None,
             }),
             source: "src/missing.js".into(),
             entrypoint: "default".to_string(),

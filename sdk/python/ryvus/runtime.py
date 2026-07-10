@@ -8,7 +8,7 @@ import traceback
 from typing import Any, Callable
 
 from .context import Context
-from .events import ApiEvent, FlowEvent, ScheduleEvent
+from .events import ApiEvent, AuthorizerEvent, FlowEvent, ScheduleEvent
 from .resolver import resolve_handler_args
 
 Handler = Callable[..., dict[str, Any]]
@@ -39,6 +39,10 @@ class _InvocationLogHandler(logging.Handler):
 
 def run_api(handler: Handler) -> None:
     run_handler(handler, event_from_api_request)
+
+
+def run_authorizer(handler: Handler) -> None:
+    run_handler(handler, event_from_authorizer_request)
 
 
 def run_schedule(handler: Handler) -> None:
@@ -77,6 +81,19 @@ def handle_api_request(
         request=request,
         handler=handler,
         event_factory=event_from_api_request,
+        captured_stdout=captured_stdout,
+    )
+
+
+def handle_authorizer_request(
+    request: dict[str, Any],
+    handler: Handler,
+    captured_stdout: io.StringIO | None = None,
+) -> list[dict[str, Any]]:
+    return handle_request(
+        request=request,
+        handler=handler,
+        event_factory=event_from_authorizer_request,
         captured_stdout=captured_stdout,
     )
 
@@ -181,6 +198,17 @@ def event_from_api_request(raw_event: dict[str, Any]) -> ApiEvent:
         body=raw_event.get("body"),
         query_params=raw_event.get("query_params") or {},
         path_params=raw_event.get("path_params") or {},
+    )
+
+
+def event_from_authorizer_request(raw_event: dict[str, Any]) -> AuthorizerEvent:
+    return AuthorizerEvent(
+        body=raw_event.get("body"),
+        query_params=raw_event.get("query_params") or {},
+        path_params=raw_event.get("path_params") or {},
+        headers=raw_event.get("headers") or {},
+        method=raw_event.get("method") or "",
+        path=raw_event.get("path") or "",
     )
 
 

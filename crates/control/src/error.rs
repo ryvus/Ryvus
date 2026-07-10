@@ -24,4 +24,7 @@ pub enum ControlError {
 
     #[error(transparent)]
     Schedules(#[from] ryvus_scheduler::SchedulerError),
+
+    #[error("{0}")]
+    InvalidConfig(String),
 }

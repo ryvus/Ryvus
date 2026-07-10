@@ -10,6 +10,16 @@ class ApiEvent:
 
 
 @dataclass(frozen=True)
+class AuthorizerEvent:
+    body: Any = None
+    query_params: dict[str, Any] = field(default_factory=dict)
+    path_params: dict[str, Any] = field(default_factory=dict)
+    headers: dict[str, Any] = field(default_factory=dict)
+    method: str = ""
+    path: str = ""
+
+
+@dataclass(frozen=True)
 class ScheduleEvent:
     trigger: str
     scheduled_at: Any

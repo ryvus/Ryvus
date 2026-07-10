@@ -1,7 +1,7 @@
 import os
 from typing import Any, Callable, Optional, TypeVar, overload
 
-from .runtime import run_api, run_flow, run_schedule
+from .runtime import run_api, run_authorizer, run_flow, run_schedule
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -36,6 +36,7 @@ def api_action(
     retry: Optional[dict[str, Any]] = None,
     consumes: Optional[str | list[str]] = None,
     produces: Optional[str | list[str]] = None,
+    authorizer: Optional[str] = None,
 ) -> Callable[[F], F]:
     ...
 
@@ -50,6 +51,7 @@ def api_action(
     retry: Optional[dict[str, Any]] = None,
     consumes: Optional[str | list[str]] = None,
     produces: Optional[str | list[str]] = None,
+    authorizer: Optional[str] = None,
 ):
     if func is None and ((method is None) != (path is None)):
         raise ValueError(
@@ -67,6 +69,8 @@ def api_action(
             metadata["consumes"] = normalize_media_types(consumes)
         if produces is not None:
             metadata["produces"] = normalize_media_types(produces)
+        if authorizer is not None:
+            metadata["authorizer"] = authorizer
         policy = optional_policy(timeout, retry)
         if policy is not None:
             metadata["policy"] = policy
@@ -82,6 +86,62 @@ def api_action(
         return decorate(func)
 
     return decorate
+
+
+def authorizer(
+    func: Optional[F] = None,
+    *,
+    name: Optional[str] = None,
+    security: Optional[dict[str, Any] | list[dict[str, Any]]] = None,
+    parameters: Optional[list[dict[str, Any]]] = None,
+    timeout: Optional[str] = None,
+    retry: Optional[dict[str, Any]] = None,
+):
+    def decorate(inner: F) -> F:
+        metadata = {
+            "type": "authorizer",
+            "name": name or inner.__name__,
+        }
+        if security is not None:
+            metadata["security"] = normalize_authorizer_security(security)
+        if parameters is not None:
+            metadata["parameters"] = normalize_authorizer_parameters(parameters)
+        policy = optional_policy(timeout, retry)
+        if policy is not None:
+            metadata["policy"] = policy
+
+        setattr(inner, "__ryvus_action__", metadata)
+
+        if _should_run(inner):
+            run_authorizer(inner)
+
+        return inner
+
+    if func is not None:
+        return decorate(func)
+
+    return decorate
+
+
+def normalize_authorizer_security(
+    value: dict[str, Any] | list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        return [value]
+
+    return value
+
+
+def normalize_authorizer_parameters(
+    parameters: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            **parameter,
+            "type": parameter.get("type", "string"),
+        }
+        for parameter in parameters
+    ]
 
 
 @overload

@@ -18,6 +18,8 @@ type OpenApiOperation = {
   parameters?: OpenApiParameter[];
   requestBody?: unknown;
   responses?: Record<string, OpenApiResponse>;
+  security?: Array<Record<string, unknown>>;
+  "x-ryvus-authorizer"?: string;
 };
 
 type Operation = {
@@ -62,6 +64,22 @@ type FormRow = {
 type RequestContent = {
   mediaType: string;
   schema?: unknown;
+};
+
+type SecurityScheme = {
+  type?: string;
+  scheme?: string;
+  in?: string;
+  name?: string;
+};
+
+type AuthControl = {
+  id: string;
+  label: string;
+  location: "header" | "query" | "cookie";
+  name: string;
+  required: boolean;
+  placeholder: string;
 };
 
 const HTTP_METHODS = ["get", "post", "put", "patch", "delete", "head", "options"];
@@ -142,7 +160,7 @@ export function ApiActions({ artifacts }: { artifacts: Artifacts }) {
             ))}
           </div>
         </Panel>
-        <TryIt operation={selected} />
+        <TryIt operation={selected} openapi={artifacts.openapi} />
       </div>
     </Page>
   );
@@ -166,10 +184,11 @@ function routeTail(path: string) {
   return segments.length > 1 ? `/${segments.slice(1).join("/")}` : "/";
 }
 
-function TryIt({ operation }: { operation: Operation }) {
+function TryIt({ operation, openapi }: { operation: Operation; openapi: Artifacts["openapi"] }) {
   const baseUrl = defaultGatewayUrl();
   const [pathValues, setPathValues] = useState<Record<string, string>>({});
   const [queryValues, setQueryValues] = useState<Record<string, string>>({});
+  const [authValues, setAuthValues] = useState<Record<string, string>>({});
   const [headers, setHeaders] = useState<HeaderRow[]>([{ id: 1, name: "", value: "" }]);
   const [body, setBody] = useState("");
   const [formRows, setFormRows] = useState<FormRow[]>([{ id: 1, name: "", value: "" }]);
@@ -179,23 +198,38 @@ function TryIt({ operation }: { operation: Operation }) {
 
   const pathParams = useMemo(() => pathParameters(operation), [operation]);
   const queryParams = useMemo(() => queryParameters(operation), [operation]);
+  const authControls = useMemo(() => authorizerControls(operation, openapi), [operation, openapi]);
+  const parameterControls = useMemo(() => authorizerParameterControls(operation), [operation]);
   const specPathParams = useMemo(() => pathParameterSpecs(operation), [operation]);
   const allParameters = useMemo(
     () => [
       ...pathParams.map((name) =>
         specPathParams.find((param) => param.name === name) ?? { name, in: "path", required: true, schema: { type: "string" } },
       ),
-      ...queryParams,
+      ...(operation.operation.parameters ?? []).filter((param) => param.in !== "path"),
     ],
-    [pathParams, queryParams, specPathParams],
+    [operation.operation.parameters, pathParams, specPathParams],
   );
   const requestContentOptions = requestContents(operation);
   const requestContent = requestContentOptions[0];
   const responseContentTypes = responseMediaTypes(operation);
   const requestSchema = requestContent?.schema;
-  const requestUrl = buildUrl(baseUrl, operation.path, pathValues, queryValues);
+  const effectiveQueryValues = useMemo(
+    () => ({ ...queryValues, ...authQueryValues(authControls, authValues) }),
+    [queryValues, authControls, authValues],
+  );
+  const requestUrl = buildUrl(baseUrl, operation.path, pathValues, effectiveQueryValues);
   const encodedBody = encodeRequestBody(requestContent?.mediaType, body, formRows);
-  const curl = buildCurl(operation.method, requestUrl, requestContent?.mediaType, encodedBody ?? "");
+  const effectiveHeaderValues = useMemo(
+    () => ({ ...authHeaderValues(authControls, authValues), ...authHeaderValues(parameterControls, authValues) }),
+    [authControls, parameterControls, authValues],
+  );
+  const curl = buildCurl(operation.method, requestUrl, requestContent?.mediaType, encodedBody ?? "", [
+    ...Object.entries(effectiveHeaderValues),
+    ...headers
+      .filter((header) => header.name.trim())
+      .map((header) => [header.name.trim(), header.value] as [string, string]),
+  ]);
   const requestValidationError = requestValidationMessage(
     pathParams,
     pathValues,
@@ -204,18 +238,21 @@ function TryIt({ operation }: { operation: Operation }) {
     requestContent,
     body,
     formRows,
+    [...authControls, ...parameterControls],
+    authValues,
   );
   const bodyInvalid = Boolean(requestContent && isMissingRequestBody(requestContent, body, formRows));
 
   useEffect(() => {
     setPathValues(Object.fromEntries(pathParameters(operation).map((name) => [name, ""])));
     setQueryValues(Object.fromEntries(queryParameters(operation).map((param) => [param.name, ""])));
+    setAuthValues(Object.fromEntries([...authorizerControls(operation, openapi), ...authorizerParameterControls(operation)].map((control) => [control.id, ""])));
     setHeaders([{ id: 1, name: "", value: "" }]);
     setBody(sampleBodyText(operation));
     setFormRows(sampleFormRows(operation));
     setResponse(null);
     setError("");
-  }, [operation]);
+  }, [operation, openapi]);
 
   async function sendRequest() {
     if (requestValidationError) {
@@ -230,6 +267,15 @@ function TryIt({ operation }: { operation: Operation }) {
     const startedAt = performance.now();
     try {
       const requestHeaders = new Headers();
+      for (const [name, value] of Object.entries(effectiveHeaderValues)) {
+        if (value.trim()) {
+          requestHeaders.set(name, value);
+        }
+      }
+      const cookie = authCookieValue([...authControls, ...parameterControls], authValues);
+      if (cookie) {
+        requestHeaders.set("cookie", cookie);
+      }
       for (const header of headers) {
         if (header.name.trim()) {
           requestHeaders.set(header.name.trim(), header.value);
@@ -296,6 +342,18 @@ function TryIt({ operation }: { operation: Operation }) {
             <div className="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(320px,0.7fr)]">
               <div className="grid gap-4">
                 <div className="grid gap-4">
+                  {(authControls.length > 0 || parameterControls.length > 0) && (
+                    <AuthorizationEditor
+                      authorizer={operation.operation["x-ryvus-authorizer"]}
+                      securityControls={authControls}
+                      parameterControls={parameterControls}
+                      values={authValues}
+                      onChange={(id, value) =>
+                        setAuthValues((current) => ({ ...current, [id]: value }))
+                      }
+                    />
+                  )}
+
                   {pathParams.length > 0 && (
                     <div className="grid gap-3 sm:grid-cols-2">
                       {pathParams.map((name) => {
@@ -490,6 +548,90 @@ function HeaderEditor({
         Add header
       </button>
     </div>
+  );
+}
+
+function AuthorizationEditor({
+  authorizer,
+  securityControls,
+  parameterControls,
+  values,
+  onChange,
+}: {
+  authorizer?: string;
+  securityControls: AuthControl[];
+  parameterControls: AuthControl[];
+  values: Record<string, string>;
+  onChange: (id: string, value: string) => void;
+}) {
+  return (
+    <div className="grid gap-3 rounded-md border border-violet-400/20 bg-violet-500/[0.06] p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <h4 className="font-mono text-[11px] font-bold uppercase text-violet-200">Authorizer</h4>
+          {authorizer && <code className="truncate text-xs text-violet-100/80">{authorizer}</code>}
+        </div>
+        <Badge tone="violet">{securityControls.length} scheme{securityControls.length === 1 ? "" : "s"}</Badge>
+      </div>
+
+      {securityControls.length > 0 && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          {securityControls.map((control) => (
+            <AuthInput
+              key={control.id}
+              control={control}
+              value={values[control.id] ?? ""}
+              onChange={onChange}
+            />
+          ))}
+        </div>
+      )}
+
+      {parameterControls.length > 0 && (
+        <div className="grid gap-3 border-t border-white/10 pt-3 sm:grid-cols-2">
+          {parameterControls.map((control) => (
+            <AuthInput
+              key={control.id}
+              control={control}
+              value={values[control.id] ?? ""}
+              onChange={onChange}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AuthInput({
+  control,
+  value,
+  onChange,
+}: {
+  control: AuthControl;
+  value: string;
+  onChange: (id: string, value: string) => void;
+}) {
+  const invalid = control.required && isMissingRequiredValue(value);
+
+  return (
+    <label className="grid gap-2">
+      <span className={cn("flex items-center gap-2 font-mono text-[11px] font-bold uppercase", invalid ? "text-red-300" : "text-slate-500")}>
+        <span>
+          {control.label}
+          {control.required ? " *" : ""}
+        </span>
+        <ParameterType type={control.location} />
+      </span>
+      <input
+        aria-invalid={invalid}
+        required={control.required}
+        className={cn(invalid && "!border-red-400/70 !shadow-[0_0_0_1px_rgba(248,113,113,0.32)]")}
+        placeholder={control.placeholder}
+        value={value}
+        onChange={(event) => onChange(control.id, event.target.value)}
+      />
+    </label>
   );
 }
 
@@ -798,6 +940,79 @@ function queryParameters(operation: Operation): OpenApiParameter[] {
   return (operation.operation.parameters ?? []).filter((param) => param.in === "query");
 }
 
+function authorizerParameterControls(operation: Operation): AuthControl[] {
+  return (operation.operation.parameters ?? [])
+    .filter((param) => param.in === "header" || param.in === "cookie")
+    .map((param) => ({
+      id: `parameter:${param.in}:${param.name}`,
+      label: `${param.in === "header" ? "Header" : "Cookie"}: ${param.name}`,
+      location: param.in as "header" | "cookie",
+      name: param.name,
+      required: Boolean(param.required),
+      placeholder: schemaType(param.schema),
+    }));
+}
+
+function authorizerControls(operation: Operation, openapi: Artifacts["openapi"]): AuthControl[] {
+  const schemes = securitySchemes(openapi);
+  const names = (operation.operation.security ?? [])
+    .flatMap((requirement) => Object.keys(requirement));
+
+  return names.flatMap((name) => {
+    const scheme = schemes[name];
+    if (!scheme) {
+      return [];
+    }
+
+    if (scheme.type === "http" && scheme.scheme?.toLowerCase() === "bearer") {
+      return [{
+        id: `security:${name}`,
+        label: "Authorization",
+        location: "header" as const,
+        name: "Authorization",
+        required: true,
+        placeholder: "Bearer dev",
+      }];
+    }
+
+    if (scheme.type === "apiKey" && isAuthLocation(scheme.in) && scheme.name) {
+      return [{
+        id: `security:${name}`,
+        label: `${scheme.in === "header" ? "Header" : scheme.in === "query" ? "Query" : "Cookie"}: ${scheme.name}`,
+        location: scheme.in,
+        name: scheme.name,
+        required: true,
+        placeholder: "value",
+      }];
+    }
+
+    return [];
+  });
+}
+
+function securitySchemes(openapi: Artifacts["openapi"]): Record<string, SecurityScheme> {
+  const components = asRecord(openapi.components);
+  const schemes = asRecord(components.securitySchemes);
+
+  return Object.fromEntries(
+    Object.entries(schemes)
+      .filter((entry): entry is [string, Record<string, unknown>] => isRecord(entry[1]))
+      .map(([name, value]) => [
+        name,
+        {
+          type: typeof value.type === "string" ? value.type : undefined,
+          scheme: typeof value.scheme === "string" ? value.scheme : undefined,
+          in: typeof value.in === "string" ? value.in : undefined,
+          name: typeof value.name === "string" ? value.name : undefined,
+        },
+      ]),
+  );
+}
+
+function isAuthLocation(value: string | undefined): value is "header" | "query" | "cookie" {
+  return value === "header" || value === "query" || value === "cookie";
+}
+
 function requestJsonSchema(operation: Operation): unknown | undefined {
   return requestContents(operation)[0]?.schema;
 }
@@ -918,6 +1133,8 @@ function requestValidationMessage(
   requestContent: RequestContent | undefined,
   body: string,
   formRows: FormRow[],
+  authControls: AuthControl[],
+  authValues: Record<string, string>,
 ) {
   for (const name of pathParams) {
     if (!pathValues[name]?.trim()) {
@@ -935,6 +1152,12 @@ function requestValidationMessage(
     return "Request body is required.";
   }
 
+  for (const control of authControls) {
+    if (control.required && !authValues[control.id]?.trim()) {
+      return `${control.label} is required.`;
+    }
+  }
+
   return "";
 }
 
@@ -950,13 +1173,51 @@ function isMissingRequestBody(content: RequestContent, body: string, formRows: F
   return !body.trim();
 }
 
-function buildCurl(method: string, url: string, mediaType: string | undefined, body: string) {
+function buildCurl(
+  method: string,
+  url: string,
+  mediaType: string | undefined,
+  body: string,
+  headers: Array<[string, string]>,
+) {
   const lines = [`curl -X ${method} ${JSON.stringify(url)}`];
+  for (const [name, value] of headers) {
+    if (value.trim()) {
+      lines.push(`  -H ${JSON.stringify(`${name}: ${value}`)}`);
+    }
+  }
   if (body.trim()) {
     lines.push(`  -H "content-type: ${mediaType ?? "application/json"}"`);
     lines.push(`  --data ${JSON.stringify(body)}`);
   }
   return lines.join(" \\\n");
+}
+
+function authHeaderValues(controls: AuthControl[], values: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    controls
+      .filter((control) => control.location === "header")
+      .map((control) => [control.name, values[control.id] ?? ""])
+      .filter(([, value]) => value.trim()),
+  );
+}
+
+function authQueryValues(controls: AuthControl[], values: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    controls
+      .filter((control) => control.location === "query")
+      .map((control) => [control.name, values[control.id] ?? ""])
+      .filter(([, value]) => value.trim()),
+  );
+}
+
+function authCookieValue(controls: AuthControl[], values: Record<string, string>): string {
+  return controls
+    .filter((control) => control.location === "cookie")
+    .map((control) => [control.name, values[control.id] ?? ""] as const)
+    .filter(([, value]) => value.trim())
+    .map(([name, value]) => `${name}=${value}`)
+    .join("; ");
 }
 
 function allowsRequestBody(method: string) {

@@ -83,6 +83,7 @@ mod tests {
                 request_schema: None,
                 response_schema: None,
                 query_params: Vec::new(),
+                authorizer: None,
             }),
             source: PathBuf::from("src/hello.py"),
             entrypoint: "hello".to_string(),

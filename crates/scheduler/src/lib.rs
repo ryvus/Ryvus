@@ -575,6 +575,7 @@ mod tests {
                 request_schema: None,
                 response_schema: None,
                 query_params: Vec::new(),
+                authorizer: None,
             }),
             source: "src/hello.py".into(),
             entrypoint: "hello".to_string(),

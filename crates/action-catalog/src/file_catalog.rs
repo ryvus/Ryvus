@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs, path::Path};
 
-use ryvus_protocol::{ActionDefinition, ActionManifest};
+use ryvus_protocol::{ActionDefinition, ActionKind, ActionManifest};
 
 use crate::{
     catalog::ActionCatalog,
@@ -10,6 +10,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct FileActionCatalog {
     actions: HashMap<String, ActionDefinition>,
+    authorizers_by_name: HashMap<String, String>,
 }
 
 impl FileActionCatalog {
@@ -28,20 +29,42 @@ impl FileActionCatalog {
                 source,
             })?;
 
-        let actions = manifest
-            .actions
-            .into_iter()
-            .map(|action| {
-                let key = action_key(&action);
-                (key, action)
-            })
-            .collect();
+        Ok(Self::from_actions(manifest.actions))
+    }
 
-        Ok(Self { actions })
+    pub fn from_actions(actions: Vec<ActionDefinition>) -> Self {
+        let mut keyed = HashMap::new();
+        let mut authorizers_by_name = HashMap::new();
+
+        for action in actions {
+            let key = action_key(&action);
+            if matches!(action.kind, ActionKind::Authorizer(_)) {
+                if let Some(name) = &action.name {
+                    authorizers_by_name.insert(name.clone(), key.clone());
+                }
+            }
+            keyed.insert(key, action);
+        }
+
+        Self {
+            actions: keyed,
+            authorizers_by_name,
+        }
     }
 
     pub fn all(&self) -> impl Iterator<Item = &ActionDefinition> {
         self.actions.values()
+    }
+
+    pub fn resolve_authorizer(&self, name: &str) -> ActionCatalogResult<&ActionDefinition> {
+        let key = self
+            .authorizers_by_name
+            .get(name)
+            .ok_or_else(|| ActionCatalogError::ActionNotFound {
+                action: name.to_string(),
+            })?;
+
+        self.resolve(key)
     }
 }
 
@@ -57,4 +80,37 @@ impl ActionCatalog for FileActionCatalog {
 
 fn action_key(action: &ActionDefinition) -> String {
     format!("{}::{}", action.source.display(), action.entrypoint)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use ryvus_protocol::{
+        ActionDefinition, ActionExecutionPolicy, ActionKind, AuthorizerAction, RuntimeKind,
+    };
+
+    use super::FileActionCatalog;
+
+    #[test]
+    fn resolves_authorizer_by_name() {
+        let action = ActionDefinition {
+            runtime: RuntimeKind::Python,
+            kind: ActionKind::Authorizer(AuthorizerAction {
+                security: Vec::new(),
+                parameters: Vec::new(),
+            }),
+            source: PathBuf::from("src/auth.py"),
+            entrypoint: "auth".to_string(),
+            name: Some("petstore".to_string()),
+            policy: ActionExecutionPolicy::default(),
+        };
+        let catalog = FileActionCatalog::from_actions(vec![action]);
+
+        let resolved = catalog
+            .resolve_authorizer("petstore")
+            .expect("authorizer should resolve");
+
+        assert_eq!(resolved.entrypoint, "auth");
+    }
 }

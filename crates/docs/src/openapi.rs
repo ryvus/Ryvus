@@ -1,14 +1,21 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Value};
 
-use ryvus_protocol::{ActionDefinition, ActionKind, ApiQueryParam};
+use ryvus_protocol::{
+    ActionDefinition, ActionKind, ApiQueryParam, AuthorizerAction, AuthorizerParameter,
+    AuthorizerParameterLocation, AuthorizerSecurity,
+};
 
 pub fn build_public_openapi_json_from_actions<'a>(
     actions: impl IntoIterator<Item = &'a ActionDefinition>,
 ) -> Value {
+    let actions = actions.into_iter().collect::<Vec<_>>();
+    let authorizers = authorizers_by_name(&actions);
     let mut paths = serde_json::Map::new();
     let mut tags = BTreeSet::new();
+    let mut security_schemes = serde_json::Map::new();
+
     for action in actions {
         if !matches!(&action.kind, ActionKind::Api(_)) {
             continue;
@@ -23,6 +30,15 @@ pub fn build_public_openapi_json_from_actions<'a>(
         tags.insert(tag.clone());
         let action_key = action_key(action);
         let operation_id = operation_id(action, &api.method, &api.path);
+        let authorizer = api
+            .authorizer
+            .as_deref()
+            .and_then(|name| authorizers.get(name).copied());
+        let security = api.authorizer.as_deref().and_then(|name| {
+            authorizer.map(|authorizer| {
+                register_security_schemes(name, authorizer, &mut security_schemes)
+            })
+        });
 
         let path_item = paths.entry(api.path.clone()).or_insert_with(|| json!({}));
 
@@ -44,11 +60,14 @@ pub fn build_public_openapi_json_from_actions<'a>(
                 api.request_schema.as_ref(),
                 api.response_schema.as_ref(),
                 &api.query_params,
+                api.authorizer.as_deref(),
+                authorizer.map(|authorizer| authorizer.parameters.as_slice()),
+                security.as_deref(),
             ),
         );
     }
 
-    json!({
+    let mut openapi = json!({
         "openapi": "3.1.0",
         "info": {
             "title": "Ryvus Public API",
@@ -56,7 +75,19 @@ pub fn build_public_openapi_json_from_actions<'a>(
         },
         "tags": tags.into_iter().map(|name| json!({ "name": name })).collect::<Vec<_>>(),
         "paths": paths
-    })
+    });
+
+    if !security_schemes.is_empty() {
+        openapi
+            .as_object_mut()
+            .expect("openapi should be an object")
+            .insert(
+                "components".to_string(),
+                json!({ "securitySchemes": security_schemes }),
+            );
+    }
+
+    openapi
 }
 
 fn build_operation(
@@ -71,9 +102,15 @@ fn build_operation(
     request_schema: Option<&Value>,
     response_schema: Option<&Value>,
     query_params: &[ApiQueryParam],
+    authorizer: Option<&str>,
+    authorizer_parameters: Option<&[AuthorizerParameter]>,
+    security: Option<&[String]>,
 ) -> Value {
     let mut parameters = path_parameters(path);
     parameters.extend(query_parameters(query_params));
+    if let Some(authorizer_parameters) = authorizer_parameters {
+        parameters.extend(authorizer_parameters.iter().map(authorizer_parameter));
+    }
 
     let responses = json!({
         "200": {
@@ -105,7 +142,122 @@ fn build_operation(
             );
     }
 
+    if let Some(authorizer) = authorizer {
+        operation
+            .as_object_mut()
+            .expect("operation should be an object")
+            .insert("x-ryvus-authorizer".to_string(), json!(authorizer));
+    }
+
+    if let Some(security) = security {
+        if !security.is_empty() {
+            operation
+                .as_object_mut()
+                .expect("operation should be an object")
+                .insert(
+                    "security".to_string(),
+                    Value::Array(
+                        security
+                            .iter()
+                            .map(|name| json!({ name: [] }))
+                            .collect::<Vec<_>>(),
+                    ),
+                );
+        }
+    }
+
     operation
+}
+
+fn authorizers_by_name<'a>(
+    actions: &[&'a ActionDefinition],
+) -> BTreeMap<String, &'a AuthorizerAction> {
+    actions
+        .iter()
+        .filter_map(|action| {
+            if let ActionKind::Authorizer(authorizer) = &action.kind {
+                action
+                    .name
+                    .as_ref()
+                    .map(|name| (name.clone(), authorizer))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn register_security_schemes(
+    authorizer_name: &str,
+    authorizer: &AuthorizerAction,
+    security_schemes: &mut serde_json::Map<String, Value>,
+) -> Vec<String> {
+    authorizer
+        .security
+        .iter()
+        .map(|security| {
+            let name = security_scheme_name(authorizer_name, security);
+            security_schemes.insert(name.clone(), security_scheme(security));
+            name
+        })
+        .collect()
+}
+
+fn security_scheme_name(authorizer_name: &str, security: &AuthorizerSecurity) -> String {
+    let suffix = match security.security_type.as_str() {
+        "http" => security.scheme.as_deref().unwrap_or("http").to_string(),
+        "apiKey" => format!(
+            "{}_{}",
+            security
+                .location
+                .as_ref()
+                .map(parameter_location_name)
+                .unwrap_or_else(|| "api_key".to_string()),
+            security.name.as_deref().unwrap_or("api_key")
+        ),
+        other => other.to_string(),
+    };
+
+    format!(
+        "{}_{}",
+        sanitize_identifier(authorizer_name),
+        sanitize_identifier(&suffix)
+    )
+}
+
+fn security_scheme(security: &AuthorizerSecurity) -> Value {
+    let mut object = serde_json::Map::new();
+    object.insert("type".to_string(), json!(security.security_type));
+    if let Some(scheme) = &security.scheme {
+        object.insert("scheme".to_string(), json!(scheme));
+    }
+    if let Some(location) = &security.location {
+        object.insert("in".to_string(), serde_json::to_value(location).unwrap());
+    }
+    if let Some(name) = &security.name {
+        object.insert("name".to_string(), json!(name));
+    }
+
+    Value::Object(object)
+}
+
+fn parameter_location_name(location: &AuthorizerParameterLocation) -> String {
+    match location {
+        AuthorizerParameterLocation::Header => "header".to_string(),
+        AuthorizerParameterLocation::Query => "query".to_string(),
+        AuthorizerParameterLocation::Cookie => "cookie".to_string(),
+    }
+}
+
+fn authorizer_parameter(parameter: &AuthorizerParameter) -> Value {
+    json!({
+        "name": parameter.name,
+        "in": parameter.location,
+        "required": parameter.required,
+        "schema": {
+            "type": parameter.parameter_type,
+        },
+    })
 }
 
 fn request_body_schema(consumes: &[String], schema: Option<&Value>) -> Value {
@@ -314,7 +466,10 @@ fn query_parameters(query_params: &[ApiQueryParam]) -> Vec<Value> {
 mod tests {
     use std::path::PathBuf;
 
-    use ryvus_protocol::{ActionDefinition, ActionKind, ApiAction, RuntimeKind, ScheduleAction};
+    use ryvus_protocol::{
+        ActionDefinition, ActionKind, ApiAction, AuthorizerAction, AuthorizerParameter,
+        AuthorizerParameterLocation, AuthorizerSecurity, RuntimeKind, ScheduleAction,
+    };
     use serde_json::json;
 
     use super::build_public_openapi_json_from_actions;
@@ -335,6 +490,7 @@ mod tests {
                 request_schema: None,
                 response_schema: None,
                 query_params: Vec::new(),
+                authorizer: None,
             }),
             source: PathBuf::from(source),
             entrypoint: entrypoint.to_string(),
@@ -430,6 +586,78 @@ mod tests {
     }
 
     #[test]
+    fn protected_routes_include_authorizer_extension() {
+        let mut action = api_definition("GET", "/pets", "src/pets.py", "list_pets");
+
+        if let ActionKind::Api(api) = &mut action.kind {
+            api.authorizer = Some("petstore".to_string());
+        }
+
+        let authorizer = ActionDefinition {
+            runtime: RuntimeKind::Python,
+            kind: ActionKind::Authorizer(AuthorizerAction {
+                security: vec![
+                    AuthorizerSecurity {
+                        security_type: "http".to_string(),
+                        scheme: Some("bearer".to_string()),
+                        location: None,
+                        name: None,
+                    },
+                    AuthorizerSecurity {
+                        security_type: "apiKey".to_string(),
+                        scheme: None,
+                        location: Some(AuthorizerParameterLocation::Header),
+                        name: Some("X-API-Key".to_string()),
+                    },
+                ],
+                parameters: vec![AuthorizerParameter {
+                    name: "X-Tenant-ID".to_string(),
+                    location: AuthorizerParameterLocation::Header,
+                    required: true,
+                    parameter_type: "string".to_string(),
+                }],
+            }),
+            source: PathBuf::from("src/auth.py"),
+            entrypoint: "auth".to_string(),
+            name: Some("petstore".to_string()),
+            policy: ryvus_protocol::ActionExecutionPolicy::default(),
+        };
+
+        let openapi = build_public_openapi_json_from_actions([&action, &authorizer]);
+
+        assert_eq!(
+            openapi["paths"]["/pets"]["get"]["x-ryvus-authorizer"],
+            json!("petstore")
+        );
+        assert_eq!(
+            openapi["components"]["securitySchemes"]["petstore_bearer"],
+            json!({ "type": "http", "scheme": "bearer" })
+        );
+        assert_eq!(
+            openapi["components"]["securitySchemes"]["petstore_header_x_api_key"],
+            json!({ "type": "apiKey", "in": "header", "name": "X-API-Key" })
+        );
+        assert_eq!(
+            openapi["paths"]["/pets"]["get"]["security"],
+            json!([
+                { "petstore_bearer": [] },
+                { "petstore_header_x_api_key": [] }
+            ])
+        );
+        assert!(
+            openapi["paths"]["/pets"]["get"]["parameters"]
+                .as_array()
+                .expect("parameters should be an array")
+                .contains(&json!({
+                    "name": "X-Tenant-ID",
+                    "in": "header",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }))
+        );
+    }
+
+    #[test]
     fn openapi_excludes_schedules() {
         let api_action = ActionDefinition {
             runtime: RuntimeKind::Python,
@@ -441,6 +669,7 @@ mod tests {
                 request_schema: None,
                 response_schema: None,
                 query_params: Vec::new(),
+                authorizer: None,
             }),
             source: PathBuf::from("src/hello.py"),
             entrypoint: "hello".to_string(),

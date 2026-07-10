@@ -145,3 +145,102 @@ def test_discovers_flow_action(tmp_path):
             "name": "billing/receive_invoice",
         }
     ]
+
+
+def test_discovers_authorizer_and_api_reference(tmp_path):
+    source_root = tmp_path / "src"
+    source_root.mkdir()
+    (source_root / "auth.py").write_text(
+        "\n".join(
+            [
+                "from ryvus import api_action, authorizer",
+                "",
+                "@authorizer(",
+                "    name='petstore',",
+                "    security={'type': 'http', 'scheme': 'bearer'},",
+                "    parameters=[",
+                "        {'name': 'X-Tenant-ID', 'in': 'header', 'required': True},",
+                "        {'name': 'session', 'in': 'cookie', 'required': False, 'type': 'string'},",
+                "    ],",
+                ")",
+                "def auth(event):",
+                "    return {'effect': 'allow'}",
+                "",
+                "@api_action(method='GET', path='/pets', authorizer='petstore')",
+                "def list_pets():",
+                "    return []",
+            ]
+        )
+    )
+
+    actions = discover_actions(Path(tmp_path), source_root)
+
+    assert actions == [
+        {
+            "runtime": "Python",
+            "kind": {
+                "Authorizer": {
+                    "security": [{"type": "http", "scheme": "bearer"}],
+                    "parameters": [
+                        {
+                            "name": "X-Tenant-ID",
+                            "in": "header",
+                            "required": True,
+                            "type": "string",
+                        },
+                        {
+                            "name": "session",
+                            "in": "cookie",
+                            "required": False,
+                            "type": "string",
+                        },
+                    ],
+                }
+            },
+            "source": "src/auth.py",
+            "entrypoint": "auth",
+            "name": "petstore",
+        },
+        {
+            "runtime": "Python",
+            "kind": {
+                "Api": {
+                    "method": "GET",
+                    "path": "/pets",
+                    "query_params": [],
+                    "authorizer": "petstore",
+                }
+            },
+            "source": "src/auth.py",
+            "entrypoint": "list_pets",
+            "name": "list_pets",
+        },
+    ]
+
+
+def test_authorizer_handler_receives_headers_method_and_path():
+    from ryvus.events import AuthorizerEvent
+    from ryvus.runtime import handle_authorizer_request
+
+    captured = {}
+
+    def handler(event):
+        captured["event"] = event
+        return {"effect": "allow", "principal_id": event.headers["authorization"]}
+
+    request = build_request()
+    request["event"] = {
+        "body": None,
+        "path_params": {"pet_id": "p1"},
+        "query_params": {"debug": "true"},
+        "headers": {"authorization": "Bearer dev"},
+        "method": "GET",
+        "path": "/pets/p1",
+    }
+
+    result = result_for(handle_authorizer_request(request, handler))
+
+    assert result["status"] == "success"
+    assert result["output"] == {"effect": "allow", "principal_id": "Bearer dev"}
+    assert isinstance(captured["event"], AuthorizerEvent)
+    assert captured["event"].path == "/pets/p1"

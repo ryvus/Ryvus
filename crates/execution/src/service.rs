@@ -282,6 +282,7 @@ mod tests {
                 request_schema: None,
                 response_schema: None,
                 query_params: Vec::new(),
+                authorizer: None,
             }),
             source: "src/test.py".into(),
             entrypoint: "test".to_string(),

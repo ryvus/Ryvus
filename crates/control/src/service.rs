@@ -1,9 +1,9 @@
-use std::{fs, io::ErrorKind, path::PathBuf};
+use std::{collections::HashSet, fs, io::ErrorKind, path::PathBuf};
 
 use ryvus_action_catalog::{ActionCatalog, FileActionCatalog};
 use ryvus_docs::{DocsRegistry, DocsRegistryBuilder, GeneratedCatalogDocsSource};
 use ryvus_flow::FlowSpec;
-use ryvus_protocol::ActionDefinition;
+use ryvus_protocol::{ActionDefinition, ActionKind};
 use ryvus_scheduler::ScheduleInfo;
 use serde_json::Value;
 
@@ -33,6 +33,7 @@ impl ControlService {
         let action_catalog = FileActionCatalog::load(manifest_path)?;
         let route_registry = RouteRegistry::from_actions(action_catalog.all())?;
         ryvus_scheduler::validate_schedule_actions(action_catalog.all())?;
+        validate_authorizers(action_catalog.all())?;
         let flow_spec = match fs::read_to_string(config.project_root.join(".ryvus/flows.json")) {
             Ok(content) => serde_json::from_str::<FlowSpec>(&content)?,
             Err(error) if error.kind() == ErrorKind::NotFound => FlowSpec::default(),
@@ -79,6 +80,46 @@ impl ControlService {
     pub fn resolve_action(&self, action: &str) -> ControlResult<&ActionDefinition> {
         Ok(self.action_catalog.resolve(action)?)
     }
+
+    pub fn resolve_authorizer(&self, name: &str) -> ControlResult<&ActionDefinition> {
+        Ok(self.action_catalog.resolve_authorizer(name)?)
+    }
+}
+
+fn validate_authorizers<'a>(
+    actions: impl IntoIterator<Item = &'a ActionDefinition>,
+) -> ControlResult<()> {
+    let actions: Vec<&ActionDefinition> = actions.into_iter().collect();
+    let mut authorizers = HashSet::new();
+
+    for action in &actions {
+        if matches!(action.kind, ActionKind::Authorizer(_)) {
+            let Some(name) = action.name.as_deref() else {
+                return Err(crate::ControlError::InvalidConfig(
+                    "authorizer actions require a name".to_string(),
+                ));
+            };
+            if !authorizers.insert(name.to_string()) {
+                return Err(crate::ControlError::InvalidConfig(format!(
+                    "duplicate authorizer `{name}`"
+                )));
+            }
+        }
+    }
+
+    for action in &actions {
+        if let ActionKind::Api(api) = &action.kind {
+            if let Some(name) = &api.authorizer {
+                if !authorizers.contains(name) {
+                    return Err(crate::ControlError::InvalidConfig(format!(
+                        "api action references unknown authorizer `{name}`"
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -89,7 +130,9 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use ryvus_protocol::{ActionDefinition, ActionKind, ActionManifest, ApiAction, RuntimeKind};
+    use ryvus_protocol::{
+        ActionDefinition, ActionKind, ActionManifest, ApiAction, AuthorizerAction, RuntimeKind,
+    };
 
     use super::*;
 
@@ -111,6 +154,7 @@ mod tests {
                     request_schema: None,
                     response_schema: None,
                     query_params: Vec::new(),
+                    authorizer: None,
                 }),
                 source: PathBuf::from("src/hello.py"),
                 entrypoint: "hello".to_string(),
@@ -216,6 +260,7 @@ mod tests {
                     request_schema: None,
                     response_schema: None,
                     query_params: Vec::new(),
+                    authorizer: None,
                 }),
                 source: PathBuf::from("src/hello.py"),
                 entrypoint: "hello".to_string(),
@@ -262,6 +307,103 @@ mod tests {
             error,
             crate::ControlError::Flow(ryvus_flow::FlowError::ActionNotFound { action })
                 if action == "does_not_exist"
+        ));
+    }
+
+    #[test]
+    fn local_control_rejects_unknown_api_authorizer() {
+        let project_root = temp_project_root();
+        let manifest_path = project_root.join(".ryvus/action-manifest.json");
+        fs::create_dir_all(manifest_path.parent().expect("manifest should have parent"))
+            .expect("manifest parent should be created");
+
+        let manifest = ActionManifest {
+            actions: vec![ActionDefinition {
+                runtime: RuntimeKind::Python,
+                kind: ActionKind::Api(ApiAction {
+                    method: "GET".to_string(),
+                    path: "/hello".to_string(),
+                    consumes: vec!["application/json".to_string()],
+                    produces: vec!["application/json".to_string()],
+                    request_schema: None,
+                    response_schema: None,
+                    query_params: Vec::new(),
+                    authorizer: Some("missing".to_string()),
+                }),
+                source: PathBuf::from("src/hello.py"),
+                entrypoint: "hello".to_string(),
+                name: None,
+                policy: ryvus_protocol::ActionExecutionPolicy::default(),
+            }],
+        };
+
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).expect("manifest should serialize"),
+        )
+        .expect("manifest should be written");
+
+        let error = ControlService::load_local(LocalControlConfig {
+            project_root,
+            manifest_path: PathBuf::from(".ryvus/action-manifest.json"),
+        });
+
+        assert!(matches!(
+            error,
+            Err(crate::ControlError::InvalidConfig(message))
+                if message == "api action references unknown authorizer `missing`"
+        ));
+    }
+
+    #[test]
+    fn local_control_rejects_duplicate_authorizers() {
+        let project_root = temp_project_root();
+        let manifest_path = project_root.join(".ryvus/action-manifest.json");
+        fs::create_dir_all(manifest_path.parent().expect("manifest should have parent"))
+            .expect("manifest parent should be created");
+
+        let manifest = ActionManifest {
+            actions: vec![
+                ActionDefinition {
+                    runtime: RuntimeKind::Python,
+                    kind: ActionKind::Authorizer(AuthorizerAction {
+                        security: Vec::new(),
+                        parameters: Vec::new(),
+                    }),
+                    source: PathBuf::from("src/auth.py"),
+                    entrypoint: "auth_one".to_string(),
+                    name: Some("petstore".to_string()),
+                    policy: ryvus_protocol::ActionExecutionPolicy::default(),
+                },
+                ActionDefinition {
+                    runtime: RuntimeKind::Python,
+                    kind: ActionKind::Authorizer(AuthorizerAction {
+                        security: Vec::new(),
+                        parameters: Vec::new(),
+                    }),
+                    source: PathBuf::from("src/auth.py"),
+                    entrypoint: "auth_two".to_string(),
+                    name: Some("petstore".to_string()),
+                    policy: ryvus_protocol::ActionExecutionPolicy::default(),
+                },
+            ],
+        };
+
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).expect("manifest should serialize"),
+        )
+        .expect("manifest should be written");
+
+        let error = ControlService::load_local(LocalControlConfig {
+            project_root,
+            manifest_path: PathBuf::from(".ryvus/action-manifest.json"),
+        });
+
+        assert!(matches!(
+            error,
+            Err(crate::ControlError::InvalidConfig(message))
+                if message == "duplicate authorizer `petstore`"
         ));
     }
 

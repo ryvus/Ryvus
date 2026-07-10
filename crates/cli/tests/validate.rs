@@ -96,6 +96,85 @@ export default apiAction({
 }
 
 #[test]
+fn validate_discovers_node_authorizer() {
+    let project = TestProject::new("validate-node-authorizer");
+    project.add_node_action(
+        "auth.js",
+        r#"
+export default authorizer({
+  name: "store",
+  security: [
+    { type: "http", scheme: "bearer" },
+    { type: "apiKey", in: "header", name: "X-API-Key" },
+  ],
+  parameters: [
+    { name: "X-Tenant-ID", in: "header", required: true },
+  ],
+  handler({ headers }) {
+    return headers.authorization === "Bearer dev"
+      ? { effect: "allow" }
+      : { effect: "unauthorized" };
+  },
+});
+"#,
+    );
+    project.add_node_action(
+        "products.js",
+        r#"
+export default apiAction({
+  method: "GET",
+  path: "/store/products",
+  authorizer: "store",
+  handler() {
+    return [];
+  },
+});
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ryvus"))
+        .arg("validate")
+        .current_dir(&project.root)
+        .output()
+        .expect("validate command should run");
+
+    assert!(
+        output.status.success(),
+        "validate failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let manifest: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project.root.join(".ryvus/action-manifest.json"))
+            .expect("manifest should be written"),
+    )
+    .expect("manifest should parse");
+
+    assert!(manifest["actions"]
+        .as_array()
+        .expect("actions should be an array")
+        .iter()
+        .any(|action| action["kind"] == serde_json::json!({
+            "Authorizer": {
+                "security": [
+                    { "type": "http", "scheme": "bearer" },
+                    { "type": "apiKey", "in": "header", "name": "X-API-Key" }
+                ],
+                "parameters": [
+                    { "name": "X-Tenant-ID", "in": "header", "required": true, "type": "string" }
+                ]
+            }
+        }) && action["name"] == "store"));
+    assert!(manifest["actions"]
+        .as_array()
+        .expect("actions should be an array")
+        .iter()
+        .any(|action| action["kind"]["Api"]["path"] == "/store/products"
+            && action["kind"]["Api"]["authorizer"] == "store"));
+}
+
+#[test]
 fn validate_reports_missing_typescript_config() {
     let project = TestProject::new("validate-ts-no-config");
     project.add_ts_action(
@@ -592,7 +671,7 @@ impl TestProject {
     fn add_node_action(&self, file: &str, body: &str) {
         let sdk_path = workspace_root().join("sdk/node/dist/index.js");
         let content = format!(
-            r#"import {{ apiAction }} from {sdk_path:?};
+            r#"import {{ apiAction, authorizer }} from {sdk_path:?};
 {body}
 "#,
             sdk_path = format!("file://{}", sdk_path.display()),

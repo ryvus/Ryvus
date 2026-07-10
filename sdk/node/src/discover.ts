@@ -2,7 +2,11 @@ import { readdir } from "node:fs/promises";
 import { basename, extname, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import type { ApiActionDefinition, ScheduledActionDefinition } from "./api.js";
+import type {
+  ApiActionDefinition,
+  AuthorizerDefinition,
+  ScheduledActionDefinition,
+} from "./api.js";
 
 interface ActionManifest {
   actions: unknown[];
@@ -39,6 +43,7 @@ for (const file of await sourceFiles(sourceRoot)) {
           })),
           ...(action.consumes ? { consumes: action.consumes } : {}),
           ...(action.produces ? { produces: action.produces } : {}),
+          ...(action.authorizer ? { authorizer: action.authorizer } : {}),
           ...(action.body ? { request_schema: action.body.jsonSchema } : {}),
           ...(action.response ? { response_schema: action.response.jsonSchema } : {}),
         },
@@ -46,6 +51,20 @@ for (const file of await sourceFiles(sourceRoot)) {
       source: relative(projectRoot, file),
       entrypoint: "default",
       name,
+      ...(action.policy ? { policy: action.policy } : {}),
+    });
+  } else if (action.type === "authorizer") {
+    manifest.actions.push({
+      runtime: "Node",
+      kind: {
+        Authorizer: {
+          ...(action.security ? { security: action.security } : {}),
+          ...(action.parameters ? { parameters: action.parameters } : {}),
+        },
+      },
+      source: relative(projectRoot, file),
+      entrypoint: "default",
+      name: action.name,
       ...(action.policy ? { policy: action.policy } : {}),
     });
   } else {
@@ -110,12 +129,12 @@ async function sourceFiles(root: string): Promise<string[]> {
 
 function isRyvusAction(
   value: unknown,
-): value is ApiActionDefinition | ScheduledActionDefinition {
+): value is ApiActionDefinition | ScheduledActionDefinition | AuthorizerDefinition {
   return (
     typeof value === "object" &&
     value !== null &&
     (value as ApiActionDefinition).__ryvusAction === true &&
-    ["api", "schedule"].includes((value as ApiActionDefinition).type)
+    ["api", "schedule", "authorizer"].includes((value as ApiActionDefinition).type)
   );
 }
 

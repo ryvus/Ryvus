@@ -71,6 +71,8 @@ def discover_actions(project_root: Path, source_root: Path) -> list[dict[str, An
                     api_config["consumes"] = metadata["consumes"]
                 if "produces" in metadata:
                     api_config["produces"] = metadata["produces"]
+                if "authorizer" in metadata:
+                    api_config["authorizer"] = metadata["authorizer"]
 
                 if request_schema is not None:
                     api_config["request_schema"] = request_schema
@@ -86,6 +88,16 @@ def discover_actions(project_root: Path, source_root: Path) -> list[dict[str, An
                     "Schedule": {
                         "expression": metadata["expression"],
                     },
+                }
+            elif metadata.get("type") == "authorizer":
+                authorizer_config: dict[str, Any] = {}
+                if "security" in metadata:
+                    authorizer_config["security"] = metadata["security"]
+                if "parameters" in metadata:
+                    authorizer_config["parameters"] = metadata["parameters"]
+
+                kind = {
+                    "Authorizer": authorizer_config,
                 }
             elif metadata.get("type") == "flow":
                 kind = {

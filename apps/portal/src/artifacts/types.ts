@@ -92,6 +92,7 @@ export type Artifacts = {
       version?: string;
     };
     paths: Record<string, unknown>;
+    components?: Record<string, unknown>;
     tags?: Array<{ name: string }>;
   };
   schedules: SchedulesFile;

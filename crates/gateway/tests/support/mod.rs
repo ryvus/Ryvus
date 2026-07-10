@@ -38,7 +38,7 @@ impl TestProject {
         let content = format!(
             r#"import sys
 sys.path.insert(0, {sdk_path:?})
-from ryvus import api_action, scheduled_action
+from ryvus import api_action, authorizer, scheduled_action
 {body}
 "#,
             sdk_path = sdk_path.to_string_lossy().to_string(),
@@ -57,6 +57,7 @@ from ryvus import api_action, scheduled_action
             r#"import {{
   apiAction,
   array,
+  authorizer,
   boolean,
   integer,
   number,
@@ -164,6 +165,46 @@ pub async fn raw_request_with_content_type(
     }
 }
 
+pub async fn raw_request_with_headers(
+    project: &TestProject,
+    method: Method,
+    uri: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> TestResponse {
+    let app = server::build_app(&project.config()).expect("gateway app should build");
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json");
+
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+
+    let response = app
+        .oneshot(
+            builder
+                .body(Body::from(body.to_string()))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let raw_body = String::from_utf8_lossy(&bytes).to_string();
+    let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+
+    TestResponse {
+        status,
+        body,
+        raw_body,
+    }
+}
+
 pub fn action(method: &str, path: &str, source: &str, entrypoint: &str) -> Value {
     json!({
         "runtime": "Python",
@@ -176,6 +217,18 @@ pub fn action(method: &str, path: &str, source: &str, entrypoint: &str) -> Value
         },
         "source": source,
         "entrypoint": entrypoint
+    })
+}
+
+pub fn authorizer_action(source: &str, entrypoint: &str, name: &str) -> Value {
+    json!({
+        "runtime": "Python",
+        "kind": {
+            "Authorizer": {}
+        },
+        "source": source,
+        "entrypoint": entrypoint,
+        "name": name
     })
 }
 
