@@ -4,9 +4,9 @@ use ryvus_protocol::{AttemptId, ExecutionAttempt, ExecutionId, InvocationRequest
 use std::{collections::HashMap, sync::Mutex};
 
 use crate::{
-    ExecutionOptions, ExecutionPersistence, ExecutionRecord, ExecutionServiceError,
-    ExecutionServiceResult, ExecutionState, Executor, ExecutorError, RecordingExecutor,
-    RuntimeResolver,
+    assign_attempt_deadline, ExecutionOptions, ExecutionPersistence, ExecutionRecord,
+    ExecutionServiceError, ExecutionServiceResult, ExecutionState, Executor, ExecutorError,
+    RecordingExecutor, RuntimeResolver,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -133,6 +133,7 @@ where
         let mut attempt_request = request.clone();
 
         loop {
+            assign_attempt_deadline(&mut attempt_request, policy.timeout)?;
             let attempt = attempt_request.attempt();
             if !self.start_attempt(&attempt) {
                 self.set_state(&execution_id, ExecutionState::Cancelled);
@@ -349,6 +350,7 @@ mod tests {
     fn retries_until_success() {
         let executor = FailsThenSucceeds::default();
         let attempts = Arc::clone(&executor.attempts);
+        let deadlines = Arc::clone(&executor.deadlines);
         let persistence = RecordingPersistence::default();
         let persisted_attempts = Arc::clone(&persistence.attempts);
         let service = ExecutionService::new(StaticResolver, executor, persistence);
@@ -380,6 +382,11 @@ mod tests {
         assert_eq!(attempts[0].execution_id, attempts[1].execution_id);
         assert_ne!(attempts[0].attempt_id, attempts[1].attempt_id);
         assert_eq!(*attempts, *persisted_attempts.lock().unwrap());
+        let deadlines = deadlines.lock().unwrap();
+        assert_eq!(deadlines.len(), 2);
+        assert!(deadlines
+            .iter()
+            .all(|(deadline, budget)| *deadline > 0 && *budget == 3_000));
     }
 
     #[test]
@@ -499,6 +506,7 @@ mod tests {
     #[derive(Default)]
     struct FailsThenSucceeds {
         attempts: Arc<Mutex<Vec<ExecutionAttempt>>>,
+        deadlines: Arc<Mutex<Vec<(i64, u64)>>>,
     }
 
     impl Executor for FailsThenSucceeds {
@@ -510,6 +518,10 @@ mod tests {
         ) -> crate::ExecutorResult<ExecutionResult> {
             let mut attempts = self.attempts.lock().unwrap();
             attempts.push(request.attempt());
+            self.deadlines
+                .lock()
+                .unwrap()
+                .push((request.deadline_unix_ms, request.remaining_budget_ms));
             let invocation_result = if attempts.len() == 1 {
                 InvocationResult::failed(
                     request,

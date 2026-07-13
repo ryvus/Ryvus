@@ -1,3 +1,4 @@
+pub mod deadline;
 pub mod error;
 pub mod execution;
 pub mod executor;
@@ -11,6 +12,7 @@ pub mod service;
 pub mod event_sink;
 pub mod target;
 
+pub use deadline::*;
 pub use error::*;
 pub use event_sink::*;
 pub use execution::*;

@@ -3,8 +3,9 @@ use std::time::{Duration, Instant};
 use ryvus_protocol::{AttemptId, InvocationRequest, InvocationResult, PROTOCOL_VERSION};
 
 use crate::{
-    ExecutionOptions, ExecutionResult, Executor, ExecutorError, ExecutorResult, RuntimeDisposition,
-    RuntimeHandle, RuntimeLifecycle, RuntimeManager, RuntimeOutcome, RuntimeTarget,
+    refresh_transport_budget, ExecutionOptions, ExecutionResult, Executor, ExecutorError,
+    ExecutorResult, RuntimeDisposition, RuntimeHandle, RuntimeLifecycle, RuntimeManager,
+    RuntimeOutcome, RuntimeTarget,
 };
 
 pub struct HttpExecutor<M> {
@@ -115,7 +116,18 @@ where
 
         let endpoint = handle.endpoint.clone();
         let invocation_url = format!("{}/invoke", endpoint.trim_end_matches('/'));
-        let request_body = request.clone();
+        let mut request_body = request.clone();
+        refresh_transport_budget(&mut request_body)?;
+        request_body.remaining_budget_ms = request_body
+            .remaining_budget_ms
+            .min(u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX));
+        if request_body.remaining_budget_ms == 0 {
+            return Err(ExecutorError::ProcessTimedOut {
+                attempt: request.attempt(),
+                command: handle.endpoint.clone(),
+                timeout_ms: timeout.as_millis(),
+            });
+        }
         let expected_attempt = request.attempt();
         let timeout_attempt = expected_attempt.clone();
         let result = std::thread::spawn(move || {
@@ -183,7 +195,7 @@ mod tests {
 
     #[test]
     fn releases_runtime_after_failed_handler_result() {
-        let request = InvocationRequest::new(json!({}));
+        let request = request_with_deadline();
         let body = serde_json::to_string(&InvocationResult::failed(
             &request,
             ryvus_protocol::InvocationError::new("handler_error", "boom", false),
@@ -213,7 +225,7 @@ mod tests {
         let endpoint = one_response_server("200 OK", "not-json");
         let executor =
             executor_with_expected_release(endpoint, RuntimeOutcome::InfrastructureFailure);
-        let request = InvocationRequest::new(json!({}));
+        let request = request_with_deadline();
 
         assert!(executor
             .invoke(
@@ -233,7 +245,7 @@ mod tests {
         drop(listener);
         let executor =
             executor_with_expected_release(endpoint, RuntimeOutcome::InfrastructureFailure);
-        let request = InvocationRequest::new(json!({}));
+        let request = request_with_deadline();
 
         assert!(executor
             .invoke(
@@ -270,7 +282,7 @@ mod tests {
                 })
             });
         let executor = HttpExecutor::new(manager);
-        let request = InvocationRequest::new(json!({}));
+        let request = request_with_deadline();
 
         let error = executor
             .invoke(
@@ -307,6 +319,12 @@ mod tests {
                 })
             });
         HttpExecutor::new(manager)
+    }
+
+    fn request_with_deadline() -> InvocationRequest {
+        let mut request = InvocationRequest::new(json!({}));
+        crate::assign_attempt_deadline(&mut request, Duration::from_secs(10)).unwrap();
+        request
     }
 
     fn one_response_server(status: &str, body: &str) -> String {

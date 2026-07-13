@@ -1,5 +1,9 @@
+import contextlib
+import io
 import json
+import logging
 import os
+import sys
 import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,9 +33,89 @@ def run_flow(handler: Handler) -> None:
 
 
 def run_handler(handler: Handler, event_factory) -> None:
+    if os.environ.get("RYVUS_WORKER_PROTOCOL") == "framed":
+        run_framed_worker(handler, event_factory)
+        return
+
     host = os.environ.get("RYVUS_RUNTIME_HOST", "127.0.0.1")
     port = int(os.environ.get("RYVUS_RUNTIME_PORT", "8080"))
     create_runtime_server(handler, event_factory, host, port).serve_forever()
+
+
+def run_framed_worker(handler: Handler, event_factory) -> None:
+    protocol_stdout = sys.stdout
+    _write_frame(protocol_stdout, {"type": "ready"})
+
+    request = json.loads(sys.stdin.readline())
+    validate_invocation_request(request)
+    captured_stdout = io.StringIO()
+    log_handler = _InvocationLogHandler(request)
+    root_logger = logging.getLogger()
+    root_logger.addHandler(log_handler)
+    try:
+        with contextlib.redirect_stdout(captured_stdout):
+            result = handle_request(request, handler, event_factory)
+    finally:
+        root_logger.removeHandler(log_handler)
+
+    for line in captured_stdout.getvalue().splitlines():
+        _write_frame(protocol_stdout, _log_frame(request, line, {"source": "stdout"}))
+    for frame in log_handler.frames:
+        _write_frame(protocol_stdout, frame)
+    _write_frame(protocol_stdout, {"type": "result", "result": result})
+
+
+class _InvocationLogHandler(logging.Handler):
+    def __init__(self, request: dict[str, Any]) -> None:
+        super().__init__()
+        self.request = request
+        self.frames: list[dict[str, Any]] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.frames.append(
+            _log_frame(
+                self.request,
+                record.getMessage(),
+                {"logger": record.name},
+                _log_level(record.levelno),
+            )
+        )
+
+
+def _log_frame(
+    request: dict[str, Any],
+    message: str,
+    fields: dict[str, Any],
+    level: str = "info",
+) -> dict[str, Any]:
+    return {
+        "type": "event",
+        "event": {
+            "type": "log",
+            "execution_id": request["execution_id"],
+            "attempt_id": request["attempt_id"],
+            "attempt_number": request["attempt_number"],
+            "level": level,
+            "message": message,
+            "fields": fields,
+        },
+    }
+
+
+def _log_level(level: int) -> str:
+    if level <= logging.DEBUG:
+        return "debug"
+    if level <= logging.INFO:
+        return "info"
+    if level <= logging.WARNING:
+        return "warn"
+    return "error"
+
+
+def _write_frame(stream, frame: dict[str, Any]) -> None:
+    json.dump(frame, stream, separators=(",", ":"))
+    stream.write("\n")
+    stream.flush()
 
 
 def create_runtime_server(
@@ -104,7 +188,7 @@ def create_runtime_server(
 def validate_invocation_request(request: Any) -> None:
     if not isinstance(request, dict):
         raise ValueError("request must be a JSON object")
-    if request.get("protocol_version") != "ryvus.invoke.v2":
+    if request.get("protocol_version") != "ryvus.invoke.v3":
         raise ValueError("unsupported protocol_version")
     if not isinstance(request.get("execution_id"), str) or not request["execution_id"]:
         raise ValueError("execution_id is required")
@@ -112,6 +196,16 @@ def validate_invocation_request(request: Any) -> None:
         raise ValueError("attempt_id is required")
     if not isinstance(request.get("attempt_number"), int) or request["attempt_number"] < 1:
         raise ValueError("attempt_number must be a positive integer")
+    if not isinstance(request.get("deadline_unix_ms"), int) or isinstance(
+        request["deadline_unix_ms"], bool
+    ):
+        raise ValueError("deadline_unix_ms must be an integer")
+    if not isinstance(request.get("remaining_budget_ms"), int) or isinstance(
+        request["remaining_budget_ms"], bool
+    ):
+        raise ValueError("remaining_budget_ms must be an integer")
+    if request["remaining_budget_ms"] < 1:
+        raise ValueError("remaining_budget_ms must be positive")
     if "event" not in request:
         raise ValueError("event is required")
     if "context" in request and not isinstance(request["context"], dict):

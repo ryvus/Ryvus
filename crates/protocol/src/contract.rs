@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: &str = "ryvus.invoke.v2";
+pub const PROTOCOL_VERSION: &str = "ryvus.invoke.v3";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -127,6 +127,8 @@ pub struct InvocationRequest {
     pub execution_id: ExecutionId,
     pub attempt_id: AttemptId,
     pub attempt_number: u32,
+    pub deadline_unix_ms: i64,
+    pub remaining_budget_ms: u64,
     pub event: Value,
     pub context: InvocationContext,
 }
@@ -150,6 +152,8 @@ impl InvocationRequest {
             execution_id: attempt.execution_id,
             attempt_id: attempt.attempt_id,
             attempt_number: attempt.attempt_number,
+            deadline_unix_ms: 0,
+            remaining_budget_ms: 0,
             event,
             context,
         }
@@ -169,6 +173,17 @@ impl InvocationRequest {
             self.context.clone(),
             self.attempt().retry(),
         )
+    }
+
+    pub fn set_deadline(&mut self, deadline_unix_ms: i64, remaining_budget_ms: u64) {
+        self.deadline_unix_ms = deadline_unix_ms;
+        self.remaining_budget_ms = remaining_budget_ms;
+    }
+
+    pub fn refresh_remaining_budget(&mut self, now_unix_ms: i64) {
+        self.remaining_budget_ms = self
+            .remaining_budget_ms
+            .min(self.deadline_unix_ms.saturating_sub(now_unix_ms).max(0) as u64);
     }
 }
 
@@ -323,11 +338,36 @@ mod tests {
         let request = InvocationRequest::new(json!({}));
         let value = serde_json::to_value(&request).unwrap();
 
-        assert_eq!(value["protocol_version"], "ryvus.invoke.v2");
+        assert_eq!(value["protocol_version"], "ryvus.invoke.v3");
         assert_eq!(value["execution_id"], request.execution_id.as_ref());
         assert_eq!(value["attempt_id"], request.attempt_id.as_ref());
         assert_eq!(value["attempt_number"], 1);
+        assert_eq!(value["deadline_unix_ms"], 0);
+        assert_eq!(value["remaining_budget_ms"], 0);
         assert!(value.get("invocation_id").is_none());
+    }
+
+    #[test]
+    fn retry_requires_a_fresh_deadline() {
+        let mut first = InvocationRequest::new(json!({}));
+        first.set_deadline(10_000, 3_000);
+
+        let second = first.retry();
+
+        assert_eq!(second.deadline_unix_ms, 0);
+        assert_eq!(second.remaining_budget_ms, 0);
+    }
+
+    #[test]
+    fn refresh_budget_never_extends_sender_budget() {
+        let mut request = InvocationRequest::new(json!({}));
+        request.set_deadline(10_000, 3_000);
+
+        request.refresh_remaining_budget(8_000);
+        assert_eq!(request.remaining_budget_ms, 2_000);
+
+        request.refresh_remaining_budget(7_000);
+        assert_eq!(request.remaining_budget_ms, 2_000);
     }
 
     #[test]

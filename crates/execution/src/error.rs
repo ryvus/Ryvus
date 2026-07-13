@@ -4,6 +4,12 @@ use ryvus_protocol::{ExecutionAttempt, ExecutionId};
 
 #[derive(Debug, Error)]
 pub enum ExecutorError {
+    #[error("system clock is before the Unix epoch")]
+    SystemClockBeforeUnixEpoch,
+
+    #[error("attempt deadline is outside the supported millisecond range")]
+    DeadlineOutOfRange,
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

@@ -11,6 +11,8 @@ export interface InvocationRequest {
   execution_id: string;
   attempt_id: string;
   attempt_number: number;
+  deadline_unix_ms: number;
+  remaining_budget_ms: number;
   event: JsonValue;
   context?: {
     metadata?: JsonValue;

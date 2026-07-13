@@ -501,7 +501,7 @@ function validateInvocationRequest(request: InvocationRequest): void {
   if (request === null || typeof request !== "object" || Array.isArray(request)) {
     throw new Error("request must be a JSON object");
   }
-  if (request.protocol_version !== "ryvus.invoke.v2") {
+  if (request.protocol_version !== "ryvus.invoke.v3") {
     throw new Error("unsupported protocol_version");
   }
   if (typeof request.execution_id !== "string" || request.execution_id.length === 0) {
@@ -512,6 +512,12 @@ function validateInvocationRequest(request: InvocationRequest): void {
   }
   if (!Number.isInteger(request.attempt_number) || request.attempt_number < 1) {
     throw new Error("attempt_number must be a positive integer");
+  }
+  if (!Number.isSafeInteger(request.deadline_unix_ms)) {
+    throw new Error("deadline_unix_ms must be an integer");
+  }
+  if (!Number.isSafeInteger(request.remaining_budget_ms) || request.remaining_budget_ms < 1) {
+    throw new Error("remaining_budget_ms must be a positive integer");
   }
   if (!("event" in request)) {
     throw new Error("event is required");

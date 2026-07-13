@@ -63,15 +63,44 @@ test("runtime rejects missing attempt identity", async () => {
   }
 });
 
+test("runtime rejects v1 and v2 protocols", async () => {
+  const server = createRuntimeServer(async (request): Promise<InvocationResult> => success(request));
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert(address !== null && typeof address === "object");
+
+  try {
+    for (const version of ["ryvus.invoke.v1", "ryvus.invoke.v2"]) {
+      const invalid = JSON.parse(request("attempt_1").body as string) as Record<string, unknown>;
+      invalid.protocol_version = version;
+      const response: Awaited<ReturnType<typeof fetch>> = await fetch(
+        `http://127.0.0.1:${address.port}/invoke`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(invalid),
+        },
+      );
+      assert.equal(response.status, 400);
+    }
+  } finally {
+    server.close();
+    await once(server, "close");
+  }
+});
+
 function request(attemptId: string): RequestInit {
   return {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      protocol_version: "ryvus.invoke.v2",
+      protocol_version: "ryvus.invoke.v3",
       execution_id: "execution_1",
       attempt_id: attemptId,
       attempt_number: 1,
+      deadline_unix_ms: 4_102_444_800_000,
+      remaining_budget_ms: 3_000,
       event: {},
       context: { metadata: {} },
     }),
