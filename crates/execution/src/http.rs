@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use ryvus_protocol::{InvocationRequest, InvocationResult, PROTOCOL_VERSION};
+use ryvus_protocol::{AttemptId, InvocationRequest, InvocationResult, PROTOCOL_VERSION};
 
 use crate::{
     ExecutionOptions, ExecutionResult, Executor, ExecutorError, ExecutorResult, RuntimeDisposition,
@@ -44,12 +44,9 @@ where
             });
         }
 
-        let handle = self.manager.acquire(
-            target,
-            &request.invocation_id,
-            self.lifecycle,
-            options.timeout,
-        )?;
+        let handle =
+            self.manager
+                .acquire(target, &request.attempt(), self.lifecycle, options.timeout)?;
         let remaining = options.timeout.saturating_sub(started.elapsed());
         let invocation = self.invoke_acquired(&handle, request, remaining);
         let runtime_outcome = match &invocation {
@@ -65,12 +62,12 @@ where
         match (invocation, release) {
             (_, Ok(release)) if release.disposition == RuntimeDisposition::Cancelled => {
                 Err(ExecutorError::RuntimeCancelled {
-                    invocation_id: request.invocation_id.clone(),
+                    attempt: request.attempt(),
                 })
             }
             (_, Ok(release)) if release.disposition == RuntimeDisposition::TimedOut => {
                 Err(ExecutorError::RuntimeTimedOut {
-                    invocation_id: request.invocation_id.clone(),
+                    attempt: request.attempt(),
                 })
             }
             (Ok(invocation_result), Ok(release)) => Ok(ExecutionResult {
@@ -89,8 +86,8 @@ where
         }
     }
 
-    fn cancel(&self, invocation_id: &str) -> ExecutorResult<bool> {
-        self.manager.cancel(invocation_id)
+    fn cancel(&self, attempt_id: &AttemptId) -> ExecutorResult<bool> {
+        self.manager.cancel(attempt_id)
     }
 
     fn shutdown(&self, grace: Duration) -> ExecutorResult<()> {
@@ -110,6 +107,7 @@ where
     ) -> ExecutorResult<InvocationResult> {
         if timeout.is_zero() {
             return Err(ExecutorError::ProcessTimedOut {
+                attempt: request.attempt(),
                 command: handle.endpoint.clone(),
                 timeout_ms: 0,
             });
@@ -118,7 +116,8 @@ where
         let endpoint = handle.endpoint.clone();
         let invocation_url = format!("{}/invoke", endpoint.trim_end_matches('/'));
         let request_body = request.clone();
-        let expected_invocation_id = request.invocation_id.clone();
+        let expected_attempt = request.attempt();
+        let timeout_attempt = expected_attempt.clone();
         let result = std::thread::spawn(move || {
             let response = reqwest::blocking::Client::builder()
                 .timeout(timeout)
@@ -129,6 +128,7 @@ where
                 .map_err(|error| {
                     if error.is_timeout() {
                         ExecutorError::ProcessTimedOut {
+                            attempt: timeout_attempt,
                             command: endpoint,
                             timeout_ms: timeout.as_millis(),
                         }
@@ -157,10 +157,10 @@ where
                 actual: result.protocol_version,
             });
         }
-        if result.invocation_id != expected_invocation_id {
-            return Err(ExecutorError::InvocationIdMismatch {
-                expected: expected_invocation_id,
-                actual: result.invocation_id,
+        if result.attempt() != expected_attempt {
+            return Err(ExecutorError::AttemptIdentityMismatch {
+                expected: expected_attempt,
+                actual: result.attempt(),
             });
         }
 
@@ -185,7 +185,7 @@ mod tests {
     fn releases_runtime_after_failed_handler_result() {
         let request = InvocationRequest::new(json!({}));
         let body = serde_json::to_string(&InvocationResult::failed(
-            request.invocation_id.clone(),
+            &request,
             ryvus_protocol::InvocationError::new("handler_error", "boom", false),
         ))
         .unwrap();
@@ -257,8 +257,8 @@ mod tests {
         let mut manager = MockRuntimeManager::new();
         manager
             .expect_acquire()
-            .return_once(move |_, invocation_id, _, _| {
-                Ok(RuntimeHandle::existing(invocation_id, endpoint))
+            .return_once(move |_, attempt, _, _| {
+                Ok(RuntimeHandle::existing(attempt.clone(), endpoint))
             });
         manager
             .expect_release()
@@ -293,8 +293,8 @@ mod tests {
         manager
             .expect_acquire()
             .times(1)
-            .returning(move |_, invocation_id, _, _| {
-                Ok(RuntimeHandle::existing(invocation_id, endpoint.clone()))
+            .returning(move |_, attempt, _, _| {
+                Ok(RuntimeHandle::existing(attempt.clone(), endpoint.clone()))
             });
         manager
             .expect_release()

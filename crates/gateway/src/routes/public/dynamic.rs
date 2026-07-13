@@ -9,14 +9,16 @@ use std::collections::HashMap;
 
 use crate::authorization::{AuthorizationDecision, AuthorizationRequest};
 use ryvus_protocol::{
-    ActionKind, InvocationContext, InvocationRequest, InvocationStatus, PROTOCOL_VERSION,
+    ActionKind, ExecutionAttempt, InvocationContext, InvocationRequest, InvocationStatus,
 };
 use serde_json::Value;
 
 use crate::state::AppState;
 
 use super::{
-    errors::{action_error_status, execution_error_status, invocation_error, public_error},
+    errors::{
+        action_error_status, error_attempt, execution_error, execution_error_status, public_error,
+    },
     validation::validate_request,
 };
 
@@ -24,7 +26,7 @@ pub async fn handle_dynamic_route(
     State(state): State<AppState>,
     request: Request<Body>,
 ) -> Response {
-    let invocation_id = InvocationRequest::new(Value::Null).invocation_id;
+    let attempt = ExecutionAttempt::initial();
     let method = request.method().clone();
     let uri = request.uri().clone();
     let path = uri.path().to_string();
@@ -174,7 +176,7 @@ pub async fn handle_dynamic_route(
         action,
         &route.action,
         api,
-        invocation_id,
+        attempt,
         input,
         route_match.path_params,
         query_params,
@@ -187,7 +189,7 @@ fn invoke_api_action(
     action: &ryvus_protocol::ActionDefinition,
     action_name: &str,
     api: &ryvus_protocol::ApiAction,
-    invocation_id: String,
+    attempt: ExecutionAttempt,
     input: Value,
     path_params: HashMap<String, String>,
     query_params: HashMap<String, String>,
@@ -199,12 +201,7 @@ fn invoke_api_action(
         "query_params": query_params,
     });
 
-    let request = InvocationRequest {
-        protocol_version: PROTOCOL_VERSION.to_string(),
-        invocation_id: invocation_id.clone(),
-        event,
-        context,
-    };
+    let request = InvocationRequest::with_attempt(event, context, attempt);
 
     let policy = match ryvus_execution::ExecutionPolicy::from_action_policy(&action.policy) {
         Ok(policy) => policy,
@@ -223,9 +220,12 @@ fn invoke_api_action(
         Err(error) => {
             let status = execution_error_status(&error);
 
-            return invocation_error(
+            let failed_attempt = error_attempt(&error)
+                .cloned()
+                .unwrap_or_else(|| request.attempt());
+            return execution_error(
                 status,
-                &invocation_id,
+                &failed_attempt,
                 "execution_failed",
                 format!("{}: {}", action_name, error),
                 None,
@@ -242,9 +242,9 @@ fn invoke_api_action(
             .map(|error| action_error_status(&error.code))
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
-        return invocation_error(
+        return execution_error(
             status,
-            &invocation_id,
+            &invocation_result.attempt(),
             "action_failed",
             invocation_result
                 .error

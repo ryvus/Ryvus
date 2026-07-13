@@ -44,7 +44,9 @@ pub fn run(selector: String) -> Result<()> {
         ryvus_scheduler::run_schedule_once(action_catalog.all(), &selector, execution_service)
             .map_err(|err| CliError::Validation(err.to_string()))?;
 
-    println!("invocation_id: {}", result.invocation_id);
+    println!("execution_id: {}", result.execution_id);
+    println!("attempt_id: {}", result.attempt_id);
+    println!("attempt_number: {}", result.attempt_number);
     println!("status: {}", status_label(&result.status));
     println!(
         "output: {}",

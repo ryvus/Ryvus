@@ -81,17 +81,21 @@ from ryvus import api_action
 @api_action
 def handler(event, context):
     return {
-        "invocation_id": context.invocation_id
+        "execution_id": context.execution_id,
+        "attempt_id": context.attempt_id,
+        "attempt_number": context.attempt_number,
     }
 ```
 
 ### Context Properties
 
-| Property         | Type | Description                    |
-| ---------------- | ---- | ------------------------------ |
-| invocation_id    | str  | Unique invocation identifier   |
-| protocol_version | str  | Ryvus protocol version         |
-| metadata         | dict | Additional invocation metadata |
+| Property         | Type | Description                         |
+| ---------------- | ---- | ----------------------------------- |
+| execution_id     | str  | Stable logical execution identifier |
+| attempt_id       | str  | Physical attempt identifier         |
+| attempt_number   | int  | One-based attempt number            |
+| protocol_version | str  | Ryvus protocol version              |
+| metadata         | dict | Additional invocation metadata      |
 
 ## Error Handling
 

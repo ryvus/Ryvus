@@ -1,7 +1,7 @@
 use std::time::Duration;
 use std::time::SystemTime;
 
-use ryvus_protocol::InvocationRequest;
+use ryvus_protocol::{AttemptId, InvocationRequest};
 
 use crate::{
     ExecutionOptions, ExecutionRecord, ExecutionTarget, Executor, ExecutorResult, RuntimeTarget,
@@ -50,8 +50,8 @@ impl<E: Executor> RecordingExecutor<E> {
         ))
     }
 
-    pub fn cancel(&self, invocation_id: &str) -> ExecutorResult<bool> {
-        self.inner.cancel(invocation_id)
+    pub fn cancel(&self, attempt_id: &AttemptId) -> ExecutorResult<bool> {
+        self.inner.cancel(attempt_id)
     }
 
     pub fn shutdown(&self, grace: Duration) -> ExecutorResult<()> {
@@ -90,8 +90,8 @@ mod tests {
             _ => panic!("expected HTTP target"),
         }
 
-        assert_eq!(record.invocation_id, request.invocation_id);
-        assert_eq!(record.request.invocation_id, request.invocation_id);
+        assert_eq!(record.attempt, request.attempt());
+        assert_eq!(record.request.attempt(), request.attempt());
         assert_eq!(record.result.exit_code, None);
         assert_eq!(
             record.result.invocation_result.status,
@@ -115,7 +115,7 @@ mod tests {
         ) -> crate::ExecutorResult<crate::ExecutionResult> {
             Ok(crate::ExecutionResult {
                 invocation_result: ryvus_protocol::InvocationResult::success(
-                    request.invocation_id.clone(),
+                    request,
                     json!({ "ok": true }),
                 ),
                 stdout: String::new(),

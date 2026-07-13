@@ -1,3 +1,4 @@
+use ryvus_protocol::{AttemptId, ExecutionId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -88,7 +89,11 @@ pub struct FlowStepExecution {
     #[serde(default = "default_attempts")]
     pub attempts: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub invocation_id: Option<String>,
+    pub execution_id: Option<ExecutionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<AttemptId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_number: Option<u32>,
     pub input: Value,
     pub output: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -212,7 +212,9 @@ export default apiAction({
   handler(event, context) {
     return {
       message: "Hello from Node",
-      invocation_id: context.invocationId,
+      execution_id: context.executionId,
+      attempt_id: context.attemptId,
+      attempt_number: context.attemptNumber,
       event,
     };
   },
@@ -225,7 +227,9 @@ export default apiAction({
 
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(response.body["message"], json!("Hello from Node"));
-    assert!(response.body["invocation_id"].is_string());
+    assert!(response.body["execution_id"].is_string());
+    assert!(response.body["attempt_id"].is_string());
+    assert_eq!(response.body["attempt_number"], json!(1));
     assert_eq!(response.body["event"]["body"], json!(null));
 }
 
@@ -1306,7 +1310,8 @@ def create_pet(name: str, age: int):
         missing_query.body["error"],
         json!("request_validation_failed")
     );
-    assert!(missing_query.body.get("invocation_id").is_none());
+    assert!(missing_query.body.get("execution_id").is_none());
+    assert!(missing_query.body.get("attempt_id").is_none());
 
     let empty_query = request(&project, Method::GET, "/search?limit=", None).await;
     assert_eq!(empty_query.status, StatusCode::BAD_REQUEST);

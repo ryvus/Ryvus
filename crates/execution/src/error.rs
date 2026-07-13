@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use ryvus_protocol::{ExecutionAttempt, ExecutionId};
+
 #[derive(Debug, Error)]
 pub enum ExecutorError {
     #[error("I/O error: {0}")]
@@ -15,8 +17,9 @@ pub enum ExecutorError {
         stderr: String,
     },
 
-    #[error("process failed to start: command={command}, error={io_error}")]
+    #[error("process failed to start: {attempt}, command={command}, error={io_error}")]
     ProcessStartFailed {
+        attempt: ExecutionAttempt,
         command: String,
         io_error: std::io::Error,
     },
@@ -28,8 +31,12 @@ pub enum ExecutorError {
         path: String,
     },
 
-    #[error("process timed out: command={command}, timeout_ms={timeout_ms}")]
-    ProcessTimedOut { command: String, timeout_ms: u128 },
+    #[error("process timed out: {attempt}, command={command}, timeout_ms={timeout_ms}")]
+    ProcessTimedOut {
+        attempt: ExecutionAttempt,
+        command: String,
+        timeout_ms: u128,
+    },
 
     #[error("invalid protocol version: expected={expected}, actual={actual}")]
     InvalidProtocolVersion { expected: String, actual: String },
@@ -43,16 +50,18 @@ pub enum ExecutorError {
     #[error("runtime target cannot be acquired by the local runtime manager: {target}")]
     UnsupportedRuntimeTarget { target: String },
 
-    #[error("runtime startup failed: command={command}, exit_code={exit_code:?}, stdout={stdout}, stderr={stderr}")]
+    #[error("runtime startup failed: {attempt}, command={command}, exit_code={exit_code:?}, stdout={stdout}, stderr={stderr}")]
     RuntimeStartupFailed {
+        attempt: ExecutionAttempt,
         command: String,
         exit_code: Option<i32>,
         stdout: String,
         stderr: String,
     },
 
-    #[error("runtime readiness timed out: endpoint={endpoint}, timeout_ms={timeout_ms}, stdout={stdout}, stderr={stderr}")]
+    #[error("runtime readiness timed out: {attempt}, endpoint={endpoint}, timeout_ms={timeout_ms}, stdout={stdout}, stderr={stderr}")]
     RuntimeReadinessTimedOut {
+        attempt: ExecutionAttempt,
         endpoint: String,
         timeout_ms: u128,
         stdout: String,
@@ -68,8 +77,11 @@ pub enum ExecutorError {
     #[error("runtime returned HTTP status {status}: {body}")]
     HttpStatus { status: u16, body: String },
 
-    #[error("runtime response invocation id mismatch: expected={expected}, actual={actual}")]
-    InvocationIdMismatch { expected: String, actual: String },
+    #[error("runtime response attempt mismatch: expected=({expected}), actual=({actual})")]
+    AttemptIdentityMismatch {
+        expected: ExecutionAttempt,
+        actual: ExecutionAttempt,
+    },
 
     #[error("invocation failed ({invocation}); runtime release also failed ({release})")]
     InvocationAndRelease { invocation: String, release: String },
@@ -77,17 +89,17 @@ pub enum ExecutorError {
     #[error("HTTP transport worker panicked")]
     HttpWorkerPanicked,
 
-    #[error("runtime invocation was cancelled: {invocation_id}")]
-    RuntimeCancelled { invocation_id: String },
+    #[error("runtime attempt was cancelled: {attempt}")]
+    RuntimeCancelled { attempt: ExecutionAttempt },
 
-    #[error("runtime invocation timed out: {invocation_id}")]
-    RuntimeTimedOut { invocation_id: String },
+    #[error("runtime attempt timed out: {attempt}")]
+    RuntimeTimedOut { attempt: ExecutionAttempt },
 
     #[error("runtime is already processing an invocation")]
     RuntimeBusy,
 
-    #[error("runtime pool capacity was not available before the invocation deadline")]
-    RuntimePoolExhausted,
+    #[error("runtime pool capacity was not available before the invocation deadline: {attempt}")]
+    RuntimePoolExhausted { attempt: ExecutionAttempt },
 
     #[error("runtime manager is shutting down")]
     RuntimeUnavailable,
@@ -105,6 +117,12 @@ pub enum ExecutionServiceError {
 
     #[error("invalid execution policy: {0}")]
     InvalidPolicy(String),
+
+    #[error("initial invocation must use attempt number 1, got {attempt_number}")]
+    InvalidInitialAttempt { attempt_number: u32 },
+
+    #[error("execution cancellation was requested before an attempt was assigned: {execution_id}")]
+    CancellationRequested { execution_id: ExecutionId },
 
     #[error("persistence error: {0}")]
     Persistence(Box<dyn std::error::Error + Send + Sync + 'static>),

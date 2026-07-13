@@ -12,34 +12,46 @@ impl InvocationEventSink for ConsoleInvocationEventSink {
         match event {
             InvocationEvent::Log(log) => match log.level {
                 LogLevel::Trace => tracing::trace!(
-                    invocation_id = %log.invocation_id,
+                    execution_id = %log.execution_id,
+                    attempt_id = %log.attempt_id,
+                    attempt_number = log.attempt_number,
                     fields = %log.fields,
                     "{}", log.message
                 ),
                 LogLevel::Debug => tracing::debug!(
-                    invocation_id = %log.invocation_id,
+                    execution_id = %log.execution_id,
+                    attempt_id = %log.attempt_id,
+                    attempt_number = log.attempt_number,
                     fields = %log.fields,
                     "{}", log.message
                 ),
                 LogLevel::Info => tracing::info!(
-                    invocation_id = %log.invocation_id,
+                    execution_id = %log.execution_id,
+                    attempt_id = %log.attempt_id,
+                    attempt_number = log.attempt_number,
                     fields = %log.fields,
                     "{}", log.message
                 ),
                 LogLevel::Warn => tracing::warn!(
-                    invocation_id = %log.invocation_id,
+                    execution_id = %log.execution_id,
+                    attempt_id = %log.attempt_id,
+                    attempt_number = log.attempt_number,
                     fields = %log.fields,
                     "{}", log.message
                 ),
                 LogLevel::Error => tracing::error!(
-                    invocation_id = %log.invocation_id,
+                    execution_id = %log.execution_id,
+                    attempt_id = %log.attempt_id,
+                    attempt_number = log.attempt_number,
                     fields = %log.fields,
                     "{}", log.message
                 ),
             },
             InvocationEvent::Metric(metric) => {
                 tracing::info!(
-                    invocation_id = %metric.invocation_id,
+                    execution_id = %metric.execution_id,
+                    attempt_id = %metric.attempt_id,
+                    attempt_number = metric.attempt_number,
                     name = %metric.name,
                     value = metric.value,
                     unit = %metric.unit,

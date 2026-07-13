@@ -102,14 +102,17 @@ pub struct TestResponse {
 pub fn assert_public_error(response: TestResponse, status: StatusCode, error: &str) {
     assert_eq!(response.status, status);
     assert_eq!(response.body["error"], json!(error));
-    assert!(response.body.get("invocation_id").is_none());
+    assert!(response.body.get("execution_id").is_none());
+    assert!(response.body.get("attempt_id").is_none());
     assert!(response.body["message"].is_string());
 }
 
 pub fn assert_invocation_error(response: TestResponse, status: StatusCode, error: &str) {
     assert_eq!(response.status, status);
     assert_eq!(response.body["error"], json!(error));
-    assert!(response.body["invocation_id"].is_string());
+    assert!(response.body["execution_id"].is_string());
+    assert!(response.body["attempt_id"].is_string());
+    assert!(response.body["attempt_number"].is_u64());
     assert!(response.body["message"].is_string());
 }
 

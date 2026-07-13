@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ryvus_protocol::InvocationRequest;
+use ryvus_protocol::{AttemptId, InvocationRequest};
 
 use crate::{error::ExecutorResult, ExecutionResult, RuntimeTarget};
 
@@ -18,7 +18,7 @@ pub trait Executor: Send + Sync {
         options: &ExecutionOptions,
     ) -> ExecutorResult<ExecutionResult>;
 
-    fn cancel(&self, _invocation_id: &str) -> ExecutorResult<bool> {
+    fn cancel(&self, _attempt_id: &AttemptId) -> ExecutorResult<bool> {
         Ok(false)
     }
 
@@ -40,8 +40,8 @@ where
         self.as_ref().invoke(target, request, options)
     }
 
-    fn cancel(&self, invocation_id: &str) -> ExecutorResult<bool> {
-        self.as_ref().cancel(invocation_id)
+    fn cancel(&self, attempt_id: &AttemptId) -> ExecutorResult<bool> {
+        self.as_ref().cancel(attempt_id)
     }
 
     fn shutdown(&self, grace: Duration) -> ExecutorResult<()> {

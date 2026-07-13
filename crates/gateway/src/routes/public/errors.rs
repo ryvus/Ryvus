@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 use ryvus_execution::{ExecutionServiceError, ExecutorError};
+use ryvus_protocol::ExecutionAttempt;
 use serde_json::Value;
 
 pub fn public_error(
@@ -24,15 +25,17 @@ pub fn public_error(
     (status, Json(body)).into_response()
 }
 
-pub fn invocation_error(
+pub fn execution_error(
     status: StatusCode,
-    invocation_id: &str,
+    attempt: &ExecutionAttempt,
     error: &str,
     message: impl Into<String>,
     details: Option<Value>,
 ) -> Response {
     let mut body = serde_json::json!({
-        "invocation_id": invocation_id,
+        "execution_id": attempt.execution_id,
+        "attempt_id": attempt.attempt_id,
+        "attempt_number": attempt.attempt_number,
         "error": error,
         "message": message.into(),
     });
@@ -44,13 +47,28 @@ pub fn invocation_error(
     (status, Json(body)).into_response()
 }
 
+pub fn error_attempt(error: &ExecutionServiceError) -> Option<&ExecutionAttempt> {
+    match error {
+        ExecutionServiceError::Executor(
+            ExecutorError::ProcessTimedOut { attempt, .. }
+            | ExecutorError::RuntimeCancelled { attempt }
+            | ExecutorError::RuntimeTimedOut { attempt }
+            | ExecutorError::ProcessStartFailed { attempt, .. }
+            | ExecutorError::RuntimeStartupFailed { attempt, .. }
+            | ExecutorError::RuntimeReadinessTimedOut { attempt, .. }
+            | ExecutorError::RuntimePoolExhausted { attempt },
+        ) => Some(attempt),
+        _ => None,
+    }
+}
+
 pub fn execution_error_status(error: &ExecutionServiceError) -> StatusCode {
     match error {
         ExecutionServiceError::Executor(
             ExecutorError::ProcessTimedOut { .. }
             | ExecutorError::RuntimeReadinessTimedOut { .. }
             | ExecutorError::RuntimeTimedOut { .. }
-            | ExecutorError::RuntimePoolExhausted,
+            | ExecutorError::RuntimePoolExhausted { .. },
         ) => StatusCode::GATEWAY_TIMEOUT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }

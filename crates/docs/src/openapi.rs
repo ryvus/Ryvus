@@ -309,9 +309,11 @@ fn error_response(description: &str) -> Value {
             "application/json": {
                 "schema": {
                     "type": "object",
-                    "required": ["invocation_id", "error", "message"],
+                    "required": ["execution_id", "attempt_id", "attempt_number", "error", "message"],
                     "properties": {
-                        "invocation_id": { "type": "string" },
+                        "execution_id": { "type": "string" },
+                        "attempt_id": { "type": "string" },
+                        "attempt_number": { "type": "integer", "minimum": 1 },
                         "error": { "type": "string" },
                         "message": { "type": "string" }
                     }

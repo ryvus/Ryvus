@@ -2,10 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use axum::http::StatusCode;
 use ryvus_control::ControlService;
-use ryvus_protocol::{
-    ActionDefinition, ActionKind, InvocationContext, InvocationRequest, InvocationStatus,
-    PROTOCOL_VERSION,
-};
+use ryvus_protocol::{ActionDefinition, ActionKind, InvocationRequest, InvocationStatus};
 use serde_json::Value;
 
 use crate::{
@@ -133,12 +130,7 @@ impl AuthorizationService {
         authorizer_name: &str,
         event: Value,
     ) -> Result<AuthorizationDecision, AuthorizationFailure> {
-        let request = InvocationRequest {
-            protocol_version: PROTOCOL_VERSION.to_string(),
-            invocation_id: InvocationRequest::new(Value::Null).invocation_id,
-            event,
-            context: InvocationContext::default(),
-        };
+        let request = InvocationRequest::new(event);
 
         let policy = ryvus_execution::ExecutionPolicy::from_action_policy(&authorizer.policy)
             .map_err(|error| AuthorizationFailure {

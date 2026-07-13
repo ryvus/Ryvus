@@ -438,8 +438,8 @@ function startRuntime(
 export function createRuntimeServer(
   invoke: (request: InvocationRequest) => Promise<InvocationResult>,
 ): Server {
-  const state: { activeInvocationId: string | null } = {
-    activeInvocationId: null,
+  const state: { activeAttemptId: string | null } = {
+    activeAttemptId: null,
   };
   return createServer((request, response) => {
     void handleRuntimeRequest(request, response, invoke, state);
@@ -450,12 +450,12 @@ async function handleRuntimeRequest(
   request: IncomingMessage,
   response: ServerResponse,
   invoke: (request: InvocationRequest) => Promise<InvocationResult>,
-  state: { activeInvocationId: string | null },
+  state: { activeAttemptId: string | null },
 ): Promise<void> {
   if (request.method === "GET" && request.url === "/health") {
     writeJson(response, 200, {
       status: "ready",
-      busy: state.activeInvocationId !== null,
+      busy: state.activeAttemptId !== null,
     });
     return;
   }
@@ -475,7 +475,7 @@ async function handleRuntimeRequest(
   try {
     const invocation = JSON.parse(await readBody(request)) as InvocationRequest;
     validateInvocationRequest(invocation);
-    if (state.activeInvocationId !== null) {
+    if (state.activeAttemptId !== null) {
       writeJson(response, 409, {
         code: "RUNTIME_BUSY",
         message: "This runtime instance is already processing an invocation.",
@@ -483,11 +483,11 @@ async function handleRuntimeRequest(
       return;
     }
 
-    state.activeInvocationId = invocation.invocation_id;
+    state.activeAttemptId = invocation.attempt_id;
     try {
       writeJson(response, 200, await invoke(invocation));
     } finally {
-      state.activeInvocationId = null;
+      state.activeAttemptId = null;
     }
   } catch (error) {
     writeJson(response, 400, {
@@ -501,11 +501,17 @@ function validateInvocationRequest(request: InvocationRequest): void {
   if (request === null || typeof request !== "object" || Array.isArray(request)) {
     throw new Error("request must be a JSON object");
   }
-  if (request.protocol_version !== "ryvus.invoke.v1") {
+  if (request.protocol_version !== "ryvus.invoke.v2") {
     throw new Error("unsupported protocol_version");
   }
-  if (typeof request.invocation_id !== "string" || request.invocation_id.length === 0) {
-    throw new Error("invocation_id is required");
+  if (typeof request.execution_id !== "string" || request.execution_id.length === 0) {
+    throw new Error("execution_id is required");
+  }
+  if (typeof request.attempt_id !== "string" || request.attempt_id.length === 0) {
+    throw new Error("attempt_id is required");
+  }
+  if (!Number.isInteger(request.attempt_number) || request.attempt_number < 1) {
+    throw new Error("attempt_number must be a positive integer");
   }
   if (!("event" in request)) {
     throw new Error("event is required");

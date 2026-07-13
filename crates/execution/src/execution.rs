@@ -3,7 +3,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use ryvus_protocol::{InvocationRequest, InvocationResult};
+use ryvus_protocol::{ExecutionAttempt, InvocationRequest, InvocationResult};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,7 +29,7 @@ pub struct ExecutionResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionRecord {
-    pub invocation_id: String,
+    pub attempt: ExecutionAttempt,
     pub request: InvocationRequest,
     pub target: ExecutionTarget,
     pub result: ExecutionResult,
@@ -46,7 +46,7 @@ impl ExecutionRecord {
         finished_at: SystemTime,
     ) -> Self {
         Self {
-            invocation_id: request.invocation_id.clone(),
+            attempt: request.attempt(),
             request,
             target,
             result,

@@ -3,7 +3,9 @@ import type { Artifacts, ScheduleArtifact } from "../artifacts/types";
 import { Badge, Button, CodeBlock, EmptyState, Page, Panel } from "../components/ui";
 
 type RunResult = {
-  invocation_id?: string;
+  execution_id?: string;
+  attempt_id?: string;
+  attempt_number?: number;
   status?: string;
   output?: unknown;
   error?: string;
@@ -59,7 +61,7 @@ export function Schedules({ artifacts }: { artifacts: Artifacts }) {
       [id]: [
         {
           ...result,
-          id: result.invocation_id ?? `local_${Date.now().toString(36)}`,
+          id: result.execution_id ?? `local_${Date.now().toString(36)}`,
           started_at: new Date().toISOString(),
         },
         ...(current[id] ?? []),
@@ -135,7 +137,7 @@ function ScheduleListItem({
           <Metric label="Runtime" value={schedule.runtime} />
           <Metric label="Runs" value={historyCount.toString()} />
         </div>
-        <Badge tone={running ? "blue" : result?.error ? "red" : result?.invocation_id ? "green" : "slate"}>
+        <Badge tone={running ? "blue" : result?.error ? "red" : result?.execution_id ? "green" : "slate"}>
           {running ? "running" : resultStatus(result)}
         </Badge>
       </div>
@@ -176,7 +178,7 @@ function ScheduleDetail({
                   <code className="block truncate text-xs text-slate-300">{run.id}</code>
                   <span className="text-xs text-slate-500">{new Date(run.started_at).toLocaleString()}</span>
                 </span>
-                <Badge tone={run.error ? "red" : run.invocation_id ? "green" : "slate"}>{resultStatus(run)}</Badge>
+                <Badge tone={run.error ? "red" : run.execution_id ? "green" : "slate"}>{resultStatus(run)}</Badge>
               </div>
             ))}
           </div>
@@ -221,7 +223,7 @@ function ScheduleDetail({
         <Panel className="grid gap-3 p-4">
           <div className="flex items-center justify-between gap-3">
             <h3 className="text-sm font-semibold text-white">Last run result</h3>
-            <Badge tone={result?.error ? "red" : result?.invocation_id ? "green" : "slate"}>
+            <Badge tone={result?.error ? "red" : result?.execution_id ? "green" : "slate"}>
               {running ? "running" : resultStatus(result)}
             </Badge>
           </div>
@@ -231,11 +233,12 @@ function ScheduleDetail({
                 <strong className="text-sm text-red-200">{result.error}</strong>
                 <CodeBlock>{result.message ?? "Schedule run failed."}</CodeBlock>
               </>
-            ) : result.invocation_id ? (
+            ) : result.execution_id ? (
               <>
                 <div className="flex flex-wrap gap-3 text-sm font-medium text-emerald-300">
                   <span>{result.status}</span>
-                  <span>{result.invocation_id}</span>
+                  <span>{result.execution_id}</span>
+                  <span>attempt {result.attempt_number}: {result.attempt_id}</span>
                 </div>
                 <CodeBlock>{JSON.stringify(result.output ?? null, null, 2)}</CodeBlock>
               </>
@@ -271,7 +274,7 @@ function resultStatus(result?: RunResult) {
   if (result.error) {
     return "failed";
   }
-  if (result.invocation_id) {
+  if (result.execution_id) {
     return result.status ?? "done";
   }
   return "waiting";

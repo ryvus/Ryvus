@@ -135,8 +135,7 @@ mod tests {
     };
     use ryvus_execution::{ExecutionRecord, ExecutionResult, ExecutionTarget};
     use ryvus_protocol::{
-        ActionDefinition, ActionKind, ApiAction, InvocationRequest, InvocationResult,
-        InvocationStatus, RuntimeKind, PROTOCOL_VERSION,
+        ActionDefinition, ActionKind, ApiAction, InvocationRequest, InvocationResult, RuntimeKind,
     };
     use serde_json::json;
     use tower::ServiceExt;
@@ -271,13 +270,7 @@ mod tests {
 
             Ok(execution_record(
                 request,
-                InvocationResult {
-                    protocol_version: PROTOCOL_VERSION.to_string(),
-                    invocation_id: request.invocation_id.clone(),
-                    status: InvocationStatus::Success,
-                    output: Some(json!({ "ok": true })),
-                    error: None,
-                },
+                InvocationResult::success(request, json!({ "ok": true })),
             ))
         }
     }

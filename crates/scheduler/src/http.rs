@@ -6,7 +6,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use ryvus_protocol::{ActionDefinition, InvocationStatus};
+use ryvus_protocol::{ActionDefinition, AttemptId, ExecutionId, InvocationStatus};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -37,7 +37,9 @@ impl<E> Clone for SchedulerState<E> {
 
 #[derive(Debug, Serialize)]
 pub struct ScheduleRunResponse {
-    pub invocation_id: String,
+    pub execution_id: ExecutionId,
+    pub attempt_id: AttemptId,
+    pub attempt_number: u32,
     pub status: String,
     pub output: Option<Value>,
 }
@@ -107,7 +109,9 @@ where
     })?;
 
     Ok(Json(ScheduleRunResponse {
-        invocation_id: result.invocation_id,
+        execution_id: result.execution_id,
+        attempt_id: result.attempt_id,
+        attempt_number: result.attempt_number,
         status: status_label(&result.status).to_string(),
         output: result.output,
     }))
@@ -129,8 +133,8 @@ mod tests {
         http::{Method, Request, StatusCode},
     };
     use ryvus_protocol::{
-        ActionDefinition, ActionKind, InvocationRequest, InvocationResult, InvocationStatus,
-        RuntimeKind, ScheduleAction, PROTOCOL_VERSION,
+        ActionDefinition, ActionKind, InvocationRequest, InvocationResult, RuntimeKind,
+        ScheduleAction,
     };
     use serde_json::json;
     use tower::ServiceExt;
@@ -210,15 +214,12 @@ mod tests {
                 .expect("requests should lock")
                 .push(request.clone());
 
-            Ok(InvocationResult {
-                protocol_version: PROTOCOL_VERSION.to_string(),
-                invocation_id: request.invocation_id.clone(),
-                status: InvocationStatus::Success,
-                output: Some(json!({
+            Ok(InvocationResult::success(
+                request,
+                json!({
                     "expression": request.event["expression"],
-                })),
-                error: None,
-            })
+                }),
+            ))
         }
     }
 }

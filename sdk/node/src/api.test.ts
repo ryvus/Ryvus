@@ -41,13 +41,37 @@ test("runtime rejects a concurrent invocation", async () => {
   }
 });
 
-function request(invocationId: string): RequestInit {
+test("runtime rejects missing attempt identity", async () => {
+  const server = createRuntimeServer(async (request): Promise<InvocationResult> => success(request));
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert(address !== null && typeof address === "object");
+
+  try {
+    const invalid = JSON.parse(request("attempt_1").body as string) as Record<string, unknown>;
+    delete invalid.attempt_number;
+    const response = await fetch(`http://127.0.0.1:${address.port}/invoke`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(invalid),
+    });
+    assert.equal(response.status, 400);
+  } finally {
+    server.close();
+    await once(server, "close");
+  }
+});
+
+function request(attemptId: string): RequestInit {
   return {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      protocol_version: "ryvus.invoke.v1",
-      invocation_id: invocationId,
+      protocol_version: "ryvus.invoke.v2",
+      execution_id: "execution_1",
+      attempt_id: attemptId,
+      attempt_number: 1,
       event: {},
       context: { metadata: {} },
     }),
@@ -57,7 +81,9 @@ function request(invocationId: string): RequestInit {
 function success(request: InvocationRequest): InvocationResult {
   return {
     protocol_version: request.protocol_version,
-    invocation_id: request.invocation_id,
+    execution_id: request.execution_id,
+    attempt_id: request.attempt_id,
+    attempt_number: request.attempt_number,
     status: "success",
     output: {},
     error: null,

@@ -104,10 +104,14 @@ def create_runtime_server(
 def validate_invocation_request(request: Any) -> None:
     if not isinstance(request, dict):
         raise ValueError("request must be a JSON object")
-    if request.get("protocol_version") != "ryvus.invoke.v1":
+    if request.get("protocol_version") != "ryvus.invoke.v2":
         raise ValueError("unsupported protocol_version")
-    if not isinstance(request.get("invocation_id"), str) or not request["invocation_id"]:
-        raise ValueError("invocation_id is required")
+    if not isinstance(request.get("execution_id"), str) or not request["execution_id"]:
+        raise ValueError("execution_id is required")
+    if not isinstance(request.get("attempt_id"), str) or not request["attempt_id"]:
+        raise ValueError("attempt_id is required")
+    if not isinstance(request.get("attempt_number"), int) or request["attempt_number"] < 1:
+        raise ValueError("attempt_number must be a positive integer")
     if "event" not in request:
         raise ValueError("event is required")
     if "context" in request and not isinstance(request["context"], dict):
@@ -141,12 +145,16 @@ def handle_request(
     handler: Handler,
     event_factory,
 ) -> dict[str, Any]:
-    invocation_id = request["invocation_id"]
+    execution_id = request["execution_id"]
+    attempt_id = request["attempt_id"]
+    attempt_number = request["attempt_number"]
 
     event = event_factory(request.get("event") or {})
 
     context = Context(
-        invocation_id=invocation_id,
+        execution_id=execution_id,
+        attempt_id=attempt_id,
+        attempt_number=attempt_number,
         protocol_version=request["protocol_version"],
         metadata=_request_metadata(request),
     )
@@ -156,7 +164,9 @@ def handle_request(
 
         result = {
             "protocol_version": request["protocol_version"],
-            "invocation_id": invocation_id,
+            "execution_id": execution_id,
+            "attempt_id": attempt_id,
+            "attempt_number": attempt_number,
             "status": "success",
             "output": output,
             "error": None,
@@ -165,7 +175,9 @@ def handle_request(
     except Exception as exc:
         result = {
             "protocol_version": request["protocol_version"],
-            "invocation_id": invocation_id,
+            "execution_id": execution_id,
+            "attempt_id": attempt_id,
+            "attempt_number": attempt_number,
             "status": "failed",
             "output": None,
             "error": {

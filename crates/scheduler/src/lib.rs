@@ -377,8 +377,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use ryvus_protocol::{
-        ActionDefinition, ActionKind, InvocationRequest, InvocationResult, InvocationStatus,
-        RuntimeKind, ScheduleAction, PROTOCOL_VERSION,
+        ActionDefinition, ActionKind, InvocationRequest, InvocationResult, RuntimeKind,
+        ScheduleAction,
     };
     use serde_json::json;
 
@@ -600,13 +600,7 @@ mod tests {
                 .expect("requests should lock")
                 .push(request.clone());
 
-            Ok(InvocationResult {
-                protocol_version: PROTOCOL_VERSION.to_string(),
-                invocation_id: request.invocation_id.clone(),
-                status: InvocationStatus::Success,
-                output: Some(json!({ "ok": true })),
-                error: None,
-            })
+            Ok(InvocationResult::success(request, json!({ "ok": true })))
         }
     }
 }

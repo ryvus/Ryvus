@@ -1,6 +1,6 @@
 use ryvus_protocol::ActionDefinition;
 
-use ryvus_protocol::InvocationRequest;
+use ryvus_protocol::{AttemptId, ExecutionAttempt, ExecutionId, InvocationRequest};
 use std::{collections::HashMap, sync::Mutex};
 
 use crate::{
@@ -84,7 +84,13 @@ pub struct ExecutionService<RR, E, EP> {
     resolver: RR,
     executor: RecordingExecutor<E>,
     persistence: EP,
-    states: Mutex<HashMap<String, ExecutionState>>,
+    states: Mutex<HashMap<ExecutionId, ExecutionStatus>>,
+}
+
+#[derive(Debug, Clone)]
+struct ExecutionStatus {
+    state: ExecutionState,
+    active_attempt_id: Option<AttemptId>,
 }
 
 impl<RR, E, EP> ExecutionService<RR, E, EP>
@@ -108,35 +114,40 @@ where
         request: &InvocationRequest,
         policy: &ExecutionPolicy,
     ) -> ExecutionServiceResult<ExecutionRecord> {
-        self.set_state(&request.invocation_id, ExecutionState::Pending);
+        if request.attempt_number != 1 {
+            return Err(ExecutionServiceError::InvalidInitialAttempt {
+                attempt_number: request.attempt_number,
+            });
+        }
+
+        let execution_id = request.execution_id.clone();
+        self.set_state(&execution_id, ExecutionState::Pending);
         let target = match self.resolver.resolve(action) {
             Ok(target) => target,
             Err(error) => {
-                self.set_state(&request.invocation_id, ExecutionState::Failed);
+                self.set_state(&execution_id, ExecutionState::Failed);
                 return Err(error.into());
             }
         };
         let mut delay = policy.retry.initial_delay;
-        let mut last_record = None;
+        let mut attempt_request = request.clone();
 
-        for attempt in 1..=policy.retry.max_attempts {
-            if !self.start_attempt(&request.invocation_id) {
-                self.set_state(&request.invocation_id, ExecutionState::Cancelled);
-                return Err(ExecutorError::RuntimeCancelled {
-                    invocation_id: request.invocation_id.clone(),
-                }
-                .into());
+        loop {
+            let attempt = attempt_request.attempt();
+            if !self.start_attempt(&attempt) {
+                self.set_state(&execution_id, ExecutionState::Cancelled);
+                return Err(ExecutionServiceError::CancellationRequested { execution_id });
             }
             let record = match self.executor.invoke_recorded(
                 &target,
-                request,
+                &attempt_request,
                 &ExecutionOptions {
                     timeout: policy.timeout,
                 },
             ) {
                 Ok(record) => record,
                 Err(error) => {
-                    let state = if self.execution_state(&request.invocation_id)
+                    let state = if self.execution_state(&execution_id)
                         == Some(ExecutionState::CancellationRequested)
                         || matches!(error, ExecutorError::RuntimeCancelled { .. })
                     {
@@ -150,42 +161,43 @@ where
                     } else {
                         ExecutionState::Failed
                     };
-                    self.set_state(&request.invocation_id, state);
+                    self.finish_attempt(&attempt, state);
                     return Err(error.into());
                 }
             };
-            let failed =
-                record.result.invocation_result.status == ryvus_protocol::InvocationStatus::Failed;
 
             if let Err(error) = self.persistence.save_execution(&record) {
-                self.set_state(&request.invocation_id, ExecutionState::Failed);
+                self.finish_attempt(&attempt, ExecutionState::Failed);
                 return Err(error.into());
             }
 
-            if !failed {
-                self.set_state(&request.invocation_id, ExecutionState::Succeeded);
+            if self.execution_state(&execution_id) == Some(ExecutionState::CancellationRequested) {
+                self.finish_attempt(&attempt, ExecutionState::Cancelled);
+                return Err(ExecutorError::RuntimeCancelled { attempt }.into());
+            }
+
+            let result = &record.result.invocation_result;
+            if result.status == ryvus_protocol::InvocationStatus::Success {
+                self.finish_attempt(&attempt, ExecutionState::Succeeded);
                 return Ok(record);
             }
 
-            last_record = Some(record);
+            let retryable = result.error.as_ref().is_some_and(|error| error.retryable);
+            let attempts_remain = attempt.attempt_number < policy.retry.max_attempts;
+            if !retryable || !attempts_remain {
+                self.finish_attempt(&attempt, ExecutionState::Failed);
+                return Ok(record);
+            }
 
-            if attempt < policy.retry.max_attempts {
-                if self.execution_state(&request.invocation_id)
-                    == Some(ExecutionState::CancellationRequested)
-                {
-                    self.set_state(&request.invocation_id, ExecutionState::Cancelled);
-                    return Err(ExecutorError::RuntimeCancelled {
-                        invocation_id: request.invocation_id.clone(),
-                    }
-                    .into());
-                }
-                std::thread::sleep(delay);
-                delay = delay.mul_f64(policy.retry.backoff);
+            self.finish_attempt(&attempt, ExecutionState::Pending);
+            std::thread::sleep(delay);
+            delay = delay.mul_f64(policy.retry.backoff);
+            attempt_request = attempt_request.retry();
+
+            if attempt_request.attempt_number > policy.retry.max_attempts {
+                unreachable!("retry should only be created while attempts remain");
             }
         }
-
-        self.set_state(&request.invocation_id, ExecutionState::Failed);
-        Ok(last_record.expect("at least one execution attempt should run"))
     }
 
     pub fn execute_event(
@@ -198,57 +210,96 @@ where
         self.execute(action, &request, &policy)
     }
 
-    pub fn cancel(&self, invocation_id: &str) -> ExecutionServiceResult<bool> {
-        {
+    pub fn cancel(&self, execution_id: &ExecutionId) -> ExecutionServiceResult<bool> {
+        let active_attempt_id = {
             let mut states = self.states.lock().expect("execution states should lock");
-            match states.get(invocation_id).copied() {
-                Some(ExecutionState::Pending | ExecutionState::Running) => {
-                    states.insert(
-                        invocation_id.to_string(),
-                        ExecutionState::CancellationRequested,
-                    );
+            match states.get_mut(execution_id) {
+                Some(status)
+                    if matches!(
+                        status.state,
+                        ExecutionState::Pending | ExecutionState::Running
+                    ) =>
+                {
+                    status.state = ExecutionState::CancellationRequested;
+                    status.active_attempt_id.clone()
                 }
-                Some(ExecutionState::CancellationRequested | ExecutionState::Cancelled) => {
+                Some(status)
+                    if matches!(
+                        status.state,
+                        ExecutionState::CancellationRequested | ExecutionState::Cancelled
+                    ) =>
+                {
                     return Ok(true);
                 }
-                Some(
-                    ExecutionState::Succeeded | ExecutionState::Failed | ExecutionState::TimedOut,
-                )
-                | None => return Ok(false),
+                Some(status)
+                    if matches!(
+                        status.state,
+                        ExecutionState::Succeeded
+                            | ExecutionState::Failed
+                            | ExecutionState::TimedOut
+                    ) =>
+                {
+                    return Ok(false);
+                }
+                None => return Ok(false),
+                Some(_) => unreachable!("all execution states should be handled"),
             }
-        }
+        };
 
-        let _ = self.executor.cancel(invocation_id)?;
-        Ok(true)
+        match active_attempt_id {
+            Some(attempt_id) => self.executor.cancel(&attempt_id).map_err(Into::into),
+            None => Ok(true),
+        }
     }
 
-    pub fn execution_state(&self, invocation_id: &str) -> Option<ExecutionState> {
+    pub fn execution_state(&self, execution_id: &ExecutionId) -> Option<ExecutionState> {
         self.states
             .lock()
             .expect("execution states should lock")
-            .get(invocation_id)
-            .copied()
+            .get(execution_id)
+            .map(|status| status.state)
     }
 
     pub fn shutdown(&self, grace: std::time::Duration) -> ExecutionServiceResult<()> {
         self.executor.shutdown(grace).map_err(Into::into)
     }
 
-    fn set_state(&self, invocation_id: &str, state: ExecutionState) {
+    fn set_state(&self, execution_id: &ExecutionId, state: ExecutionState) {
         // ponytail: terminal states remain in memory for local v0; add bounded persistence when run history is introduced.
         self.states
             .lock()
             .expect("execution states should lock")
-            .insert(invocation_id.to_string(), state);
+            .entry(execution_id.clone())
+            .and_modify(|status| status.state = state)
+            .or_insert(ExecutionStatus {
+                state,
+                active_attempt_id: None,
+            });
     }
 
-    fn start_attempt(&self, invocation_id: &str) -> bool {
+    fn start_attempt(&self, attempt: &ExecutionAttempt) -> bool {
         let mut states = self.states.lock().expect("execution states should lock");
-        if states.get(invocation_id) == Some(&ExecutionState::CancellationRequested) {
+        let status = states
+            .get_mut(&attempt.execution_id)
+            .expect("execution state should exist before an attempt starts");
+        if status.state == ExecutionState::CancellationRequested {
             false
         } else {
-            states.insert(invocation_id.to_string(), ExecutionState::Running);
+            status.state = ExecutionState::Running;
+            status.active_attempt_id = Some(attempt.attempt_id.clone());
             true
+        }
+    }
+
+    fn finish_attempt(&self, attempt: &ExecutionAttempt, state: ExecutionState) {
+        let mut states = self.states.lock().expect("execution states should lock");
+        let status = states
+            .get_mut(&attempt.execution_id)
+            .expect("execution state should exist while an attempt finishes");
+
+        if status.active_attempt_id.as_ref() == Some(&attempt.attempt_id) {
+            status.state = state;
+            status.active_attempt_id = None;
         }
     }
 }
@@ -261,8 +312,8 @@ mod tests {
     };
 
     use ryvus_protocol::{
-        ActionDefinition, ActionKind, ApiAction, InvocationResult, InvocationStatus, RuntimeKind,
-        PROTOCOL_VERSION,
+        ActionDefinition, ActionKind, ApiAction, AttemptId, ExecutionAttempt, InvocationError,
+        InvocationResult, InvocationStatus, RuntimeKind,
     };
     use serde_json::json;
 
@@ -296,11 +347,11 @@ mod tests {
 
     #[test]
     fn retries_until_success() {
-        let service = ExecutionService::new(
-            StaticResolver,
-            FailsThenSucceeds::default(),
-            NoopPersistence,
-        );
+        let executor = FailsThenSucceeds::default();
+        let attempts = Arc::clone(&executor.attempts);
+        let persistence = RecordingPersistence::default();
+        let persisted_attempts = Arc::clone(&persistence.attempts);
+        let service = ExecutionService::new(StaticResolver, executor, persistence);
         let action = test_action();
         let request = InvocationRequest::new(json!({}));
         let policy = ExecutionPolicy {
@@ -319,9 +370,40 @@ mod tests {
             InvocationStatus::Success
         );
         assert_eq!(
-            service.execution_state(&request.invocation_id),
+            service.execution_state(&request.execution_id),
             Some(ExecutionState::Succeeded)
         );
+        let attempts = attempts.lock().unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].attempt_number, 1);
+        assert_eq!(attempts[1].attempt_number, 2);
+        assert_eq!(attempts[0].execution_id, attempts[1].execution_id);
+        assert_ne!(attempts[0].attempt_id, attempts[1].attempt_id);
+        assert_eq!(*attempts, *persisted_attempts.lock().unwrap());
+    }
+
+    #[test]
+    fn non_retryable_handler_failure_stops_after_one_attempt() {
+        let executor = NonRetryableFailure::default();
+        let attempts = Arc::clone(&executor.attempts);
+        let service = ExecutionService::new(StaticResolver, executor, NoopPersistence);
+        let request = InvocationRequest::new(json!({}));
+        let policy = ExecutionPolicy {
+            timeout: Duration::from_secs(3),
+            retry: RetryPolicy {
+                max_attempts: 3,
+                initial_delay: Duration::ZERO,
+                backoff: 1.0,
+            },
+        };
+
+        let record = service.execute(&test_action(), &request, &policy).unwrap();
+
+        assert_eq!(
+            record.result.invocation_result.status,
+            InvocationStatus::Failed
+        );
+        assert_eq!(attempts.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -342,7 +424,7 @@ mod tests {
             .execute(&action, &timeout_request, &policy)
             .is_err());
         assert_eq!(
-            timed_out.execution_state(&timeout_request.invocation_id),
+            timed_out.execution_state(&timeout_request.execution_id),
             Some(ExecutionState::TimedOut)
         );
 
@@ -354,7 +436,8 @@ mod tests {
             NoopPersistence,
         ));
         let cancel_request = InvocationRequest::new(json!({}));
-        let invocation_id = cancel_request.invocation_id.clone();
+        let execution_id = cancel_request.execution_id.clone();
+        let attempt_id = cancel_request.attempt_id.clone();
         let task_service = Arc::clone(&cancelled);
         let task =
             std::thread::spawn(move || task_service.execute(&action, &cancel_request, &policy));
@@ -365,12 +448,16 @@ mod tests {
         }
         drop(state);
 
-        assert!(cancelled.cancel(&invocation_id).unwrap());
-        assert!(cancelled.cancel(&invocation_id).unwrap());
+        assert!(cancelled.cancel(&execution_id).unwrap());
+        assert!(cancelled.cancel(&execution_id).unwrap());
         assert!(task.join().unwrap().is_err());
         assert_eq!(
-            cancelled.execution_state(&invocation_id),
+            cancelled.execution_state(&execution_id),
             Some(ExecutionState::Cancelled)
+        );
+        assert_eq!(
+            blocking_state.0.lock().unwrap().cancelled_attempt_id,
+            Some(attempt_id)
         );
     }
 
@@ -395,8 +482,23 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct RecordingPersistence {
+        attempts: Arc<Mutex<Vec<ExecutionAttempt>>>,
+    }
+
+    impl ExecutionPersistence for RecordingPersistence {
+        fn save_execution(
+            &self,
+            record: &ExecutionRecord,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.attempts.lock().unwrap().push(record.attempt.clone());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
     struct FailsThenSucceeds {
-        attempts: Mutex<u32>,
+        attempts: Arc<Mutex<Vec<ExecutionAttempt>>>,
     }
 
     impl Executor for FailsThenSucceeds {
@@ -407,21 +509,44 @@ mod tests {
             _options: &ExecutionOptions,
         ) -> crate::ExecutorResult<ExecutionResult> {
             let mut attempts = self.attempts.lock().unwrap();
-            *attempts += 1;
-            let status = if *attempts == 1 {
-                InvocationStatus::Failed
+            attempts.push(request.attempt());
+            let invocation_result = if attempts.len() == 1 {
+                InvocationResult::failed(
+                    request,
+                    InvocationError::new("retryable", "try again", true),
+                )
             } else {
-                InvocationStatus::Success
+                InvocationResult::success(request, json!({ "attempt": attempts.len() }))
             };
 
             Ok(ExecutionResult {
-                invocation_result: InvocationResult {
-                    protocol_version: PROTOCOL_VERSION.to_string(),
-                    invocation_id: request.invocation_id.clone(),
-                    status,
-                    output: Some(json!({ "attempt": *attempts })),
-                    error: None,
-                },
+                invocation_result,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration: Duration::from_millis(1),
+                exit_code: Some(0),
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct NonRetryableFailure {
+        attempts: Arc<Mutex<Vec<ExecutionAttempt>>>,
+    }
+
+    impl Executor for NonRetryableFailure {
+        fn invoke(
+            &self,
+            _target: &RuntimeTarget,
+            request: &InvocationRequest,
+            _options: &ExecutionOptions,
+        ) -> crate::ExecutorResult<ExecutionResult> {
+            self.attempts.lock().unwrap().push(request.attempt());
+            Ok(ExecutionResult {
+                invocation_result: InvocationResult::failed(
+                    request,
+                    InvocationError::new("invalid", "do not retry", false),
+                ),
                 stdout: String::new(),
                 stderr: String::new(),
                 duration: Duration::from_millis(1),
@@ -440,7 +565,7 @@ mod tests {
             _options: &ExecutionOptions,
         ) -> crate::ExecutorResult<ExecutionResult> {
             Err(ExecutorError::RuntimeTimedOut {
-                invocation_id: request.invocation_id.clone(),
+                attempt: request.attempt(),
             })
         }
     }
@@ -449,6 +574,7 @@ mod tests {
     struct BlockingExecutionState {
         started: bool,
         cancelled: bool,
+        cancelled_attempt_id: Option<AttemptId>,
     }
 
     #[derive(Default)]
@@ -471,14 +597,15 @@ mod tests {
                 state = changed.wait(state).unwrap();
             }
             Err(ExecutorError::RuntimeCancelled {
-                invocation_id: request.invocation_id.clone(),
+                attempt: request.attempt(),
             })
         }
 
-        fn cancel(&self, _invocation_id: &str) -> crate::ExecutorResult<bool> {
+        fn cancel(&self, attempt_id: &AttemptId) -> crate::ExecutorResult<bool> {
             let (lock, changed) = &*self.state;
             let mut state = lock.lock().unwrap();
             state.cancelled = true;
+            state.cancelled_attempt_id = Some(attempt_id.clone());
             changed.notify_all();
             Ok(true)
         }

@@ -12,6 +12,7 @@ use std::{
 };
 
 use crate::{ExecutorError, ExecutorResult, LocalProcessTarget, RuntimeTarget};
+use ryvus_protocol::{AttemptId, ExecutionAttempt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RuntimeLifecycle {
@@ -48,7 +49,7 @@ pub enum RuntimeDisposition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeHandle {
     pub runtime_id: String,
-    pub invocation_id: String,
+    pub attempt: ExecutionAttempt,
     pub endpoint: String,
     pub lifecycle: RuntimeLifecycle,
     managed: bool,
@@ -57,23 +58,23 @@ pub struct RuntimeHandle {
 impl RuntimeHandle {
     fn managed(
         runtime_id: impl Into<String>,
-        invocation_id: impl Into<String>,
+        attempt: ExecutionAttempt,
         endpoint: impl Into<String>,
         lifecycle: RuntimeLifecycle,
     ) -> Self {
         Self {
             runtime_id: runtime_id.into(),
-            invocation_id: invocation_id.into(),
+            attempt,
             endpoint: endpoint.into(),
             lifecycle,
             managed: true,
         }
     }
 
-    pub fn existing(invocation_id: impl Into<String>, endpoint: impl Into<String>) -> Self {
+    pub fn existing(attempt: ExecutionAttempt, endpoint: impl Into<String>) -> Self {
         Self {
             runtime_id: uuid::Uuid::new_v4().to_string(),
-            invocation_id: invocation_id.into(),
+            attempt,
             endpoint: endpoint.into(),
             lifecycle: RuntimeLifecycle::LongLived,
             managed: false,
@@ -108,7 +109,7 @@ pub trait RuntimeManager: Send + Sync {
     fn acquire(
         &self,
         target: &RuntimeTarget,
-        invocation_id: &str,
+        attempt: &ExecutionAttempt,
         lifecycle: RuntimeLifecycle,
         timeout: Duration,
     ) -> ExecutorResult<RuntimeHandle>;
@@ -119,7 +120,7 @@ pub trait RuntimeManager: Send + Sync {
         outcome: RuntimeOutcome,
     ) -> ExecutorResult<RuntimeRelease>;
 
-    fn cancel(&self, invocation_id: &str) -> ExecutorResult<bool>;
+    fn cancel(&self, attempt_id: &AttemptId) -> ExecutorResult<bool>;
 
     fn shutdown(&self, grace: Duration) -> ExecutorResult<()>;
 }
@@ -131,12 +132,11 @@ where
     fn acquire(
         &self,
         target: &RuntimeTarget,
-        invocation_id: &str,
+        attempt: &ExecutionAttempt,
         lifecycle: RuntimeLifecycle,
         timeout: Duration,
     ) -> ExecutorResult<RuntimeHandle> {
-        self.as_ref()
-            .acquire(target, invocation_id, lifecycle, timeout)
+        self.as_ref().acquire(target, attempt, lifecycle, timeout)
     }
 
     fn release(
@@ -147,8 +147,8 @@ where
         self.as_ref().release(handle, outcome)
     }
 
-    fn cancel(&self, invocation_id: &str) -> ExecutorResult<bool> {
-        self.as_ref().cancel(invocation_id)
+    fn cancel(&self, attempt_id: &AttemptId) -> ExecutorResult<bool> {
+        self.as_ref().cancel(attempt_id)
     }
 
     fn shutdown(&self, grace: Duration) -> ExecutorResult<()> {
@@ -207,7 +207,7 @@ struct RuntimeKey {
 
 enum RuntimeInstanceState {
     Idle { last_used: Instant },
-    Busy { invocation_id: String },
+    Busy { attempt_id: AttemptId },
     Cancelled,
 }
 
@@ -273,7 +273,7 @@ impl LocalRuntimeManager {
     fn acquire_long_lived(
         &self,
         target: &LocalProcessTarget,
-        invocation_id: &str,
+        attempt: &ExecutionAttempt,
         timeout: Duration,
     ) -> ExecutorResult<RuntimeHandle> {
         let key = runtime_key(target)?;
@@ -297,11 +297,11 @@ impl LocalRuntimeManager {
             }) {
                 if runtime.child.try_wait()?.is_none() {
                     runtime.state = RuntimeInstanceState::Busy {
-                        invocation_id: invocation_id.to_string(),
+                        attempt_id: attempt.attempt_id.clone(),
                     };
                     return Ok(RuntimeHandle::managed(
                         runtime_id,
-                        invocation_id,
+                        attempt.clone(),
                         &runtime.endpoint,
                         RuntimeLifecycle::LongLived,
                     ));
@@ -317,7 +317,7 @@ impl LocalRuntimeManager {
                 // ponytail: startup holds the pool lock; split per-key startup locks if measured startup contention matters.
                 let (runtime_id, runtime, handle) = start_local_runtime(
                     target,
-                    invocation_id,
+                    attempt,
                     RuntimeLifecycle::LongLived,
                     Some(key.clone()),
                     deadline.saturating_duration_since(Instant::now()),
@@ -328,7 +328,9 @@ impl LocalRuntimeManager {
 
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(ExecutorError::RuntimePoolExhausted);
+                return Err(ExecutorError::RuntimePoolExhausted {
+                    attempt: attempt.clone(),
+                });
             }
             let (next, wait) = self
                 .shared
@@ -337,7 +339,9 @@ impl LocalRuntimeManager {
                 .expect("runtime state should lock");
             state = next;
             if wait.timed_out() {
-                return Err(ExecutorError::RuntimePoolExhausted);
+                return Err(ExecutorError::RuntimePoolExhausted {
+                    attempt: attempt.clone(),
+                });
             }
         }
     }
@@ -347,13 +351,13 @@ impl RuntimeManager for LocalRuntimeManager {
     fn acquire(
         &self,
         target: &RuntimeTarget,
-        invocation_id: &str,
+        attempt: &ExecutionAttempt,
         lifecycle: RuntimeLifecycle,
         timeout: Duration,
     ) -> ExecutorResult<RuntimeHandle> {
         let RuntimeTarget::LocalProcess(target) = target else {
             if let RuntimeTarget::Http { endpoint } = target {
-                return Ok(RuntimeHandle::existing(invocation_id, endpoint));
+                return Ok(RuntimeHandle::existing(attempt.clone(), endpoint));
             }
             return Err(ExecutorError::UnsupportedRuntimeTarget {
                 target: format!("{target:?}"),
@@ -361,12 +365,12 @@ impl RuntimeManager for LocalRuntimeManager {
         };
 
         if lifecycle == RuntimeLifecycle::LongLived {
-            return self.acquire_long_lived(target, invocation_id, timeout);
+            return self.acquire_long_lived(target, attempt, timeout);
         }
 
         let (runtime_id, runtime, handle) = start_local_runtime(
             target,
-            invocation_id,
+            attempt,
             RuntimeLifecycle::PerInvocation,
             None,
             timeout,
@@ -478,14 +482,14 @@ impl RuntimeManager for LocalRuntimeManager {
         })
     }
 
-    fn cancel(&self, invocation_id: &str) -> ExecutorResult<bool> {
+    fn cancel(&self, attempt_id: &AttemptId) -> ExecutorResult<bool> {
         let mut state = self.shared.state.lock().expect("runtime state should lock");
         let Some(runtime) = state.instances.values_mut().find(|runtime| {
             matches!(
                 &runtime.state,
                 RuntimeInstanceState::Busy {
-                    invocation_id: active
-                } if active == invocation_id
+                    attempt_id: active
+                } if active == attempt_id
             )
         }) else {
             return Ok(false);
@@ -659,7 +663,7 @@ fn spawn_reaper(shared: Arc<SharedPool>, idle_timeout: Duration) -> JoinHandle<(
 
 fn start_local_runtime(
     target: &LocalProcessTarget,
-    invocation_id: &str,
+    attempt: &ExecutionAttempt,
     lifecycle: RuntimeLifecycle,
     key: Option<RuntimeKey>,
     timeout: Duration,
@@ -685,6 +689,7 @@ fn start_local_runtime(
     let mut child = command
         .spawn()
         .map_err(|io_error| ExecutorError::ProcessStartFailed {
+            attempt: attempt.clone(),
             command: target.command.clone(),
             io_error,
         })?;
@@ -696,6 +701,7 @@ fn start_local_runtime(
         if let Some(status) = child.try_wait()? {
             let (stdout, stderr) = join_output(stdout, stderr)?;
             return Err(ExecutorError::RuntimeStartupFailed {
+                attempt: attempt.clone(),
                 command: target.command.clone(),
                 exit_code: status.code(),
                 stdout,
@@ -709,6 +715,7 @@ fn start_local_runtime(
             let _ = child.wait();
             let (stdout, stderr) = join_output(stdout, stderr)?;
             return Err(ExecutorError::RuntimeReadinessTimedOut {
+                attempt: attempt.clone(),
                 endpoint,
                 timeout_ms: timeout.as_millis(),
                 stdout,
@@ -726,13 +733,13 @@ fn start_local_runtime(
     }
 
     let runtime_id = uuid::Uuid::new_v4().to_string();
-    let handle = RuntimeHandle::managed(&runtime_id, invocation_id, &endpoint, lifecycle);
+    let handle = RuntimeHandle::managed(&runtime_id, attempt.clone(), &endpoint, lifecycle);
     Ok((
         runtime_id,
         RuntimeInstance {
             key,
             state: RuntimeInstanceState::Busy {
-                invocation_id: invocation_id.to_string(),
+                attempt_id: attempt.attempt_id.clone(),
             },
             endpoint,
             child,
@@ -812,6 +819,7 @@ fn join_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryvus_protocol::ExecutionId;
 
     #[test]
     fn defaults_to_per_invocation() {
@@ -843,8 +851,8 @@ mod tests {
         let first = acquire(&manager, &target, "inv_1");
         let second = acquire(&manager, &target, "inv_2");
 
-        assert!(manager.cancel("inv_1").unwrap());
-        assert!(!manager.cancel("inv_1").unwrap());
+        assert!(manager.cancel(&first.attempt.attempt_id).unwrap());
+        assert!(!manager.cancel(&first.attempt.attempt_id).unwrap());
         let release = manager
             .release(first.clone(), RuntimeOutcome::InfrastructureFailure)
             .unwrap();
@@ -857,6 +865,22 @@ mod tests {
         manager
             .release(replacement, RuntimeOutcome::Success)
             .unwrap();
+    }
+
+    #[test]
+    fn stale_attempt_id_cannot_cancel_reassigned_runtime() {
+        let manager = LocalRuntimeManager::new();
+        let target = health_runtime_target();
+        let first = acquire(&manager, &target, "attempt_1");
+        manager
+            .release(first.clone(), RuntimeOutcome::Success)
+            .unwrap();
+
+        let second = acquire(&manager, &target, "attempt_2");
+        assert_eq!(second.runtime_id, first.runtime_id);
+        assert!(!manager.cancel(&first.attempt.attempt_id).unwrap());
+        assert!(runtime_is_idle(&second.endpoint));
+        manager.release(second, RuntimeOutcome::Success).unwrap();
     }
 
     #[test]
@@ -886,12 +910,12 @@ mod tests {
         let error = manager
             .acquire(
                 &target,
-                "inv_2",
+                &test_attempt("inv_2"),
                 RuntimeLifecycle::LongLived,
                 Duration::from_millis(25),
             )
             .unwrap_err();
-        assert!(matches!(error, ExecutorError::RuntimePoolExhausted));
+        assert!(matches!(error, ExecutorError::RuntimePoolExhausted { .. }));
         manager.release(first, RuntimeOutcome::Success).unwrap();
     }
 
@@ -988,7 +1012,7 @@ mod tests {
         let first = manager
             .acquire(
                 &target,
-                "inv_1",
+                &test_attempt("inv_1"),
                 RuntimeLifecycle::PerInvocation,
                 Duration::from_secs(2),
             )
@@ -998,7 +1022,7 @@ mod tests {
         let second = manager
             .acquire(
                 &target,
-                "inv_2",
+                &test_attempt("inv_2"),
                 RuntimeLifecycle::PerInvocation,
                 Duration::from_secs(2),
             )
@@ -1013,7 +1037,7 @@ mod tests {
             .acquire(
                 &RuntimeTarget::local_process("sh")
                     .args(["-c", "echo startup-out; echo startup-err >&2; exit 7"]),
-                "inv_1",
+                &test_attempt("inv_1"),
                 RuntimeLifecycle::PerInvocation,
                 Duration::from_secs(1),
             )
@@ -1025,16 +1049,24 @@ mod tests {
     fn acquire(
         manager: &LocalRuntimeManager,
         target: &RuntimeTarget,
-        invocation_id: &str,
+        attempt_id: &str,
     ) -> RuntimeHandle {
         manager
             .acquire(
                 target,
-                invocation_id,
+                &test_attempt(attempt_id),
                 RuntimeLifecycle::LongLived,
                 Duration::from_secs(2),
             )
             .unwrap()
+    }
+
+    fn test_attempt(attempt_id: &str) -> ExecutionAttempt {
+        ExecutionAttempt {
+            execution_id: ExecutionId::from("exec_1"),
+            attempt_id: AttemptId::from(attempt_id),
+            attempt_number: 1,
+        }
     }
 
     fn health_runtime_target() -> RuntimeTarget {

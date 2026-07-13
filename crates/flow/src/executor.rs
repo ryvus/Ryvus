@@ -5,8 +5,8 @@ use ryvus_execution::{
     RuntimeResolver,
 };
 use ryvus_protocol::{
-    ActionDefinition, InvocationContext, InvocationEvent, InvocationMessage, InvocationRequest,
-    InvocationStatus, LogLevel, PROTOCOL_VERSION,
+    ActionDefinition, ExecutionAttempt, ExecutionId, InvocationContext, InvocationEvent,
+    InvocationMessage, InvocationRequest, InvocationStatus, LogLevel,
 };
 use serde_json::{json, Value};
 
@@ -29,7 +29,7 @@ pub trait FlowStepExecutor: Send + Sync + 'static {
         policy: &ExecutionPolicy,
     ) -> FlowResult<ExecutionRecord>;
 
-    fn cancel_flow_step(&self, _invocation_id: &str) -> FlowResult<bool> {
+    fn cancel_flow_step(&self, _execution_id: &ExecutionId) -> FlowResult<bool> {
         Ok(false)
     }
 }
@@ -53,10 +53,10 @@ where
             })
     }
 
-    fn cancel_flow_step(&self, invocation_id: &str) -> FlowResult<bool> {
-        self.cancel(invocation_id)
+    fn cancel_flow_step(&self, execution_id: &ExecutionId) -> FlowResult<bool> {
+        self.cancel(execution_id)
             .map_err(|error| FlowError::ExecutionFailed {
-                action: invocation_id.to_string(),
+                action: execution_id.to_string(),
                 message: error.to_string(),
             })
     }
@@ -205,8 +205,8 @@ where
     }
 
     pub fn cancel_run(&self, id: &str) -> FlowResult<FlowExecution> {
-        if let Some(invocation_id) = self.store.active_invocation(id)? {
-            let _ = self.executor.cancel_flow_step(&invocation_id);
+        if let Some(execution_id) = self.store.active_execution(id)? {
+            let _ = self.executor.cancel_flow_step(&execution_id);
         }
 
         self.store.cancel(id)
@@ -371,11 +371,11 @@ where
                 message: error.to_string(),
             }
         })?;
-        store.set_active_invocation(run_id, Some(request.invocation_id.clone()))?;
+        store.set_active_execution(run_id, Some(request.execution_id.clone()))?;
         let record = match executor.execute_flow_step(action, &request, &policy) {
             Ok(record) => record,
             Err(_error) if store.is_cancelled(run_id)? => {
-                store.set_active_invocation(run_id, None)?;
+                store.set_active_execution(run_id, None)?;
                 store.push_step(
                     run_id,
                     FlowStepExecution {
@@ -383,7 +383,9 @@ where
                         action: current.action.clone(),
                         status: FlowStepStatus::Cancelled,
                         attempts: 1,
-                        invocation_id: Some(request.invocation_id),
+                        execution_id: Some(request.execution_id),
+                        attempt_id: Some(request.attempt_id),
+                        attempt_number: Some(request.attempt_number),
                         input: step_input,
                         output: Value::Null,
                         error: None,
@@ -394,7 +396,7 @@ where
             }
             Err(error) => return Err(error),
         };
-        store.set_active_invocation(run_id, None)?;
+        store.set_active_execution(run_id, None)?;
         if store.is_cancelled(run_id)? {
             store.push_step(
                 run_id,
@@ -403,7 +405,9 @@ where
                     action: current.action.clone(),
                     status: FlowStepStatus::Cancelled,
                     attempts: 1,
-                    invocation_id: Some(request.invocation_id),
+                    execution_id: Some(request.execution_id),
+                    attempt_id: Some(request.attempt_id),
+                    attempt_number: Some(request.attempt_number),
                     input: step_input,
                     output: Value::Null,
                     error: None,
@@ -427,8 +431,10 @@ where
                 key: current.key.clone(),
                 action: current.action.clone(),
                 status: step_status,
-                attempts: current.policy.retry.max_attempts,
-                invocation_id: Some(result.invocation_id.clone()),
+                attempts: result.attempt_number,
+                execution_id: Some(result.execution_id.clone()),
+                attempt_id: Some(result.attempt_id.clone()),
+                attempt_number: Some(result.attempt_number),
                 input: step_input.clone(),
                 output: output.clone(),
                 error: error.clone(),
@@ -492,11 +498,9 @@ fn flow_request(
     params: Value,
     config: Value,
 ) -> InvocationRequest {
-    InvocationRequest {
-        protocol_version: PROTOCOL_VERSION.to_string(),
-        invocation_id: uuid::Uuid::new_v4().to_string(),
-        event: input,
-        context: InvocationContext {
+    InvocationRequest::with_attempt(
+        input,
+        InvocationContext {
             metadata: json!({
                 "flow": {
                     "flow_key": flow_key,
@@ -507,7 +511,8 @@ fn flow_request(
                 "config": config,
             }),
         },
-    }
+        ExecutionAttempt::initial(),
+    )
 }
 
 fn flow_step_logs(record: &ExecutionRecord) -> Vec<FlowStepLog> {
@@ -519,11 +524,16 @@ fn flow_step_logs(record: &ExecutionRecord) -> Vec<FlowStepLog> {
         .filter_map(|message| match message {
             InvocationMessage::Event {
                 event: InvocationEvent::Log(log),
-            } if log.invocation_id == record.invocation_id => Some(FlowStepLog {
-                level: log_level_label(log.level).to_string(),
-                message: log.message,
-                fields: log.fields,
-            }),
+            } if log.execution_id == record.attempt.execution_id
+                && log.attempt_id == record.attempt.attempt_id
+                && log.attempt_number == record.attempt.attempt_number =>
+            {
+                Some(FlowStepLog {
+                    level: log_level_label(log.level).to_string(),
+                    message: log.message,
+                    fields: log.fields,
+                })
+            }
             _ => None,
         })
         .collect()
@@ -837,20 +847,16 @@ mod tests {
             if action.entrypoint == "charge" && request.event["invoice"] == "inv_1" {
                 return Ok(execution_record_with_stdout(
                     request,
-                    ryvus_protocol::InvocationResult {
-                        protocol_version: PROTOCOL_VERSION.to_string(),
-                        invocation_id: request.invocation_id.clone(),
-                        status: InvocationStatus::Success,
-                        output: Some(json!({ "status": "paid" })),
-                        error: None,
-                    },
+                    ryvus_protocol::InvocationResult::success(request, json!({ "status": "paid" })),
                     &format!(
                         "{}\n",
                         json!({
                             "type": "event",
                             "event": {
                                 "type": "log",
-                                "invocation_id": request.invocation_id,
+                                "execution_id": request.execution_id,
+                                "attempt_id": request.attempt_id,
+                                "attempt_number": request.attempt_number,
                                 "level": "info",
                                 "message": "charged invoice",
                                 "fields": {}
@@ -864,8 +870,10 @@ mod tests {
                 return Ok(execution_record(
                     request,
                     ryvus_protocol::InvocationResult {
-                        protocol_version: PROTOCOL_VERSION.to_string(),
-                        invocation_id: request.invocation_id.clone(),
+                        protocol_version: request.protocol_version.clone(),
+                        execution_id: request.execution_id.clone(),
+                        attempt_id: request.attempt_id.clone(),
+                        attempt_number: request.attempt_number,
                         status: InvocationStatus::Failed,
                         output: Some(json!({ "status": "declined" })),
                         error: Some(InvocationError::new(
@@ -884,7 +892,7 @@ mod tests {
                     return Ok(execution_record(
                         request,
                         ryvus_protocol::InvocationResult::failed(
-                            request.invocation_id.clone(),
+                            request,
                             InvocationError::new("failed", "step failed", false),
                         ),
                     ));
@@ -893,13 +901,7 @@ mod tests {
 
             Ok(execution_record(
                 request,
-                ryvus_protocol::InvocationResult {
-                    protocol_version: PROTOCOL_VERSION.to_string(),
-                    invocation_id: request.invocation_id.clone(),
-                    status: InvocationStatus::Success,
-                    output: Some(output),
-                    error: None,
-                },
+                ryvus_protocol::InvocationResult::success(request, output),
             ))
         }
     }
@@ -923,55 +925,37 @@ mod tests {
                 if *attempts == 1 {
                     return Ok(execution_record(
                         request,
-                        ryvus_protocol::InvocationResult {
-                            protocol_version: PROTOCOL_VERSION.to_string(),
-                            invocation_id: request.invocation_id.clone(),
-                            status: InvocationStatus::Failed,
-                            output: Some(json!({ "status": "declined" })),
-                            error: Some(InvocationError {
+                        ryvus_protocol::InvocationResult::failed(
+                            request,
+                            InvocationError {
                                 code: "payment_declined".to_string(),
                                 message: "payment was declined".to_string(),
                                 details: Value::Null,
                                 retryable: true,
-                            }),
-                        },
+                            },
+                        ),
                     ));
                 }
 
                 return Ok(execution_record(
                     request,
-                    ryvus_protocol::InvocationResult {
-                        protocol_version: PROTOCOL_VERSION.to_string(),
-                        invocation_id: request.invocation_id.clone(),
-                        status: InvocationStatus::Success,
-                        output: Some(json!({ "status": "paid" })),
-                        error: None,
-                    },
+                    ryvus_protocol::InvocationResult::success(request, json!({ "status": "paid" })),
                 ));
             }
 
             if action.entrypoint == "receipt" {
                 return Ok(execution_record(
                     request,
-                    ryvus_protocol::InvocationResult {
-                        protocol_version: PROTOCOL_VERSION.to_string(),
-                        invocation_id: request.invocation_id.clone(),
-                        status: InvocationStatus::Success,
-                        output: Some(json!({ "receipt_sent": true })),
-                        error: None,
-                    },
+                    ryvus_protocol::InvocationResult::success(
+                        request,
+                        json!({ "receipt_sent": true }),
+                    ),
                 ));
             }
 
             Ok(execution_record(
                 request,
-                ryvus_protocol::InvocationResult {
-                    protocol_version: PROTOCOL_VERSION.to_string(),
-                    invocation_id: request.invocation_id.clone(),
-                    status: InvocationStatus::Success,
-                    output: Some(json!({ "handled": true })),
-                    error: None,
-                },
+                ryvus_protocol::InvocationResult::success(request, json!({ "handled": true })),
             ))
         }
     }

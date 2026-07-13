@@ -7,6 +7,7 @@ use crate::{
     model::{FlowExecution, FlowExecutionStatus, FlowStepExecution},
     FlowError, FlowResult,
 };
+use ryvus_protocol::ExecutionId;
 
 pub trait FlowStateStore: Send + Sync + 'static {
     fn create(&self, execution: FlowExecution) -> FlowResult<()>;
@@ -14,8 +15,8 @@ pub trait FlowStateStore: Send + Sync + 'static {
     fn list(&self) -> FlowResult<Vec<FlowExecution>>;
     fn cancel(&self, id: &str) -> FlowResult<FlowExecution>;
     fn is_cancelled(&self, id: &str) -> FlowResult<bool>;
-    fn set_active_invocation(&self, id: &str, invocation_id: Option<String>) -> FlowResult<()>;
-    fn active_invocation(&self, id: &str) -> FlowResult<Option<String>>;
+    fn set_active_execution(&self, id: &str, execution_id: Option<ExecutionId>) -> FlowResult<()>;
+    fn active_execution(&self, id: &str) -> FlowResult<Option<ExecutionId>>;
     fn update_status(
         &self,
         id: &str,
@@ -29,7 +30,7 @@ pub trait FlowStateStore: Send + Sync + 'static {
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryFlowStateStore {
     executions: Arc<Mutex<HashMap<String, FlowExecution>>>,
-    active_invocations: Arc<Mutex<HashMap<String, String>>>,
+    active_executions: Arc<Mutex<HashMap<String, ExecutionId>>>,
 }
 
 impl FlowStateStore for InMemoryFlowStateStore {
@@ -86,7 +87,7 @@ impl FlowStateStore for InMemoryFlowStateStore {
         Ok(self.get(id)?.status == FlowExecutionStatus::Cancelled)
     }
 
-    fn set_active_invocation(&self, id: &str, invocation_id: Option<String>) -> FlowResult<()> {
+    fn set_active_execution(&self, id: &str, execution_id: Option<ExecutionId>) -> FlowResult<()> {
         if !self
             .executions
             .lock()
@@ -97,12 +98,12 @@ impl FlowStateStore for InMemoryFlowStateStore {
         }
 
         let mut active = self
-            .active_invocations
+            .active_executions
             .lock()
-            .expect("active invocations should lock");
+            .expect("active executions should lock");
 
-        if let Some(invocation_id) = invocation_id {
-            active.insert(id.to_string(), invocation_id);
+        if let Some(execution_id) = execution_id {
+            active.insert(id.to_string(), execution_id);
         } else {
             active.remove(id);
         }
@@ -110,7 +111,7 @@ impl FlowStateStore for InMemoryFlowStateStore {
         Ok(())
     }
 
-    fn active_invocation(&self, id: &str) -> FlowResult<Option<String>> {
+    fn active_execution(&self, id: &str) -> FlowResult<Option<ExecutionId>> {
         if !self
             .executions
             .lock()
@@ -121,9 +122,9 @@ impl FlowStateStore for InMemoryFlowStateStore {
         }
 
         Ok(self
-            .active_invocations
+            .active_executions
             .lock()
-            .expect("active invocations should lock")
+            .expect("active executions should lock")
             .get(id)
             .cloned())
     }
@@ -186,7 +187,9 @@ mod tests {
                     action: "billing/receive_invoice".to_string(),
                     status: FlowStepStatus::Succeeded,
                     attempts: 1,
-                    invocation_id: Some("invocation_1".to_string()),
+                    execution_id: Some(ExecutionId::from("execution_1")),
+                    attempt_id: Some(ryvus_protocol::AttemptId::from("attempt_1")),
+                    attempt_number: Some(1),
                     input: json!({ "invoice": "inv_1" }),
                     output: json!({ "received": true }),
                     error: None,

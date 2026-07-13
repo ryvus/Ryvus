@@ -16,7 +16,14 @@ impl FilesystemExecutionPersistence {
     }
 
     fn execution_dir(&self, record: &ExecutionRecord) -> PathBuf {
-        self.root.join("runs").join(&record.invocation_id)
+        self.root
+            .join("runs")
+            .join(record.attempt.execution_id.as_ref())
+            .join("attempts")
+            .join(format!(
+                "{}-{}",
+                record.attempt.attempt_number, record.attempt.attempt_id
+            ))
     }
 
     fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> PersistenceResult<()> {

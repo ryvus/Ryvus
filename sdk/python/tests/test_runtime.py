@@ -17,8 +17,10 @@ from ryvus.runtime import (
 
 def build_request():
     return {
-        "protocol_version": "ryvus.invoke.v1",
-        "invocation_id": "test-id",
+        "protocol_version": "ryvus.invoke.v2",
+        "execution_id": "execution-id",
+        "attempt_id": "attempt-id",
+        "attempt_number": 1,
         "event": {
             "body": {
                 "name": "Maikel",
@@ -55,7 +57,9 @@ def test_http_runtime_health_and_invoke():
         with urllib.request.urlopen(request) as response:
             result = json.load(response)
 
-        assert result["invocation_id"] == "test-id"
+        assert result["execution_id"] == "execution-id"
+        assert result["attempt_id"] == "attempt-id"
+        assert result["attempt_number"] == 1
         assert result["status"] == "success"
         assert result["output"] == {"message": "Hello Maikel"}
     finally:
@@ -144,6 +148,31 @@ def test_http_runtime_rejects_invalid_protocol():
         thread.join()
 
 
+def test_http_runtime_rejects_missing_attempt_identity():
+    server = create_runtime_server(lambda event: {}, event_from_api_request)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    request = build_request()
+    del request["attempt_id"]
+
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/invoke",
+                data=json.dumps(request).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        )
+        raise AssertionError("missing attempt identity should fail")
+    except urllib.error.HTTPError as error:
+        assert error.code == 400
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 def test_handler_receives_api_event():
     def handler(event):
         return {
@@ -161,14 +190,18 @@ def test_handler_receives_api_event():
 def test_handler_receives_context():
     def handler(event, context):
         return {
-            "invocation_id": context.invocation_id
+            "execution_id": context.execution_id,
+            "attempt_id": context.attempt_id,
+            "attempt_number": context.attempt_number,
         }
 
     result = result_for(handle_api_request(build_request(), handler))
 
     assert result["status"] == "success"
     assert result["output"] == {
-        "invocation_id": "test-id"
+        "execution_id": "execution-id",
+        "attempt_id": "attempt-id",
+        "attempt_number": 1,
     }
 
 

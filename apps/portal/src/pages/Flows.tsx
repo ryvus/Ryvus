@@ -22,7 +22,9 @@ type StepExecution = {
   input: unknown;
   output: unknown;
   error: string | null;
-  invocation_id: string | null;
+  execution_id: string | null;
+  attempt_id: string | null;
+  attempt_number: number | null;
   logs: FlowStepLog[];
 };
 
@@ -1036,7 +1038,9 @@ function toFlowExecution(execution: RawFlowExecution): FlowExecution {
       input: step.input ?? null,
       output: step.output ?? null,
       error: step.error ?? null,
-      invocation_id: step.invocation_id ?? null,
+      execution_id: step.execution_id ?? null,
+      attempt_id: step.attempt_id ?? null,
+      attempt_number: step.attempt_number ?? null,
       logs: step.logs ?? [],
     })),
   };
@@ -1096,7 +1100,9 @@ type RawFlowExecution = {
     key: string;
     action: string;
     status: string;
-    invocation_id?: string | null;
+    execution_id?: string | null;
+    attempt_id?: string | null;
+    attempt_number?: number | null;
     input?: unknown;
     output?: unknown;
     error?: string | null;
