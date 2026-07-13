@@ -1,120 +1,96 @@
 import assert from "node:assert/strict";
-import { once } from "node:events";
+import { spawn } from "node:child_process";
 import test from "node:test";
-import { createRuntimeServer } from "./api.js";
-import type { InvocationRequest, InvocationResult } from "./protocol.js";
+import type { InvocationRequest } from "./protocol.js";
 
-test("runtime rejects a concurrent invocation", async () => {
-  let release!: () => void;
-  const blocked = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  let started!: () => void;
-  const invocationStarted = new Promise<void>((resolve) => {
-    started = resolve;
-  });
-  const server = createRuntimeServer(async (request): Promise<InvocationResult> => {
-    started();
-    await blocked;
-    return success(request);
-  });
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const address = server.address();
-  assert(address !== null && typeof address === "object");
-  const endpoint = `http://127.0.0.1:${address.port}`;
-  const first = fetch(`${endpoint}/invoke`, request("inv_1"));
-
-  try {
-    await invocationStarted;
-    const health = await fetch(`${endpoint}/health`);
-    assert.deepEqual(await health.json(), { status: "ready", busy: true });
-
-    const second = await fetch(`${endpoint}/invoke`, request("inv_2"));
-    assert.equal(second.status, 409);
-    assert.equal((await second.json() as { code: string }).code, "RUNTIME_BUSY");
-  } finally {
-    release();
-    assert.equal((await first).status, 200);
-    server.close();
-    await once(server, "close");
-  }
-});
-
-test("runtime rejects missing attempt identity", async () => {
-  const server = createRuntimeServer(async (request): Promise<InvocationResult> => success(request));
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const address = server.address();
-  assert(address !== null && typeof address === "object");
-
-  try {
-    const invalid = JSON.parse(request("attempt_1").body as string) as Record<string, unknown>;
-    delete invalid.attempt_number;
-    const response = await fetch(`http://127.0.0.1:${address.port}/invoke`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(invalid),
+test("worker emits ready, structured logs, and a correlated result", async () => {
+  const frames = await invokeWorker(`
+    export default apiAction({
+      path: "/pets/:id",
+      handler: ({ path, query, body, context }) => {
+        console.log("handling", path.id);
+        return { path, query, body, attemptId: context.attemptId };
+      },
     });
-    assert.equal(response.status, 400);
-  } finally {
-    server.close();
-    await once(server, "close");
-  }
-});
+  `, request());
 
-test("runtime rejects v1 and v2 protocols", async () => {
-  const server = createRuntimeServer(async (request): Promise<InvocationResult> => success(request));
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const address = server.address();
-  assert(address !== null && typeof address === "object");
-
-  try {
-    for (const version of ["ryvus.invoke.v1", "ryvus.invoke.v2"]) {
-      const invalid = JSON.parse(request("attempt_1").body as string) as Record<string, unknown>;
-      invalid.protocol_version = version;
-      const response: Awaited<ReturnType<typeof fetch>> = await fetch(
-        `http://127.0.0.1:${address.port}/invoke`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(invalid),
-        },
-      );
-      assert.equal(response.status, 400);
-    }
-  } finally {
-    server.close();
-    await once(server, "close");
-  }
-});
-
-function request(attemptId: string): RequestInit {
-  return {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
+  assert.deepEqual(frames[0], { type: "ready" });
+  assert.deepEqual(frames[1], {
+    type: "event",
+    event: {
+      type: "log",
+      execution_id: "execution_1",
+      attempt_id: "attempt_1",
+      attempt_number: 1,
+      level: "info",
+      message: "handling pet_1",
+      fields: {},
+    },
+  });
+  assert.deepEqual(frames[2], {
+    type: "result",
+    result: {
       protocol_version: "ryvus.invoke.v3",
       execution_id: "execution_1",
-      attempt_id: attemptId,
+      attempt_id: "attempt_1",
       attempt_number: 1,
-      deadline_unix_ms: 4_102_444_800_000,
-      remaining_budget_ms: 3_000,
-      event: {},
-      context: { metadata: {} },
-    }),
-  };
+      status: "success",
+      output: {
+        path: { id: "pet_1" },
+        query: { count: 2 },
+        body: { name: "Milo" },
+        attemptId: "attempt_1",
+      },
+      error: null,
+    },
+  });
+});
+
+test("worker serializes handler exceptions and exits cleanly", async () => {
+  const frames = await invokeWorker(`
+    export default apiAction(() => { throw new Error("boom"); });
+  `, request());
+  const terminal = frames.at(-1) as { type: string; result: { status: string; error: { message: string } } };
+
+  assert.equal(terminal.type, "result");
+  assert.equal(terminal.result.status, "failed");
+  assert.equal(terminal.result.error.message, "boom");
+});
+
+async function invokeWorker(action: string, invocation: InvocationRequest): Promise<unknown[]> {
+  const apiUrl = new URL("./api.js", import.meta.url).href;
+  const source = `import { apiAction } from ${JSON.stringify(apiUrl)};\n${action}`;
+  const child = spawn(process.execPath, ["--input-type=module", "--eval", source], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+  child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+  child.stdin.end(`${JSON.stringify(invocation)}\n`);
+  const exitCode = await new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  assert.equal(exitCode, 0, stderr);
+  return stdout.trim().split("\n").map((line) => JSON.parse(line) as unknown);
 }
 
-function success(request: InvocationRequest): InvocationResult {
+function request(): InvocationRequest {
   return {
-    protocol_version: request.protocol_version,
-    execution_id: request.execution_id,
-    attempt_id: request.attempt_id,
-    attempt_number: request.attempt_number,
-    status: "success",
-    output: {},
-    error: null,
+    protocol_version: "ryvus.invoke.v3",
+    execution_id: "execution_1",
+    attempt_id: "attempt_1",
+    attempt_number: 1,
+    deadline_unix_ms: 4_102_444_800_000,
+    remaining_budget_ms: 3_000,
+    event: {
+      path_params: { id: "pet_1" },
+      query_params: { count: "2" },
+      body: { name: "Milo" },
+    },
+    context: { metadata: {} },
   };
 }

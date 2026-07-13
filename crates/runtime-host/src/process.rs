@@ -14,8 +14,6 @@ use tokio::{
 
 use crate::{InvocationWorker, InvocationWorkerFactory, StartedWorker, WorkerError};
 
-const WORKER_PROTOCOL: &str = "framed";
-
 #[derive(Debug, Clone)]
 pub struct ProcessWorkerConfig {
     pub command: String,
@@ -67,7 +65,6 @@ impl InvocationWorkerFactory for ProcessInvocationWorkerFactory {
         command
             .args(&self.config.args)
             .envs(&self.config.env)
-            .env("RYVUS_WORKER_PROTOCOL", WORKER_PROTOCOL)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

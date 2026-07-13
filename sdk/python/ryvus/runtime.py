@@ -2,11 +2,8 @@ import contextlib
 import io
 import json
 import logging
-import os
 import sys
-import threading
 import traceback
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
 from .context import Context
@@ -33,13 +30,7 @@ def run_flow(handler: Handler) -> None:
 
 
 def run_handler(handler: Handler, event_factory) -> None:
-    if os.environ.get("RYVUS_WORKER_PROTOCOL") == "framed":
-        run_framed_worker(handler, event_factory)
-        return
-
-    host = os.environ.get("RYVUS_RUNTIME_HOST", "127.0.0.1")
-    port = int(os.environ.get("RYVUS_RUNTIME_PORT", "8080"))
-    create_runtime_server(handler, event_factory, host, port).serve_forever()
+    run_framed_worker(handler, event_factory)
 
 
 def run_framed_worker(handler: Handler, event_factory) -> None:
@@ -116,73 +107,6 @@ def _write_frame(stream, frame: dict[str, Any]) -> None:
     json.dump(frame, stream, separators=(",", ":"))
     stream.write("\n")
     stream.flush()
-
-
-def create_runtime_server(
-    handler: Handler,
-    event_factory,
-    host: str = "127.0.0.1",
-    port: int = 0,
-) -> ThreadingHTTPServer:
-    invocation_lock = threading.Lock()
-
-    class RuntimeRequestHandler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            if self.path == "/health":
-                self._write_json(
-                    200,
-                    {"status": "ready", "busy": invocation_lock.locked()},
-                )
-            else:
-                self._write_json(404, {"error": "not_found"})
-
-        def do_POST(self) -> None:
-            if self.path != "/invoke":
-                self._write_json(404, {"error": "not_found"})
-                return
-
-            content_type = self.headers.get("Content-Type", "").split(";", 1)[0]
-            if content_type != "application/json":
-                self._write_json(415, {"error": "unsupported_media_type"})
-                return
-
-            try:
-                length = int(self.headers.get("Content-Length", "0"))
-                request = json.loads(self.rfile.read(length))
-                validate_invocation_request(request)
-            except (TypeError, ValueError, json.JSONDecodeError) as error:
-                self._write_json(400, {"error": "invalid_request", "message": str(error)})
-                return
-
-            if not invocation_lock.acquire(blocking=False):
-                self._write_json(
-                    409,
-                    {
-                        "code": "RUNTIME_BUSY",
-                        "message": "This runtime instance is already processing an invocation.",
-                    },
-                )
-                return
-
-            try:
-                result = handle_request(request, handler, event_factory)
-            finally:
-                invocation_lock.release()
-
-            self._write_json(200, result)
-
-        def _write_json(self, status: int, body: dict[str, Any]) -> None:
-            payload = json.dumps(body, separators=(",", ":")).encode()
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-
-        def log_message(self, format: str, *args: Any) -> None:
-            return
-
-    return ThreadingHTTPServer((host, port), RuntimeRequestHandler)
 
 
 def validate_invocation_request(request: Any) -> None:

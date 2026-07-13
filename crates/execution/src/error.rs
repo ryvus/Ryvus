@@ -23,13 +23,6 @@ pub enum ExecutorError {
         stderr: String,
     },
 
-    #[error("process failed to start: {attempt}, command={command}, error={io_error}")]
-    ProcessStartFailed {
-        attempt: ExecutionAttempt,
-        command: String,
-        io_error: std::io::Error,
-    },
-
     #[error("runtime source file not found for {runtime} action {action}: {path}")]
     RuntimeSourceMissing {
         runtime: String,
@@ -47,31 +40,16 @@ pub enum ExecutorError {
     #[error("invalid protocol version: expected={expected}, actual={actual}")]
     InvalidProtocolVersion { expected: String, actual: String },
 
-    #[error("process completed without emitting invocation result")]
-    MissingInvocationResult,
-
-    #[error("runtime lifecycle '{lifecycle}' is not supported")]
-    UnsupportedLifecycle { lifecycle: String },
-
     #[error("runtime target cannot be acquired by the local runtime manager: {target}")]
     UnsupportedRuntimeTarget { target: String },
 
-    #[error("runtime startup failed: {attempt}, command={command}, exit_code={exit_code:?}, stdout={stdout}, stderr={stderr}")]
-    RuntimeStartupFailed {
-        attempt: ExecutionAttempt,
-        command: String,
-        exit_code: Option<i32>,
-        stdout: String,
-        stderr: String,
-    },
-
-    #[error("runtime readiness timed out: {attempt}, endpoint={endpoint}, timeout_ms={timeout_ms}, stdout={stdout}, stderr={stderr}")]
+    #[error(
+        "runtime readiness timed out: {attempt}, endpoint={endpoint}, timeout_ms={timeout_ms}"
+    )]
     RuntimeReadinessTimedOut {
         attempt: ExecutionAttempt,
         endpoint: String,
         timeout_ms: u128,
-        stdout: String,
-        stderr: String,
     },
 
     #[error("runtime handle not found: {runtime_id}")]
@@ -103,9 +81,6 @@ pub enum ExecutorError {
 
     #[error("runtime is already processing an invocation")]
     RuntimeBusy,
-
-    #[error("runtime pool capacity was not available before the invocation deadline: {attempt}")]
-    RuntimePoolExhausted { attempt: ExecutionAttempt },
 
     #[error("runtime manager is shutting down")]
     RuntimeUnavailable,

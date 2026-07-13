@@ -1,8 +1,9 @@
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { inspect } from "node:util";
 import {
   createFailureResult,
   createInvocationContext,
   createSuccessResult,
+  type InvocationEvent,
   type InvocationContext,
   type InvocationRequest,
   type InvocationResult,
@@ -426,74 +427,31 @@ function coerceQuery(query: Record<string, string>): Record<string, JsonValue> {
   return output;
 }
 
+let workerStarted = false;
+const protocolWrite = process.stdout.write.bind(process.stdout);
+
 function startRuntime(
   invoke: (request: InvocationRequest) => Promise<InvocationResult>,
 ): void {
-  const server = createRuntimeServer(invoke);
-  const host = process.env.RYVUS_RUNTIME_HOST ?? "127.0.0.1";
-  const port = Number.parseInt(process.env.RYVUS_RUNTIME_PORT ?? "8080", 10);
-  server.listen(port, host);
+  if (workerStarted) {
+    return;
+  }
+  workerStarted = true;
+  writeFrame({ type: "ready" });
+  void runWorker(invoke);
 }
 
-export function createRuntimeServer(
+async function runWorker(
   invoke: (request: InvocationRequest) => Promise<InvocationResult>,
-): Server {
-  const state: { activeAttemptId: string | null } = {
-    activeAttemptId: null,
-  };
-  return createServer((request, response) => {
-    void handleRuntimeRequest(request, response, invoke, state);
-  });
-}
-
-async function handleRuntimeRequest(
-  request: IncomingMessage,
-  response: ServerResponse,
-  invoke: (request: InvocationRequest) => Promise<InvocationResult>,
-  state: { activeAttemptId: string | null },
 ): Promise<void> {
-  if (request.method === "GET" && request.url === "/health") {
-    writeJson(response, 200, {
-      status: "ready",
-      busy: state.activeAttemptId !== null,
-    });
-    return;
-  }
-  if (request.url !== "/invoke") {
-    writeJson(response, 404, { error: "not_found" });
-    return;
-  }
-  if (request.method !== "POST") {
-    writeJson(response, 405, { error: "method_not_allowed" });
-    return;
-  }
-  if (String(request.headers["content-type"] ?? "").split(";", 1)[0] !== "application/json") {
-    writeJson(response, 415, { error: "unsupported_media_type" });
-    return;
-  }
-
   try {
-    const invocation = JSON.parse(await readBody(request)) as InvocationRequest;
+    const invocation = JSON.parse(await readStdin()) as InvocationRequest;
     validateInvocationRequest(invocation);
-    if (state.activeAttemptId !== null) {
-      writeJson(response, 409, {
-        code: "RUNTIME_BUSY",
-        message: "This runtime instance is already processing an invocation.",
-      });
-      return;
-    }
-
-    state.activeAttemptId = invocation.attempt_id;
-    try {
-      writeJson(response, 200, await invoke(invocation));
-    } finally {
-      state.activeAttemptId = null;
-    }
+    captureWorkerLogging(invocation);
+    writeFrame({ type: "result", result: await invoke(invocation) });
   } catch (error) {
-    writeJson(response, 400, {
-      error: "invalid_request",
-      message: error instanceof Error ? error.message : String(error),
-    });
+    process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+    process.exitCode = 1;
   }
 }
 
@@ -524,21 +482,44 @@ function validateInvocationRequest(request: InvocationRequest): void {
   }
 }
 
-async function readBody(request: IncomingMessage): Promise<string> {
+async function readStdin(): Promise<string> {
   return await new Promise((resolve, reject) => {
     let body = "";
-    request.setEncoding("utf8");
-    request.on("data", (chunk: string) => { body += chunk; });
-    request.on("end", () => { resolve(body); });
-    request.on("error", reject);
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk: string) => { body += chunk; });
+    process.stdin.on("end", () => { resolve(body.trim()); });
+    process.stdin.on("error", reject);
   });
 }
 
-function writeJson(response: ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body);
-  response.writeHead(status, {
-    "content-type": "application/json",
-    "content-length": Buffer.byteLength(payload),
-  });
-  response.end(payload);
+type WorkerFrame =
+  | { type: "ready" }
+  | { type: "event"; event: InvocationEvent }
+  | { type: "result"; result: InvocationResult };
+
+function writeFrame(frame: WorkerFrame): void {
+  protocolWrite(`${JSON.stringify(frame)}\n`);
+}
+
+function captureWorkerLogging(request: InvocationRequest): void {
+  const emit = (level: InvocationEvent["level"], values: unknown[]): void => {
+    writeFrame({
+      type: "event",
+      event: {
+        type: "log",
+        execution_id: request.execution_id,
+        attempt_id: request.attempt_id,
+        attempt_number: request.attempt_number,
+        level,
+        message: values.map((value) => typeof value === "string" ? value : inspect(value)).join(" "),
+        fields: {},
+      },
+    });
+  };
+  console.debug = (...values: unknown[]) => { emit("debug", values); };
+  console.info = (...values: unknown[]) => { emit("info", values); };
+  console.log = (...values: unknown[]) => { emit("info", values); };
+  console.warn = (...values: unknown[]) => { emit("warn", values); };
+  console.error = (...values: unknown[]) => { emit("error", values); };
+  console.trace = (...values: unknown[]) => { emit("trace", values); };
 }

@@ -53,10 +53,7 @@ pub fn error_attempt(error: &ExecutionServiceError) -> Option<&ExecutionAttempt>
             ExecutorError::ProcessTimedOut { attempt, .. }
             | ExecutorError::RuntimeCancelled { attempt }
             | ExecutorError::RuntimeTimedOut { attempt }
-            | ExecutorError::ProcessStartFailed { attempt, .. }
-            | ExecutorError::RuntimeStartupFailed { attempt, .. }
-            | ExecutorError::RuntimeReadinessTimedOut { attempt, .. }
-            | ExecutorError::RuntimePoolExhausted { attempt },
+            | ExecutorError::RuntimeReadinessTimedOut { attempt, .. },
         ) => Some(attempt),
         _ => None,
     }
@@ -67,8 +64,7 @@ pub fn execution_error_status(error: &ExecutionServiceError) -> StatusCode {
         ExecutionServiceError::Executor(
             ExecutorError::ProcessTimedOut { .. }
             | ExecutorError::RuntimeReadinessTimedOut { .. }
-            | ExecutorError::RuntimeTimedOut { .. }
-            | ExecutorError::RuntimePoolExhausted { .. },
+            | ExecutorError::RuntimeTimedOut { .. },
         ) => StatusCode::GATEWAY_TIMEOUT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }

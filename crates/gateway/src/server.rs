@@ -4,7 +4,7 @@ use axum::Router;
 use ryvus_control::{ControlService, LocalControlConfig};
 use ryvus_execution::{
     ExecutionPersistence, ExecutionService, Executor, HttpExecutor, LocalRuntimeManager,
-    LocalRuntimeResolver, RuntimeLifecycle, RuntimeManager, RuntimeResolver,
+    LocalRuntimeResolver, RuntimeManager, RuntimeResolver,
 };
 use ryvus_persistence::ConsoleExecutionPersistence;
 use ryvus_protocol::{ActionDefinition, ActionKind};
@@ -84,19 +84,11 @@ pub fn build_app_with_execution_service(
 }
 
 pub fn build_execution_service(project_root: PathBuf) -> Arc<GatewayExecutionService> {
-    build_execution_service_with_lifecycle(project_root, RuntimeLifecycle::PerInvocation)
-}
-
-pub fn build_execution_service_with_lifecycle(
-    project_root: PathBuf,
-    lifecycle: RuntimeLifecycle,
-) -> Arc<GatewayExecutionService> {
     Arc::new(ExecutionService::new(
         Arc::new(LocalRuntimeResolver::with_project_root(project_root)) as Arc<dyn RuntimeResolver>,
-        Arc::new(
-            HttpExecutor::new(Arc::new(LocalRuntimeManager::new()) as Arc<dyn RuntimeManager>)
-                .with_lifecycle(lifecycle),
-        ) as Arc<dyn Executor>,
+        Arc::new(HttpExecutor::new(
+            Arc::new(LocalRuntimeManager::new()) as Arc<dyn RuntimeManager>
+        )) as Arc<dyn Executor>,
         Arc::new(ConsoleExecutionPersistence) as Arc<dyn ExecutionPersistence>,
     ))
 }

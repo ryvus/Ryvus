@@ -1364,12 +1364,15 @@ dependencies = [
 name = "ryvus-execution"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "mockall",
  "reqwest",
  "ryvus-protocol",
+ "ryvus-runtime-host",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tokio",
  "tracing",
  "uuid",
 ]

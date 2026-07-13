@@ -4,26 +4,17 @@ use ryvus_protocol::{AttemptId, InvocationRequest, InvocationResult, PROTOCOL_VE
 
 use crate::{
     refresh_transport_budget, ExecutionOptions, ExecutionResult, Executor, ExecutorError,
-    ExecutorResult, RuntimeDisposition, RuntimeHandle, RuntimeLifecycle, RuntimeManager,
-    RuntimeOutcome, RuntimeTarget,
+    ExecutorResult, RuntimeDisposition, RuntimeHandle, RuntimeManager, RuntimeOutcome,
+    RuntimeTarget,
 };
 
 pub struct HttpExecutor<M> {
     manager: M,
-    lifecycle: RuntimeLifecycle,
 }
 
 impl<M> HttpExecutor<M> {
     pub fn new(manager: M) -> Self {
-        Self {
-            manager,
-            lifecycle: RuntimeLifecycle::PerInvocation,
-        }
-    }
-
-    pub fn with_lifecycle(mut self, lifecycle: RuntimeLifecycle) -> Self {
-        self.lifecycle = lifecycle;
-        self
+        Self { manager }
     }
 }
 
@@ -45,9 +36,9 @@ where
             });
         }
 
-        let handle =
-            self.manager
-                .acquire(target, &request.attempt(), self.lifecycle, options.timeout)?;
+        let handle = self
+            .manager
+            .acquire(target, &request.attempt(), options.timeout)?;
         let remaining = options.timeout.saturating_sub(started.elapsed());
         let invocation = self.invoke_acquired(&handle, request, remaining);
         let runtime_outcome = match &invocation {
@@ -55,7 +46,9 @@ where
                 RuntimeOutcome::HandlerFailure
             }
             Ok(_) => RuntimeOutcome::Success,
-            Err(ExecutorError::ProcessTimedOut { .. }) => RuntimeOutcome::TimedOut,
+            Err(ExecutorError::ProcessTimedOut { .. } | ExecutorError::RuntimeTimedOut { .. }) => {
+                RuntimeOutcome::TimedOut
+            }
             Err(_) => RuntimeOutcome::InfrastructureFailure,
         };
         let release = self.manager.release(handle, runtime_outcome);
@@ -140,7 +133,7 @@ where
                 .map_err(|error| {
                     if error.is_timeout() {
                         ExecutorError::ProcessTimedOut {
-                            attempt: timeout_attempt,
+                            attempt: timeout_attempt.clone(),
                             command: endpoint,
                             timeout_ms: timeout.as_millis(),
                         }
@@ -152,6 +145,11 @@ where
             let body = response.text()?;
             if status.as_u16() == 409 {
                 return Err(ExecutorError::RuntimeBusy);
+            }
+            if status.as_u16() == 408 || status.as_u16() == 504 {
+                return Err(ExecutorError::RuntimeTimedOut {
+                    attempt: timeout_attempt,
+                });
             }
             if !status.is_success() {
                 return Err(ExecutorError::HttpStatus {
@@ -267,11 +265,9 @@ mod tests {
             thread::sleep(Duration::from_millis(200));
         });
         let mut manager = MockRuntimeManager::new();
-        manager
-            .expect_acquire()
-            .return_once(move |_, attempt, _, _| {
-                Ok(RuntimeHandle::existing(attempt.clone(), endpoint))
-            });
+        manager.expect_acquire().return_once(move |_, attempt, _| {
+            Ok(RuntimeHandle::existing(attempt.clone(), endpoint))
+        });
         manager
             .expect_release()
             .withf(|_, outcome| *outcome == RuntimeOutcome::TimedOut)
@@ -305,7 +301,7 @@ mod tests {
         manager
             .expect_acquire()
             .times(1)
-            .returning(move |_, attempt, _, _| {
+            .returning(move |_, attempt, _| {
                 Ok(RuntimeHandle::existing(attempt.clone(), endpoint.clone()))
             });
         manager
@@ -315,7 +311,7 @@ mod tests {
             .returning(|_, _| {
                 Ok(RuntimeRelease {
                     exit: RuntimeExit::default(),
-                    disposition: RuntimeDisposition::Reusable,
+                    disposition: RuntimeDisposition::Unmanaged,
                 })
             });
         HttpExecutor::new(manager)

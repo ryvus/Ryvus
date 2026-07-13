@@ -1,7 +1,6 @@
 mod support;
 
 use axum::http::{Method, StatusCode};
-use ryvus_execution::RuntimeLifecycle;
 use ryvus_gateway::server;
 use serde_json::json;
 
@@ -25,80 +24,6 @@ def hello(event, context):
 
     assert_eq!(response.status, StatusCode::OK, "{}", response.raw_body);
     assert_eq!(response.body, json!({"message": "Hello from Ryvus"}));
-}
-
-#[tokio::test]
-async fn long_lived_runtime_preserves_action_process_state() {
-    let project = TestProject::new("long-lived-state");
-    project.add_action(
-        "counter.py",
-        r#"
-count = 0
-
-@api_action(method="GET", path="/counter")
-def counter():
-    global count
-    count += 1
-    return {"count": count}
-"#,
-    );
-    project.write_manifest(&[action("GET", "/counter", "src/counter.py", "counter")]);
-    let config = project.config();
-    let execution_service = server::build_execution_service_with_lifecycle(
-        config.project_root.clone(),
-        RuntimeLifecycle::LongLived,
-    );
-    let app = server::build_app_with_execution_service(&config, execution_service)
-        .expect("gateway app should build");
-
-    let first =
-        raw_request_with_headers_on_app(app.clone(), Method::GET, "/counter", "", &[]).await;
-    let second = raw_request_with_headers_on_app(app, Method::GET, "/counter", "", &[]).await;
-
-    assert_eq!(first.status, StatusCode::OK, "{}", first.raw_body);
-    assert_eq!(second.status, StatusCode::OK, "{}", second.raw_body);
-    assert_eq!(first.body, json!({"count": 1}));
-    assert_eq!(second.body, json!({"count": 2}));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn concurrent_long_lived_invocations_use_different_runtime_processes() {
-    let project = TestProject::new("long-lived-concurrency");
-    project.add_action(
-        "process.py",
-        r#"
-import os
-import time
-
-@api_action(method="GET", path="/process")
-def process():
-    time.sleep(0.2)
-    return {"pid": os.getpid()}
-"#,
-    );
-    project.write_manifest(&[action("GET", "/process", "src/process.py", "process")]);
-    let config = project.config();
-    let execution_service = server::build_execution_service_with_lifecycle(
-        config.project_root.clone(),
-        RuntimeLifecycle::LongLived,
-    );
-    let app = server::build_app_with_execution_service(&config, execution_service)
-        .expect("gateway app should build");
-    let first_app = app.clone();
-
-    let first = tokio::spawn(async move {
-        raw_request_with_headers_on_app(first_app, Method::GET, "/process", "", &[]).await
-    });
-    let second = tokio::spawn(async move {
-        raw_request_with_headers_on_app(app, Method::GET, "/process", "", &[]).await
-    });
-    let (first, second) = tokio::join!(first, second);
-    let first = first.unwrap();
-    let second = second.unwrap();
-
-    assert_eq!(first.status, StatusCode::OK, "{}", first.raw_body);
-    assert_eq!(second.status, StatusCode::OK, "{}", second.raw_body);
-    assert_ne!(first.body["pid"], second.body["pid"]);
 }
 
 #[tokio::test]

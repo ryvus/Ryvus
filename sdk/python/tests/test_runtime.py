@@ -2,16 +2,11 @@ import json
 import os
 import subprocess
 import sys
-import threading
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 from ryvus.discover import discover_actions
 from ryvus.events import ApiEvent, FlowEvent
 from ryvus.runtime import (
-    create_runtime_server,
-    event_from_api_request,
     event_from_flow_request,
     handle_api_request,
     handle_request,
@@ -39,147 +34,6 @@ def result_for(result):
     return result
 
 
-def test_http_runtime_health_and_invoke():
-    server = create_runtime_server(
-        lambda event: {"message": f"Hello {event.body['name']}"},
-        event_from_api_request,
-    )
-    thread = threading.Thread(target=server.serve_forever)
-    thread.start()
-    endpoint = f"http://127.0.0.1:{server.server_port}"
-
-    try:
-        with urllib.request.urlopen(f"{endpoint}/health") as response:
-            assert response.status == 200
-            assert json.load(response) == {"status": "ready", "busy": False}
-
-        request = urllib.request.Request(
-            f"{endpoint}/invoke",
-            data=json.dumps(build_request()).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(request) as response:
-            result = json.load(response)
-
-        assert result["execution_id"] == "execution-id"
-        assert result["attempt_id"] == "attempt-id"
-        assert result["attempt_number"] == 1
-        assert result["status"] == "success"
-        assert result["output"] == {"message": "Hello Maikel"}
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join()
-
-
-def test_http_runtime_rejects_concurrent_invocation():
-    started = threading.Event()
-    release = threading.Event()
-
-    def handler(event):
-        started.set()
-        release.wait(timeout=2)
-        return {"ok": True}
-
-    server = create_runtime_server(handler, event_from_api_request)
-    server_thread = threading.Thread(target=server.serve_forever)
-    server_thread.start()
-    endpoint = f"http://127.0.0.1:{server.server_port}"
-    first_result = {}
-
-    def invoke_first():
-        request = urllib.request.Request(
-            f"{endpoint}/invoke",
-            data=json.dumps(build_request()).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(request) as response:
-            first_result.update(json.load(response))
-
-    first_thread = threading.Thread(target=invoke_first)
-    first_thread.start()
-
-    try:
-        assert started.wait(timeout=1)
-        with urllib.request.urlopen(f"{endpoint}/health") as response:
-            assert json.load(response)["busy"] is True
-
-        second = urllib.request.Request(
-            f"{endpoint}/invoke",
-            data=json.dumps(build_request()).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            urllib.request.urlopen(second)
-            raise AssertionError("concurrent invocation should fail")
-        except urllib.error.HTTPError as error:
-            assert error.code == 409
-            assert json.load(error)["code"] == "RUNTIME_BUSY"
-    finally:
-        release.set()
-        first_thread.join()
-        server.shutdown()
-        server.server_close()
-        server_thread.join()
-
-    assert first_result["status"] == "success"
-
-
-def test_http_runtime_rejects_v1_and_v2_protocols():
-    server = create_runtime_server(lambda event: {}, event_from_api_request)
-    thread = threading.Thread(target=server.serve_forever)
-    thread.start()
-
-    try:
-        for version in ("ryvus.invoke.v1", "ryvus.invoke.v2"):
-            request = build_request()
-            request["protocol_version"] = version
-            try:
-                urllib.request.urlopen(
-                    urllib.request.Request(
-                        f"http://127.0.0.1:{server.server_port}/invoke",
-                        data=json.dumps(request).encode(),
-                        headers={"Content-Type": "application/json"},
-                        method="POST",
-                    )
-                )
-                raise AssertionError("old protocol should fail")
-            except urllib.error.HTTPError as error:
-                assert error.code == 400
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join()
-
-
-def test_http_runtime_rejects_missing_attempt_identity():
-    server = create_runtime_server(lambda event: {}, event_from_api_request)
-    thread = threading.Thread(target=server.serve_forever)
-    thread.start()
-    request = build_request()
-    del request["attempt_id"]
-
-    try:
-        urllib.request.urlopen(
-            urllib.request.Request(
-                f"http://127.0.0.1:{server.server_port}/invoke",
-                data=json.dumps(request).encode(),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-        )
-        raise AssertionError("missing attempt identity should fail")
-    except urllib.error.HTTPError as error:
-        assert error.code == 400
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join()
-
-
 def test_framed_worker_emits_ready_logs_and_result(tmp_path):
     source = tmp_path / "action.py"
     source.write_text(
@@ -195,7 +49,6 @@ def handler(context):
 """
     )
     env = os.environ.copy()
-    env["RYVUS_WORKER_PROTOCOL"] = "framed"
     env["RYVUS_ENTRYPOINT"] = "handler"
     env["PYTHONPATH"] = os.pathsep.join(
         filter(None, [str(Path(__file__).parents[1]), env.get("PYTHONPATH")])
