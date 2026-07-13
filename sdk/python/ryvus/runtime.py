@@ -1,10 +1,8 @@
-import contextlib
-import inspect
-import io
 import json
-import logging
-import sys
+import os
+import threading
 import traceback
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
 from .context import Context
@@ -12,29 +10,6 @@ from .events import ApiEvent, AuthorizerEvent, FlowEvent, ScheduleEvent
 from .resolver import resolve_handler_args
 
 Handler = Callable[..., dict[str, Any]]
-
-
-class _InvocationLogHandler(logging.Handler):
-    def __init__(self, invocation_id: str) -> None:
-        super().__init__()
-        self.invocation_id = invocation_id
-        self.messages: list[dict[str, Any]] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.messages.append(
-            {
-                "type": "event",
-                "event": {
-                    "type": "log",
-                    "invocation_id": self.invocation_id,
-                    "level": _map_python_log_level(record.levelno),
-                    "message": record.getMessage(),
-                    "fields": {
-                        "logger": record.name,
-                    },
-                },
-            }
-        )
 
 
 def run_api(handler: Handler) -> None:
@@ -54,47 +29,110 @@ def run_flow(handler: Handler) -> None:
 
 
 def run_handler(handler: Handler, event_factory) -> None:
-    protocol_stdout = sys.stdout
-    captured_stdout = io.StringIO()
+    host = os.environ.get("RYVUS_RUNTIME_HOST", "127.0.0.1")
+    port = int(os.environ.get("RYVUS_RUNTIME_PORT", "8080"))
+    create_runtime_server(handler, event_factory, host, port).serve_forever()
 
-    with contextlib.redirect_stdout(captured_stdout):
-        request = json.load(sys.stdin)
-        messages = handle_request(
-            request=request,
-            handler=handler,
-            event_factory=event_factory,
-            captured_stdout=captured_stdout,
-        )
 
-    for message in messages:
-        json.dump(message, protocol_stdout)
-        protocol_stdout.write("\n")
-        protocol_stdout.flush()
+def create_runtime_server(
+    handler: Handler,
+    event_factory,
+    host: str = "127.0.0.1",
+    port: int = 0,
+) -> ThreadingHTTPServer:
+    invocation_lock = threading.Lock()
+
+    class RuntimeRequestHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path == "/health":
+                self._write_json(
+                    200,
+                    {"status": "ready", "busy": invocation_lock.locked()},
+                )
+            else:
+                self._write_json(404, {"error": "not_found"})
+
+        def do_POST(self) -> None:
+            if self.path != "/invoke":
+                self._write_json(404, {"error": "not_found"})
+                return
+
+            content_type = self.headers.get("Content-Type", "").split(";", 1)[0]
+            if content_type != "application/json":
+                self._write_json(415, {"error": "unsupported_media_type"})
+                return
+
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                request = json.loads(self.rfile.read(length))
+                validate_invocation_request(request)
+            except (TypeError, ValueError, json.JSONDecodeError) as error:
+                self._write_json(400, {"error": "invalid_request", "message": str(error)})
+                return
+
+            if not invocation_lock.acquire(blocking=False):
+                self._write_json(
+                    409,
+                    {
+                        "code": "RUNTIME_BUSY",
+                        "message": "This runtime instance is already processing an invocation.",
+                    },
+                )
+                return
+
+            try:
+                result = handle_request(request, handler, event_factory)
+            finally:
+                invocation_lock.release()
+
+            self._write_json(200, result)
+
+        def _write_json(self, status: int, body: dict[str, Any]) -> None:
+            payload = json.dumps(body, separators=(",", ":")).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+    return ThreadingHTTPServer((host, port), RuntimeRequestHandler)
+
+
+def validate_invocation_request(request: Any) -> None:
+    if not isinstance(request, dict):
+        raise ValueError("request must be a JSON object")
+    if request.get("protocol_version") != "ryvus.invoke.v1":
+        raise ValueError("unsupported protocol_version")
+    if not isinstance(request.get("invocation_id"), str) or not request["invocation_id"]:
+        raise ValueError("invocation_id is required")
+    if "event" not in request:
+        raise ValueError("event is required")
+    if "context" in request and not isinstance(request["context"], dict):
+        raise ValueError("context must be an object")
 
 
 def handle_api_request(
     request: dict[str, Any],
     handler: Handler,
-    captured_stdout: io.StringIO | None = None,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     return handle_request(
         request=request,
         handler=handler,
         event_factory=event_from_api_request,
-        captured_stdout=captured_stdout,
     )
 
 
 def handle_authorizer_request(
     request: dict[str, Any],
     handler: Handler,
-    captured_stdout: io.StringIO | None = None,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     return handle_request(
         request=request,
         handler=handler,
         event_factory=event_from_authorizer_request,
-        captured_stdout=captured_stdout,
     )
 
 
@@ -102,16 +140,8 @@ def handle_request(
     request: dict[str, Any],
     handler: Handler,
     event_factory,
-    captured_stdout: io.StringIO | None = None,
-) -> list[dict[str, Any]]:
-    captured_stdout = captured_stdout or io.StringIO()
-
+) -> dict[str, Any]:
     invocation_id = request["invocation_id"]
-
-    log_handler = _InvocationLogHandler(invocation_id)
-
-    root_logger = logging.getLogger()
-    root_logger.addHandler(log_handler)
 
     event = event_factory(request.get("event") or {})
 
@@ -148,40 +178,7 @@ def handle_request(
             },
         }
 
-    finally:
-        root_logger.removeHandler(log_handler)
-
-    messages: list[dict[str, Any]] = []
-
-    logs = captured_stdout.getvalue().strip()
-
-    if logs:
-        for line in logs.splitlines():
-            messages.append(
-                {
-                    "type": "event",
-                    "event": {
-                        "type": "log",
-                        "invocation_id": invocation_id,
-                        "level": "info",
-                        "message": line,
-                        "fields": {
-                            "source": "stdout",
-                        },
-                    },
-                }
-            )
-
-    messages.extend(log_handler.messages)
-
-    messages.append(
-        {
-            "type": "result",
-            "result": result,
-        }
-    )
-
-    return messages
+    return result
 
 
 def _call_handler(
@@ -232,18 +229,6 @@ def _request_metadata(request: dict[str, Any]) -> dict[str, Any]:
 
     return request.get("metadata") or {}
 
-
-def _map_python_log_level(level: int) -> str:
-    if level <= logging.DEBUG:
-        return "debug"
-
-    if level <= logging.INFO:
-        return "info"
-
-    if level <= logging.WARNING:
-        return "warn"
-
-    return "error"
 
 def _serialize_output(value: Any) -> Any:
     if hasattr(value, "model_dump"):

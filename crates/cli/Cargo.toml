@@ -11,6 +11,7 @@ clap = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 ryvus-protocol = { workspace = true }
+ryvus-execution = { workspace = true }
 ryvus-gateway = { workspace = true }
 ryvus-control = { workspace = true }
 ryvus-action-catalog = { workspace = true }

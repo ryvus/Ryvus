@@ -6,6 +6,18 @@ use std::{
 use ryvus_protocol::{InvocationRequest, InvocationResult};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionState {
+    Pending,
+    Running,
+    CancellationRequested,
+    Succeeded,
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionResult {
     pub invocation_result: InvocationResult,

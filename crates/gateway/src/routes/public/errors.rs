@@ -46,9 +46,12 @@ pub fn invocation_error(
 
 pub fn execution_error_status(error: &ExecutionServiceError) -> StatusCode {
     match error {
-        ExecutionServiceError::Executor(ExecutorError::ProcessTimedOut { .. }) => {
-            StatusCode::GATEWAY_TIMEOUT
-        }
+        ExecutionServiceError::Executor(
+            ExecutorError::ProcessTimedOut { .. }
+            | ExecutorError::RuntimeReadinessTimedOut { .. }
+            | ExecutorError::RuntimeTimedOut { .. }
+            | ExecutorError::RuntimePoolExhausted,
+        ) => StatusCode::GATEWAY_TIMEOUT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

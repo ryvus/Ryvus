@@ -4,9 +4,10 @@ use crate::{
 };
 use ryvus_action_catalog::FileActionCatalog;
 use ryvus_control::{ControlService, LocalControlConfig};
+use ryvus_execution::{LongLivedRuntimePolicy, RuntimeLifecycle};
 use std::sync::Arc;
 
-pub fn run(run_schedules: bool) -> Result<()> {
+pub fn run(run_schedules: bool, long_lived: bool) -> Result<()> {
     project::configure_python_path();
 
     discover::run()?;
@@ -26,8 +27,15 @@ pub fn run(run_schedules: bool) -> Result<()> {
         .map_err(|err| CliError::Validation(err.to_string()))?;
     let scheduler = ryvus_scheduler::Scheduler::from_actions(action_catalog.all())
         .map_err(|err| CliError::Validation(err.to_string()))?;
-    let execution_service =
-        ryvus_gateway::server::build_execution_service(config.project_root.clone());
+    let lifecycle = if long_lived {
+        RuntimeLifecycle::LongLived
+    } else {
+        RuntimeLifecycle::PerInvocation
+    };
+    let execution_service = ryvus_gateway::server::build_execution_service_with_lifecycle(
+        config.project_root.clone(),
+        lifecycle,
+    );
     let scheduler_service = Arc::new(ryvus_scheduler::http::SchedulerService::new(
         action_catalog.all().cloned().collect(),
         Arc::clone(&execution_service),
@@ -53,10 +61,12 @@ pub fn run(run_schedules: bool) -> Result<()> {
     println!("Portal:  http://{}", control_addr);
 
     let runtime = tokio::runtime::Runtime::new().map_err(CliError::Io)?;
+    let shutdown_grace = LongLivedRuntimePolicy::default().shutdown_grace;
 
     if run_schedules {
         runtime.block_on(async move {
             let control_service = Arc::clone(&control_service);
+            let shutdown_service = Arc::clone(&execution_service);
             tokio::select! {
                 result = ryvus_gateway::server::serve_with_execution_service(
                     config,
@@ -65,19 +75,32 @@ pub fn run(run_schedules: bool) -> Result<()> {
                 result = ryvus_control::http::serve_with_routes(control_addr, control_service, control_routes) => {
                     result.map_err(|err| CliError::Gateway(err.to_string()))
                 },
-                result = scheduler.run(execution_service) => {
+                result = scheduler.run(execution_service.clone()) => {
                     result.map_err(|err| CliError::Validation(err.to_string()))
+                },
+                result = tokio::signal::ctrl_c() => {
+                    result.map_err(CliError::Io)?;
+                    shutdown_service
+                        .shutdown(shutdown_grace)
+                        .map_err(|err| CliError::Gateway(err.to_string()))
                 }
             }
         })?;
     } else {
         runtime.block_on(async move {
+            let shutdown_service = Arc::clone(&execution_service);
             tokio::select! {
-                result = ryvus_gateway::server::serve_with_execution_service(config, execution_service) => {
+                result = ryvus_gateway::server::serve_with_execution_service(config, execution_service.clone()) => {
                     result.map_err(|err| CliError::Gateway(err.to_string()))
                 },
                 result = ryvus_control::http::serve_with_routes(control_addr, control_service, control_routes) => {
                     result.map_err(|err| CliError::Gateway(err.to_string()))
+                },
+                result = tokio::signal::ctrl_c() => {
+                    result.map_err(CliError::Io)?;
+                    shutdown_service
+                        .shutdown(shutdown_grace)
+                        .map_err(|err| CliError::Gateway(err.to_string()))
                 }
             }
         })?;

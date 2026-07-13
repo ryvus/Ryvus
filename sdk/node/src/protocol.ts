@@ -46,16 +46,6 @@ export interface LogEvent {
 
 export type InvocationEvent = LogEvent;
 
-export type InvocationMessage =
-  | {
-      type: "event";
-      event: InvocationEvent;
-    }
-  | {
-      type: "result";
-      result: InvocationResult;
-    };
-
 export function createInvocationContext(
   request: InvocationRequest,
 ): InvocationContext {
@@ -95,42 +85,4 @@ export function createFailureResult(
       details: {},
     },
   };
-}
-
-export function createLogMessage(
-  invocationId: string,
-  level: LogEvent["level"],
-  values: unknown[],
-): InvocationMessage {
-  return {
-    type: "event",
-    event: {
-      type: "log",
-      invocation_id: invocationId,
-      level,
-      message: values.map(formatConsoleValue).join(" "),
-      fields: {},
-    },
-  };
-}
-
-export function createResultMessage(
-  result: InvocationResult,
-): InvocationMessage {
-  return {
-    type: "result",
-    result,
-  };
-}
-
-function formatConsoleValue(value: unknown): string {
-  if (typeof value === "string") {
-    return value;
-  }
-
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
 }

@@ -3,17 +3,17 @@ use std::{path::PathBuf, sync::Arc};
 use ryvus_protocol::{ActionDefinition, RuntimeKind};
 
 use crate::error::{ExecutorError, ExecutorResult};
-use crate::target::ProcessTarget;
+use crate::target::RuntimeTarget;
 
 pub trait RuntimeResolver: Send + Sync {
-    fn resolve(&self, action: &ActionDefinition) -> ExecutorResult<ProcessTarget>;
+    fn resolve(&self, action: &ActionDefinition) -> ExecutorResult<RuntimeTarget>;
 }
 
 impl<T> RuntimeResolver for Arc<T>
 where
     T: RuntimeResolver + ?Sized,
 {
-    fn resolve(&self, action: &ActionDefinition) -> ExecutorResult<ProcessTarget> {
+    fn resolve(&self, action: &ActionDefinition) -> ExecutorResult<RuntimeTarget> {
         self.as_ref().resolve(action)
     }
 }
@@ -63,7 +63,7 @@ impl Default for LocalRuntimeResolver {
 }
 
 impl RuntimeResolver for LocalRuntimeResolver {
-    fn resolve(&self, action: &ActionDefinition) -> ExecutorResult<ProcessTarget> {
+    fn resolve(&self, action: &ActionDefinition) -> ExecutorResult<RuntimeTarget> {
         let source_path = self.source_path(action);
         let action_name = format!("{}::{}", action.source.display(), action.entrypoint);
 
@@ -84,11 +84,12 @@ impl RuntimeResolver for LocalRuntimeResolver {
                     "python".to_string()
                 };
 
-                Ok(ProcessTarget::new(command)
+                Ok(RuntimeTarget::local_process(command)
                     .arg(source_path.to_string_lossy().to_string())
                     .working_dir(&self.project_root)
                     .env("PYTHONPATH", self.python_path())
-                    .env("RYVUS_ENTRYPOINT", &action.entrypoint))
+                    .env("RYVUS_ENTRYPOINT", &action.entrypoint)
+                    .source(source_path))
             }
 
             RuntimeKind::Node => {
@@ -100,9 +101,10 @@ impl RuntimeResolver for LocalRuntimeResolver {
                     });
                 }
 
-                Ok(ProcessTarget::new("node")
+                Ok(RuntimeTarget::local_process("node")
                     .arg(source_path.to_string_lossy().to_string())
-                    .working_dir(&self.project_root))
+                    .working_dir(&self.project_root)
+                    .source(source_path))
             }
 
             RuntimeKind::Rust => {
@@ -116,7 +118,7 @@ impl RuntimeResolver for LocalRuntimeResolver {
                     });
                 }
 
-                Ok(ProcessTarget::new("cargo").args([
+                Ok(RuntimeTarget::local_process("cargo").args([
                     "run".to_string(),
                     "--quiet".to_string(),
                     "--manifest-path".to_string(),

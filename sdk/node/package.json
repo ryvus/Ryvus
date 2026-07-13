@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "test": "pnpm build && node --test dist/api.test.js",
     "pack": "pnpm build && pnpm pack"
   },
   "author": "Ryvus",

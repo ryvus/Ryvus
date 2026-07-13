@@ -1,12 +1,11 @@
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import {
   createFailureResult,
   createInvocationContext,
-  createLogMessage,
-  createResultMessage,
   createSuccessResult,
   type InvocationContext,
-  type InvocationMessage,
   type InvocationRequest,
+  type InvocationResult,
   type JsonValue,
 } from "./protocol.js";
 import type { InferSchema, InferShape, Schema } from "./schema.js";
@@ -321,92 +320,50 @@ function actionPolicy(
   };
 }
 
-async function runApiAction(handler: ApiActionHandler | BoundApiActionHandler): Promise<void> {
-  let request: InvocationRequest | null = null;
-
-  try {
-    request = await readInvocationRequest();
-
-    installConsoleCapture(request.invocation_id);
-
-    const context = createInvocationContext(request);
-    const output = await callHandler(handler, request, context);
-
-    writeInvocationMessage(
-      createResultMessage(createSuccessResult(request, output)),
-    );
-  } catch (error) {
-    if (request === null) {
-      throw error;
+function runApiAction(handler: ApiActionHandler | BoundApiActionHandler): void {
+  startRuntime(async (request) => {
+    try {
+      const context = createInvocationContext(request);
+      const output = await callHandler(handler, request, context);
+      return createSuccessResult(request, output);
+    } catch (error) {
+      return createFailureResult(request, error);
     }
-
-    writeInvocationMessage(
-      createResultMessage(createFailureResult(request, error)),
-    );
-  }
+  });
 }
 
-async function runScheduledAction(handler: ScheduledActionHandler): Promise<void> {
-  let request: InvocationRequest | null = null;
-
-  try {
-    request = await readInvocationRequest();
-
-    installConsoleCapture(request.invocation_id);
-
-    const context = createInvocationContext(request);
-    const output = await handler({
-      context,
-      event: request.event,
-    });
-
-    writeInvocationMessage(
-      createResultMessage(createSuccessResult(request, output)),
-    );
-  } catch (error) {
-    if (request === null) {
-      throw error;
+function runScheduledAction(handler: ScheduledActionHandler): void {
+  startRuntime(async (request) => {
+    try {
+      const context = createInvocationContext(request);
+      const output = await handler({ context, event: request.event });
+      return createSuccessResult(request, output);
+    } catch (error) {
+      return createFailureResult(request, error);
     }
-
-    writeInvocationMessage(
-      createResultMessage(createFailureResult(request, error)),
-    );
-  }
+  });
 }
 
-async function runAuthorizer(handler: AuthorizerHandler): Promise<void> {
-  let request: InvocationRequest | null = null;
-
-  try {
-    request = await readInvocationRequest();
-
-    installConsoleCapture(request.invocation_id);
-
-    const context = createInvocationContext(request);
-    const event = eventObject(request.event);
-    const output = await handler({
-      body: event.body ?? null,
-      path_params: event.path_params ?? {},
-      query_params: event.query_params ?? {},
-      headers: event.headers ?? {},
-      method: event.method ?? "",
-      path: event.path ?? "",
-      context,
-      event: request.event,
-    });
-
-    writeInvocationMessage(
-      createResultMessage(createSuccessResult(request, output)),
-    );
-  } catch (error) {
-    if (request === null) {
-      throw error;
+function runAuthorizer(handler: AuthorizerHandler): void {
+  startRuntime(async (request) => {
+    try {
+      const context = createInvocationContext(request);
+      const event = eventObject(request.event);
+      const output = await handler({
+        body: event.body ?? null,
+        path_params: event.path_params ?? {},
+        query_params: event.query_params ?? {},
+        headers: event.headers ?? {},
+        method: event.method ?? "",
+        path: event.path ?? "",
+        context,
+        event: request.event,
+      });
+      return createSuccessResult(request, output);
+    } catch (error) {
+      return createFailureResult(request, error);
     }
-
-    writeInvocationMessage(
-      createResultMessage(createFailureResult(request, error)),
-    );
-  }
+  });
 }
 
 async function callHandler(
@@ -469,60 +426,107 @@ function coerceQuery(query: Record<string, string>): Record<string, JsonValue> {
   return output;
 }
 
-async function readInvocationRequest(): Promise<InvocationRequest> {
-  const raw = await readStdin();
+function startRuntime(
+  invoke: (request: InvocationRequest) => Promise<InvocationResult>,
+): void {
+  const server = createRuntimeServer(invoke);
+  const host = process.env.RYVUS_RUNTIME_HOST ?? "127.0.0.1";
+  const port = Number.parseInt(process.env.RYVUS_RUNTIME_PORT ?? "8080", 10);
+  server.listen(port, host);
+}
 
-  if (raw.trim().length === 0) {
-    throw new Error("No invocation request received on stdin");
+export function createRuntimeServer(
+  invoke: (request: InvocationRequest) => Promise<InvocationResult>,
+): Server {
+  const state: { activeInvocationId: string | null } = {
+    activeInvocationId: null,
+  };
+  return createServer((request, response) => {
+    void handleRuntimeRequest(request, response, invoke, state);
+  });
+}
+
+async function handleRuntimeRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  invoke: (request: InvocationRequest) => Promise<InvocationResult>,
+  state: { activeInvocationId: string | null },
+): Promise<void> {
+  if (request.method === "GET" && request.url === "/health") {
+    writeJson(response, 200, {
+      status: "ready",
+      busy: state.activeInvocationId !== null,
+    });
+    return;
+  }
+  if (request.url !== "/invoke") {
+    writeJson(response, 404, { error: "not_found" });
+    return;
+  }
+  if (request.method !== "POST") {
+    writeJson(response, 405, { error: "method_not_allowed" });
+    return;
+  }
+  if (String(request.headers["content-type"] ?? "").split(";", 1)[0] !== "application/json") {
+    writeJson(response, 415, { error: "unsupported_media_type" });
+    return;
   }
 
-  return JSON.parse(raw) as InvocationRequest;
-}
+  try {
+    const invocation = JSON.parse(await readBody(request)) as InvocationRequest;
+    validateInvocationRequest(invocation);
+    if (state.activeInvocationId !== null) {
+      writeJson(response, 409, {
+        code: "RUNTIME_BUSY",
+        message: "This runtime instance is already processing an invocation.",
+      });
+      return;
+    }
 
-function writeInvocationMessage(message: InvocationMessage): void {
-  process.stdout.write(`${JSON.stringify(message)}\n`);
-}
-
-function installConsoleCapture(invocationId: string): void {
-  console.log = (...values: unknown[]) => {
-    writeInvocationMessage(createLogMessage(invocationId, "info", values));
-  };
-
-  console.info = (...values: unknown[]) => {
-    writeInvocationMessage(createLogMessage(invocationId, "info", values));
-  };
-
-  console.warn = (...values: unknown[]) => {
-    writeInvocationMessage(createLogMessage(invocationId, "warn", values));
-  };
-
-  console.error = (...values: unknown[]) => {
-    writeInvocationMessage(createLogMessage(invocationId, "error", values));
-  };
-
-  console.debug = (...values: unknown[]) => {
-    writeInvocationMessage(createLogMessage(invocationId, "debug", values));
-  };
-
-  console.trace = (...values: unknown[]) => {
-    writeInvocationMessage(createLogMessage(invocationId, "trace", values));
-  };
-}
-
-async function readStdin(): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let raw = "";
-
-    process.stdin.setEncoding("utf8");
-
-    process.stdin.on("data", (chunk: string) => {
-      raw += chunk;
+    state.activeInvocationId = invocation.invocation_id;
+    try {
+      writeJson(response, 200, await invoke(invocation));
+    } finally {
+      state.activeInvocationId = null;
+    }
+  } catch (error) {
+    writeJson(response, 400, {
+      error: "invalid_request",
+      message: error instanceof Error ? error.message : String(error),
     });
+  }
+}
 
-    process.stdin.on("error", reject);
+function validateInvocationRequest(request: InvocationRequest): void {
+  if (request === null || typeof request !== "object" || Array.isArray(request)) {
+    throw new Error("request must be a JSON object");
+  }
+  if (request.protocol_version !== "ryvus.invoke.v1") {
+    throw new Error("unsupported protocol_version");
+  }
+  if (typeof request.invocation_id !== "string" || request.invocation_id.length === 0) {
+    throw new Error("invocation_id is required");
+  }
+  if (!("event" in request)) {
+    throw new Error("event is required");
+  }
+}
 
-    process.stdin.on("end", () => {
-      resolve(raw);
-    });
+async function readBody(request: IncomingMessage): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk: string) => { body += chunk; });
+    request.on("end", () => { resolve(body); });
+    request.on("error", reject);
   });
+}
+
+function writeJson(response: ServerResponse, status: number, body: unknown): void {
+  const payload = JSON.stringify(body);
+  response.writeHead(status, {
+    "content-type": "application/json",
+    "content-length": Buffer.byteLength(payload),
+  });
+  response.end(payload);
 }

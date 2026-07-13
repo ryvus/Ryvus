@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use ryvus_protocol::InvocationRequest;
 
-use crate::{error::ExecutorResult, ExecutionResult, ProcessTarget};
+use crate::{error::ExecutorResult, ExecutionResult, RuntimeTarget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecutionOptions {
@@ -13,13 +13,17 @@ pub struct ExecutionOptions {
 pub trait Executor: Send + Sync {
     fn invoke(
         &self,
-        target: &ProcessTarget,
+        target: &RuntimeTarget,
         request: &InvocationRequest,
         options: &ExecutionOptions,
     ) -> ExecutorResult<ExecutionResult>;
 
     fn cancel(&self, _invocation_id: &str) -> ExecutorResult<bool> {
         Ok(false)
+    }
+
+    fn shutdown(&self, _grace: Duration) -> ExecutorResult<()> {
+        Ok(())
     }
 }
 
@@ -29,7 +33,7 @@ where
 {
     fn invoke(
         &self,
-        target: &ProcessTarget,
+        target: &RuntimeTarget,
         request: &InvocationRequest,
         options: &ExecutionOptions,
     ) -> ExecutorResult<ExecutionResult> {
@@ -38,5 +42,9 @@ where
 
     fn cancel(&self, invocation_id: &str) -> ExecutorResult<bool> {
         self.as_ref().cancel(invocation_id)
+    }
+
+    fn shutdown(&self, grace: Duration) -> ExecutorResult<()> {
+        self.as_ref().shutdown(grace)
     }
 }

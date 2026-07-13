@@ -1,8 +1,18 @@
+import json
+import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from ryvus.discover import discover_actions
 from ryvus.events import ApiEvent, FlowEvent
-from ryvus.runtime import handle_api_request, handle_request, event_from_flow_request
+from ryvus.runtime import (
+    create_runtime_server,
+    event_from_api_request,
+    event_from_flow_request,
+    handle_api_request,
+    handle_request,
+)
 
 
 def build_request():
@@ -18,8 +28,120 @@ def build_request():
     }
 
 
-def result_for(messages):
-    return messages[-1]["result"]
+def result_for(result):
+    return result
+
+
+def test_http_runtime_health_and_invoke():
+    server = create_runtime_server(
+        lambda event: {"message": f"Hello {event.body['name']}"},
+        event_from_api_request,
+    )
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    endpoint = f"http://127.0.0.1:{server.server_port}"
+
+    try:
+        with urllib.request.urlopen(f"{endpoint}/health") as response:
+            assert response.status == 200
+            assert json.load(response) == {"status": "ready", "busy": False}
+
+        request = urllib.request.Request(
+            f"{endpoint}/invoke",
+            data=json.dumps(build_request()).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            result = json.load(response)
+
+        assert result["invocation_id"] == "test-id"
+        assert result["status"] == "success"
+        assert result["output"] == {"message": "Hello Maikel"}
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_http_runtime_rejects_concurrent_invocation():
+    started = threading.Event()
+    release = threading.Event()
+
+    def handler(event):
+        started.set()
+        release.wait(timeout=2)
+        return {"ok": True}
+
+    server = create_runtime_server(handler, event_from_api_request)
+    server_thread = threading.Thread(target=server.serve_forever)
+    server_thread.start()
+    endpoint = f"http://127.0.0.1:{server.server_port}"
+    first_result = {}
+
+    def invoke_first():
+        request = urllib.request.Request(
+            f"{endpoint}/invoke",
+            data=json.dumps(build_request()).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            first_result.update(json.load(response))
+
+    first_thread = threading.Thread(target=invoke_first)
+    first_thread.start()
+
+    try:
+        assert started.wait(timeout=1)
+        with urllib.request.urlopen(f"{endpoint}/health") as response:
+            assert json.load(response)["busy"] is True
+
+        second = urllib.request.Request(
+            f"{endpoint}/invoke",
+            data=json.dumps(build_request()).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(second)
+            raise AssertionError("concurrent invocation should fail")
+        except urllib.error.HTTPError as error:
+            assert error.code == 409
+            assert json.load(error)["code"] == "RUNTIME_BUSY"
+    finally:
+        release.set()
+        first_thread.join()
+        server.shutdown()
+        server.server_close()
+        server_thread.join()
+
+    assert first_result["status"] == "success"
+
+
+def test_http_runtime_rejects_invalid_protocol():
+    server = create_runtime_server(lambda event: {}, event_from_api_request)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    request = build_request()
+    request["protocol_version"] = "other"
+
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/invoke",
+                data=json.dumps(request).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        ):
+            raise AssertionError("invalid protocol should fail")
+    except urllib.error.HTTPError as error:
+        assert error.code == 400
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 def test_handler_receives_api_event():

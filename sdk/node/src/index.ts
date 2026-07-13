@@ -31,7 +31,6 @@ export type {
   InvocationContext,
   InvocationError,
   InvocationEvent,
-  InvocationMessage,
   InvocationRequest,
   InvocationResult,
   JsonValue,

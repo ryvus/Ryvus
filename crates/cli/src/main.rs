@@ -29,7 +29,10 @@ fn run(cli: Cli) -> Result<(), CliError> {
 
         Command::Discover => discover::run(),
 
-        Command::Start { schedules } => start::run(schedules),
+        Command::Start {
+            schedules,
+            long_lived,
+        } => start::run(schedules, long_lived),
 
         Command::Validate => validate::run(),
 

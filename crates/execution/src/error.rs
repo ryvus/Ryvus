@@ -36,6 +36,64 @@ pub enum ExecutorError {
 
     #[error("process completed without emitting invocation result")]
     MissingInvocationResult,
+
+    #[error("runtime lifecycle '{lifecycle}' is not supported")]
+    UnsupportedLifecycle { lifecycle: String },
+
+    #[error("runtime target cannot be acquired by the local runtime manager: {target}")]
+    UnsupportedRuntimeTarget { target: String },
+
+    #[error("runtime startup failed: command={command}, exit_code={exit_code:?}, stdout={stdout}, stderr={stderr}")]
+    RuntimeStartupFailed {
+        command: String,
+        exit_code: Option<i32>,
+        stdout: String,
+        stderr: String,
+    },
+
+    #[error("runtime readiness timed out: endpoint={endpoint}, timeout_ms={timeout_ms}, stdout={stdout}, stderr={stderr}")]
+    RuntimeReadinessTimedOut {
+        endpoint: String,
+        timeout_ms: u128,
+        stdout: String,
+        stderr: String,
+    },
+
+    #[error("runtime handle not found: {runtime_id}")]
+    RuntimeHandleNotFound { runtime_id: String },
+
+    #[error("HTTP transport error: {0}")]
+    Http(#[from] reqwest::Error),
+
+    #[error("runtime returned HTTP status {status}: {body}")]
+    HttpStatus { status: u16, body: String },
+
+    #[error("runtime response invocation id mismatch: expected={expected}, actual={actual}")]
+    InvocationIdMismatch { expected: String, actual: String },
+
+    #[error("invocation failed ({invocation}); runtime release also failed ({release})")]
+    InvocationAndRelease { invocation: String, release: String },
+
+    #[error("HTTP transport worker panicked")]
+    HttpWorkerPanicked,
+
+    #[error("runtime invocation was cancelled: {invocation_id}")]
+    RuntimeCancelled { invocation_id: String },
+
+    #[error("runtime invocation timed out: {invocation_id}")]
+    RuntimeTimedOut { invocation_id: String },
+
+    #[error("runtime is already processing an invocation")]
+    RuntimeBusy,
+
+    #[error("runtime pool capacity was not available before the invocation deadline")]
+    RuntimePoolExhausted,
+
+    #[error("runtime manager is shutting down")]
+    RuntimeUnavailable,
+
+    #[error("cancellation is not supported for externally managed runtime {endpoint}")]
+    UnsupportedCancellation { endpoint: String },
 }
 
 pub type ExecutorResult<T> = Result<T, ExecutorError>;
