@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use ryvus_protocol::{
@@ -10,9 +10,14 @@ use ryvus_protocol::{
     RuntimeSessionId, TerminationReason, WorkerId, RUNTIME_CONTROL_PROTOCOL_VERSION,
 };
 use ryvus_runtime_host::RuntimeHostControlSender;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use crate::{
+    ExecutionMutation, ExecutionStateStore, StateStoreError, TerminalState, TransitionResult,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptOwnership {
     pub execution_id: ExecutionId,
     pub attempt_id: AttemptId,
@@ -37,6 +42,8 @@ pub enum RuntimeControlError {
     },
     #[error("runtime-control event does not match active attempt ownership")]
     OwnershipMismatch,
+    #[error("execution state store error: {0}")]
+    StateStore(#[from] StateStoreError),
 }
 
 pub type RuntimeControlResult<T> = Result<T, RuntimeControlError>;
@@ -86,26 +93,31 @@ impl RuntimeControlChannel for InMemoryRuntimeControlChannel {
 
 #[derive(Default)]
 struct ControlState {
-    attempts: HashMap<AttemptId, AttemptOwnership>,
     runtimes: HashMap<RuntimeHostId, RuntimeSessionId>,
-    terminal: HashMap<ExecutionId, AttemptOutcome>,
 }
 
 #[derive(Clone)]
 pub struct RuntimeControlService {
     channel: Arc<dyn RuntimeControlChannel>,
+    store: Arc<dyn ExecutionStateStore>,
     state: Arc<Mutex<ControlState>>,
 }
 
 #[derive(Clone)]
 pub struct RuntimeControlIngress {
     state: Arc<Mutex<ControlState>>,
+    store: Arc<dyn ExecutionStateStore>,
+    control: RuntimeControlService,
 }
 
 impl RuntimeControlService {
-    pub fn new(channel: Arc<dyn RuntimeControlChannel>) -> Self {
+    pub fn new(
+        channel: Arc<dyn RuntimeControlChannel>,
+        store: Arc<dyn ExecutionStateStore>,
+    ) -> Self {
         Self {
             channel,
+            store,
             state: Arc::new(Mutex::new(ControlState::default())),
         }
     }
@@ -113,6 +125,8 @@ impl RuntimeControlService {
     pub fn ingress(&self) -> RuntimeControlIngress {
         RuntimeControlIngress {
             state: Arc::clone(&self.state),
+            store: Arc::clone(&self.store),
+            control: self.clone(),
         }
     }
 
@@ -126,34 +140,26 @@ impl RuntimeControlService {
     }
 
     pub fn attempt_ownership(&self, attempt_id: &AttemptId) -> Option<AttemptOwnership> {
+        self.store
+            .active_executions()
+            .ok()?
+            .into_iter()
+            .flat_map(|aggregate| aggregate.attempts)
+            .find(|attempt| &attempt.attempt.attempt_id == attempt_id)
+            .and_then(|attempt| attempt.ownership)
+    }
+
+    pub fn register_attempt(&self, ownership: AttemptOwnership) -> RuntimeControlResult<()> {
+        assign_ownership(&self.store, ownership.clone())?;
         self.state
             .lock()
             .expect("runtime control state should lock")
-            .attempts
-            .get(attempt_id)
-            .cloned()
-    }
-
-    pub fn register_attempt(&self, ownership: AttemptOwnership) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime control state should lock");
-        state.runtimes.insert(
-            ownership.runtime_host_id.clone(),
-            ownership.runtime_session_id.clone(),
-        );
-        state
-            .attempts
-            .insert(ownership.attempt_id.clone(), ownership);
-    }
-
-    pub fn unregister_attempt(&self, attempt_id: &AttemptId) {
-        self.state
-            .lock()
-            .expect("runtime control state should lock")
-            .attempts
-            .remove(attempt_id);
+            .runtimes
+            .insert(
+                ownership.runtime_host_id.clone(),
+                ownership.runtime_session_id.clone(),
+            );
+        Ok(())
     }
 
     pub fn unregister_runtime(&self, runtime_host_id: &RuntimeHostId) {
@@ -168,23 +174,41 @@ impl RuntimeControlService {
         &self,
         execution_id: &ExecutionId,
     ) -> RuntimeControlResult<ControlCommandOutcome> {
-        let ownership = {
-            let state = self
-                .state
-                .lock()
-                .expect("runtime control state should lock");
-            if state.terminal.contains_key(execution_id) {
-                return Ok(ControlCommandOutcome::AlreadyTerminal);
+        let aggregate = match request_cancellation(&self.store, execution_id) {
+            Ok(aggregate) => aggregate,
+            Err(RuntimeControlError::StateStore(StateStoreError::NotFound { .. })) => {
+                return Ok(ControlCommandOutcome::AttemptNotFound)
             }
-            state
-                .attempts
-                .values()
-                .find(|ownership| &ownership.execution_id == execution_id)
-                .cloned()
+            Err(error) => return Err(error),
         };
-        let Some(ownership) = ownership else {
+        if aggregate.terminal_state.is_some() {
+            return Ok(ControlCommandOutcome::AlreadyTerminal);
+        }
+        let Some(ownership) = active_ownership(&aggregate) else {
             return Ok(ControlCommandOutcome::AttemptNotFound);
         };
+        match self.current_session(&ownership.runtime_host_id) {
+            None => {
+                return Err(RuntimeControlError::Channel(format!(
+                    "runtime host '{}' is not registered",
+                    ownership.runtime_host_id
+                )))
+            }
+            Some(current) if current != ownership.runtime_session_id => {
+                return Err(RuntimeControlError::StaleSession {
+                    runtime_host_id: ownership.runtime_host_id,
+                    runtime_session_id: ownership.runtime_session_id,
+                })
+            }
+            Some(_) => {}
+        }
+        self.deliver_cancellation(ownership)
+    }
+
+    fn deliver_cancellation(
+        &self,
+        ownership: AttemptOwnership,
+    ) -> RuntimeControlResult<ControlCommandOutcome> {
         let event = self.channel.send(RuntimeControlCommand::TerminateAttempt {
             protocol_version: RUNTIME_CONTROL_PROTOCOL_VERSION.to_string(),
             message_id: ControlMessageId::new(),
@@ -195,48 +219,58 @@ impl RuntimeControlService {
             attempt_number: ownership.attempt_number,
             reason: TerminationReason::Cancellation,
         })?;
-        let mut outcome = command_outcome(&event)?;
+        let outcome = command_outcome(&event)?;
         if outcome == ControlCommandOutcome::Confirmed {
-            let mut state = self
-                .state
-                .lock()
-                .expect("runtime control state should lock");
-            let winner = *state
-                .terminal
-                .entry(ownership.execution_id)
-                .or_insert(AttemptOutcome::Cancelled);
-            if winner != AttemptOutcome::Cancelled {
-                outcome = ControlCommandOutcome::AlreadyTerminal;
-            }
-            state.attempts.remove(&ownership.attempt_id);
+            return accept_terminal(
+                &self.store,
+                &ownership.execution_id,
+                &ownership.attempt_id,
+                AttemptOutcome::Cancelled,
+            )
+            .map(|winner| {
+                if winner == AttemptOutcome::Cancelled {
+                    ControlCommandOutcome::Confirmed
+                } else {
+                    ControlCommandOutcome::AlreadyTerminal
+                }
+            });
         }
         Ok(outcome)
+    }
+
+    pub fn reconcile_cancellations(&self) -> RuntimeControlResult<()> {
+        for aggregate in self.store.reconcilable_cancellations()? {
+            let Some(ownership) = active_ownership(&aggregate) else {
+                continue;
+            };
+            if self.current_session(&ownership.runtime_host_id).as_ref()
+                == Some(&ownership.runtime_session_id)
+            {
+                self.deliver_cancellation(ownership)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn finish_attempt(
         &self,
         attempt: &ExecutionAttempt,
         outcome: AttemptOutcome,
-    ) -> AttemptOutcome {
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime control state should lock");
-        let winner = *state
-            .terminal
-            .entry(attempt.execution_id.clone())
-            .or_insert(outcome);
-        state.attempts.remove(&attempt.attempt_id);
-        winner
+    ) -> RuntimeControlResult<AttemptOutcome> {
+        accept_terminal(
+            &self.store,
+            &attempt.execution_id,
+            &attempt.attempt_id,
+            outcome,
+        )
     }
 
     pub fn terminal_outcome(&self, execution_id: &ExecutionId) -> Option<AttemptOutcome> {
-        self.state
-            .lock()
-            .expect("runtime control state should lock")
-            .terminal
-            .get(execution_id)
-            .copied()
+        self.store
+            .load(execution_id)
+            .ok()??
+            .terminal_state
+            .map(|terminal| state_outcome(terminal.state))
     }
 
     pub fn drain(&self) -> RuntimeControlResult<()> {
@@ -256,13 +290,7 @@ impl RuntimeControlService {
         self.drain()?;
         let deadline = Instant::now() + grace;
         while Instant::now() < deadline {
-            if self
-                .state
-                .lock()
-                .expect("runtime control state should lock")
-                .attempts
-                .is_empty()
-            {
+            if self.store.active_executions()?.is_empty() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10).min(grace));
@@ -280,24 +308,23 @@ impl RuntimeControlService {
                 outcome,
                 ControlCommandOutcome::Confirmed | ControlCommandOutcome::AlreadyTerminal
             ) {
-                let mut state = self
-                    .state
-                    .lock()
-                    .expect("runtime control state should lock");
-                let terminated = state
-                    .attempts
-                    .values()
-                    .filter(|ownership| ownership.runtime_host_id == completed_host_id)
-                    .map(|ownership| (ownership.attempt_id.clone(), ownership.execution_id.clone()))
-                    .collect::<Vec<_>>();
-                for (attempt_id, execution_id) in terminated {
-                    state.attempts.remove(&attempt_id);
-                    state
-                        .terminal
-                        .entry(execution_id)
-                        .or_insert(AttemptOutcome::Cancelled);
+                for aggregate in self.store.active_executions()? {
+                    if let Some(ownership) = active_ownership(&aggregate) {
+                        if ownership.runtime_host_id == completed_host_id {
+                            let _ = accept_terminal(
+                                &self.store,
+                                &ownership.execution_id,
+                                &ownership.attempt_id,
+                                AttemptOutcome::Cancelled,
+                            )?;
+                        }
+                    }
                 }
-                state.runtimes.remove(&completed_host_id);
+                self.state
+                    .lock()
+                    .expect("runtime control state should lock")
+                    .runtimes
+                    .remove(&completed_host_id);
             }
         }
         Ok(())
@@ -315,21 +342,33 @@ impl RuntimeControlService {
 }
 
 impl RuntimeControlIngress {
+    pub fn reconcile_cancellations(&self) -> RuntimeControlResult<()> {
+        self.control.reconcile_cancellations()
+    }
+
     pub fn register(&self, registration: RuntimeRegistration) -> RuntimeControlResult<()> {
         registration
             .validate()
             .map_err(|error| RuntimeControlError::InvalidMessage(error.to_string()))?;
+        let active_attempt_ids = registration
+            .active_attempts
+            .iter()
+            .map(|attempt| attempt.attempt_id.clone())
+            .collect::<Vec<_>>();
         let mut state = self
             .state
             .lock()
             .expect("runtime control state should lock");
-        state
-            .attempts
-            .retain(|_, ownership| ownership.runtime_host_id != registration.runtime_host_id);
-        state.runtimes.insert(
-            registration.runtime_host_id.clone(),
-            registration.runtime_session_id.clone(),
-        );
+        for aggregate in self.store.active_executions()? {
+            let Some(ownership) = active_ownership(&aggregate) else {
+                continue;
+            };
+            if ownership.runtime_host_id == registration.runtime_host_id
+                && !active_attempt_ids.contains(&ownership.attempt_id)
+            {
+                clear_ownership(&self.store, ownership)?;
+            }
+        }
         for active in registration.active_attempts {
             let ownership = AttemptOwnership {
                 execution_id: active.execution_id,
@@ -339,10 +378,16 @@ impl RuntimeControlIngress {
                 runtime_session_id: registration.runtime_session_id.clone(),
                 worker_id: active.worker_id,
             };
-            state
-                .attempts
-                .insert(ownership.attempt_id.clone(), ownership);
+            match assign_ownership(&self.store, ownership) {
+                Ok(()) | Err(RuntimeControlError::StateStore(StateStoreError::NotFound { .. })) => {
+                }
+                Err(error) => return Err(error),
+            }
         }
+        state.runtimes.insert(
+            registration.runtime_host_id,
+            registration.runtime_session_id,
+        );
         Ok(())
     }
 
@@ -353,7 +398,7 @@ impl RuntimeControlIngress {
         let (runtime_host_id, runtime_session_id) = event_identity(&event);
         let runtime_host_id = runtime_host_id.clone();
         let runtime_session_id = runtime_session_id.clone();
-        let mut state = self
+        let state = self
             .state
             .lock()
             .expect("runtime control state should lock");
@@ -371,29 +416,17 @@ impl RuntimeControlIngress {
                 worker_id,
                 ..
             } => {
-                if state.attempts.get(&attempt_id).is_some_and(|current| {
-                    current.execution_id != execution_id
-                        || current.attempt_number != attempt_number
-                        || current.worker_id != worker_id
-                }) || state.attempts.values().any(|current| {
-                    current.attempt_id != attempt_id
-                        && current.runtime_host_id == runtime_host_id
-                        && current.runtime_session_id == runtime_session_id
-                        && current.worker_id == worker_id
-                }) {
-                    return Err(RuntimeControlError::OwnershipMismatch);
-                }
-                state.attempts.insert(
-                    attempt_id.clone(),
+                assign_ownership(
+                    &self.store,
                     AttemptOwnership {
                         execution_id,
                         attempt_id,
                         attempt_number,
-                        runtime_host_id: runtime_host_id.clone(),
-                        runtime_session_id: runtime_session_id.clone(),
+                        runtime_host_id,
+                        runtime_session_id,
                         worker_id,
                     },
-                );
+                )?;
             }
             RuntimeControlEvent::AttemptFinished {
                 execution_id,
@@ -403,7 +436,11 @@ impl RuntimeControlIngress {
                 outcome,
                 ..
             } => {
-                let Some(current) = state.attempts.get(&attempt_id) else {
+                let Some(aggregate) = self.store.load(&execution_id)? else {
+                    tracing::debug!(%attempt_id, "ignoring terminal event for inactive attempt");
+                    return Ok(());
+                };
+                let Some(current) = active_ownership(&aggregate) else {
                     tracing::debug!(%attempt_id, "ignoring terminal event for inactive attempt");
                     return Ok(());
                 };
@@ -415,14 +452,172 @@ impl RuntimeControlIngress {
                 {
                     return Err(RuntimeControlError::OwnershipMismatch);
                 }
-                state.terminal.entry(execution_id).or_insert(outcome);
-                state.attempts.remove(&attempt_id);
+                if outcome == AttemptOutcome::TimedOut {
+                    accept_terminal(&self.store, &execution_id, &attempt_id, outcome)?;
+                }
             }
             RuntimeControlEvent::Heartbeat { .. }
             | RuntimeControlEvent::Registered { .. }
             | RuntimeControlEvent::CommandResult { .. } => {}
         }
         Ok(())
+    }
+}
+
+fn active_ownership(aggregate: &crate::ExecutionAggregate) -> Option<AttemptOwnership> {
+    let active_attempt_id = aggregate.active_attempt_id.as_ref()?;
+    aggregate
+        .attempts
+        .iter()
+        .find(|attempt| &attempt.attempt.attempt_id == active_attempt_id)
+        .and_then(|attempt| attempt.ownership.clone())
+}
+
+fn assign_ownership(
+    store: &Arc<dyn ExecutionStateStore>,
+    ownership: AttemptOwnership,
+) -> RuntimeControlResult<()> {
+    loop {
+        let aggregate =
+            store
+                .load(&ownership.execution_id)?
+                .ok_or_else(|| StateStoreError::NotFound {
+                    execution_id: ownership.execution_id.clone(),
+                })?;
+        match store.compare_and_set(
+            &ownership.execution_id,
+            aggregate.execution_version,
+            ExecutionMutation::AssignOwnership {
+                attempt_id: ownership.attempt_id.clone(),
+                ownership: ownership.clone(),
+            },
+        )? {
+            TransitionResult::Applied { .. } | TransitionResult::Unchanged { .. } => return Ok(()),
+            TransitionResult::Conflict { .. } => continue,
+        }
+    }
+}
+
+fn clear_ownership(
+    store: &Arc<dyn ExecutionStateStore>,
+    ownership: AttemptOwnership,
+) -> RuntimeControlResult<()> {
+    loop {
+        let aggregate =
+            store
+                .load(&ownership.execution_id)?
+                .ok_or_else(|| StateStoreError::NotFound {
+                    execution_id: ownership.execution_id.clone(),
+                })?;
+        match store.compare_and_set(
+            &ownership.execution_id,
+            aggregate.execution_version,
+            ExecutionMutation::ClearOwnership {
+                attempt_id: ownership.attempt_id.clone(),
+                expected_ownership: ownership.clone(),
+            },
+        )? {
+            TransitionResult::Applied { .. } | TransitionResult::Unchanged { .. } => return Ok(()),
+            TransitionResult::Conflict { .. } => continue,
+        }
+    }
+}
+
+fn request_cancellation(
+    store: &Arc<dyn ExecutionStateStore>,
+    execution_id: &ExecutionId,
+) -> RuntimeControlResult<crate::ExecutionAggregate> {
+    loop {
+        let aggregate = store
+            .load(execution_id)?
+            .ok_or_else(|| StateStoreError::NotFound {
+                execution_id: execution_id.clone(),
+            });
+        let aggregate = match aggregate {
+            Ok(aggregate) => aggregate,
+            Err(StateStoreError::NotFound { .. }) => {
+                return Err(RuntimeControlError::StateStore(StateStoreError::NotFound {
+                    execution_id: execution_id.clone(),
+                }))
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if aggregate.terminal_state.is_some() || aggregate.cancellation_intent.is_some() {
+            return Ok(aggregate);
+        }
+        match store.compare_and_set(
+            execution_id,
+            aggregate.execution_version,
+            ExecutionMutation::RequestCancellation {
+                requested_at: SystemTime::now(),
+            },
+        )? {
+            TransitionResult::Applied { aggregate } | TransitionResult::Unchanged { aggregate } => {
+                return Ok(aggregate)
+            }
+            TransitionResult::Conflict { .. } => continue,
+        }
+    }
+}
+
+fn accept_terminal(
+    store: &Arc<dyn ExecutionStateStore>,
+    execution_id: &ExecutionId,
+    attempt_id: &AttemptId,
+    outcome: AttemptOutcome,
+) -> RuntimeControlResult<AttemptOutcome> {
+    loop {
+        let aggregate = store
+            .load(execution_id)?
+            .ok_or_else(|| StateStoreError::NotFound {
+                execution_id: execution_id.clone(),
+            })?;
+        if let Some(terminal) = aggregate.terminal_state {
+            return Ok(state_outcome(terminal.state));
+        }
+        match store.compare_and_set(
+            execution_id,
+            aggregate.execution_version,
+            ExecutionMutation::FinishAttempt {
+                attempt_id: attempt_id.clone(),
+                outcome,
+                result: None,
+                retry: None,
+                terminal: Some(TerminalState::new(
+                    outcome_state(outcome),
+                    Some(attempt_id.clone()),
+                )),
+            },
+        )? {
+            TransitionResult::Applied { .. } => return Ok(outcome),
+            TransitionResult::Unchanged { aggregate } => {
+                return Ok(aggregate
+                    .terminal_state
+                    .map(|terminal| state_outcome(terminal.state))
+                    .unwrap_or(outcome));
+            }
+            TransitionResult::Conflict { .. } => continue,
+        }
+    }
+}
+
+fn outcome_state(outcome: AttemptOutcome) -> crate::ExecutionState {
+    match outcome {
+        AttemptOutcome::Succeeded => crate::ExecutionState::Succeeded,
+        AttemptOutcome::Failed | AttemptOutcome::InfrastructureFailed => {
+            crate::ExecutionState::Failed
+        }
+        AttemptOutcome::Cancelled => crate::ExecutionState::Cancelled,
+        AttemptOutcome::TimedOut => crate::ExecutionState::TimedOut,
+    }
+}
+
+fn state_outcome(state: crate::ExecutionState) -> AttemptOutcome {
+    match state {
+        crate::ExecutionState::Succeeded => AttemptOutcome::Succeeded,
+        crate::ExecutionState::Cancelled => AttemptOutcome::Cancelled,
+        crate::ExecutionState::TimedOut => AttemptOutcome::TimedOut,
+        _ => AttemptOutcome::Failed,
     }
 }
 
@@ -479,7 +674,13 @@ fn event_identity(event: &RuntimeControlEvent) -> (&RuntimeHostId, &RuntimeSessi
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Barrier, Mutex};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Barrier, Mutex,
+    };
+
+    use ryvus_protocol::{ActionDefinition, ActionKind, ApiAction, InvocationRequest, RuntimeKind};
+    use serde_json::json;
 
     use super::*;
 
@@ -545,6 +746,137 @@ mod tests {
         release: Arc<Barrier>,
     }
 
+    struct SwitchableChannel {
+        fail: AtomicBool,
+        commands: Mutex<Vec<RuntimeControlCommand>>,
+    }
+
+    struct IntentInspectingChannel {
+        store: Arc<crate::MemoryExecutionStateStore>,
+    }
+
+    struct BlockingAssignStore {
+        inner: crate::MemoryExecutionStateStore,
+        armed: AtomicBool,
+        entered: Barrier,
+        release: Barrier,
+    }
+
+    impl ExecutionStateStore for BlockingAssignStore {
+        fn create(
+            &self,
+            execution: crate::NewExecution,
+        ) -> crate::StateStoreResult<crate::ExecutionAggregate> {
+            self.inner.create(execution)
+        }
+
+        fn load(
+            &self,
+            execution_id: &ExecutionId,
+        ) -> crate::StateStoreResult<Option<crate::ExecutionAggregate>> {
+            self.inner.load(execution_id)
+        }
+
+        fn compare_and_set(
+            &self,
+            execution_id: &ExecutionId,
+            expected_version: u64,
+            mutation: ExecutionMutation,
+        ) -> crate::StateStoreResult<TransitionResult> {
+            if matches!(mutation, ExecutionMutation::AssignOwnership { .. })
+                && self.armed.swap(false, Ordering::SeqCst)
+            {
+                self.entered.wait();
+                self.release.wait();
+            }
+            self.inner
+                .compare_and_set(execution_id, expected_version, mutation)
+        }
+
+        fn reconcilable_cancellations(
+            &self,
+        ) -> crate::StateStoreResult<Vec<crate::ExecutionAggregate>> {
+            self.inner.reconcilable_cancellations()
+        }
+
+        fn active_executions(&self) -> crate::StateStoreResult<Vec<crate::ExecutionAggregate>> {
+            self.inner.active_executions()
+        }
+    }
+
+    impl RuntimeControlChannel for IntentInspectingChannel {
+        fn send(
+            &self,
+            command: RuntimeControlCommand,
+        ) -> RuntimeControlResult<RuntimeControlEvent> {
+            let RuntimeControlCommand::TerminateAttempt {
+                execution_id,
+                runtime_host_id,
+                runtime_session_id,
+                message_id,
+                ..
+            } = command
+            else {
+                panic!("expected terminate command")
+            };
+            assert!(self
+                .store
+                .load(&execution_id)
+                .unwrap()
+                .unwrap()
+                .cancellation_intent
+                .is_some());
+            Ok(RuntimeControlEvent::CommandResult {
+                protocol_version: RUNTIME_CONTROL_PROTOCOL_VERSION.into(),
+                message_id: ControlMessageId::new(),
+                runtime_host_id,
+                runtime_session_id,
+                command_message_id: message_id,
+                outcome: ControlCommandOutcome::Confirmed,
+                message: None,
+            })
+        }
+    }
+
+    impl RuntimeControlChannel for SwitchableChannel {
+        fn send(
+            &self,
+            command: RuntimeControlCommand,
+        ) -> RuntimeControlResult<RuntimeControlEvent> {
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(RuntimeControlError::Channel("disconnected".into()));
+            }
+            let runtime_host_id = command_host_id(&command).clone();
+            let (runtime_session_id, command_message_id) = match &command {
+                RuntimeControlCommand::TerminateAttempt {
+                    runtime_session_id,
+                    message_id,
+                    ..
+                }
+                | RuntimeControlCommand::DrainRuntime {
+                    runtime_session_id,
+                    message_id,
+                    ..
+                }
+                | RuntimeControlCommand::ShutdownRuntime {
+                    runtime_session_id,
+                    message_id,
+                    ..
+                } => (runtime_session_id.clone(), message_id.clone()),
+            };
+            self.commands.lock().unwrap().push(command);
+            Ok(RuntimeControlEvent::CommandResult {
+                protocol_version: RUNTIME_CONTROL_PROTOCOL_VERSION.into(),
+                message_id: ControlMessageId::new(),
+                runtime_host_id,
+                runtime_session_id,
+                command_message_id,
+                outcome: ControlCommandOutcome::Confirmed,
+                message: None,
+            })
+        }
+    }
+
     impl RuntimeControlChannel for PausedCancellationChannel {
         fn send(
             &self,
@@ -576,9 +908,9 @@ mod tests {
     #[test]
     fn cancellation_is_exact_duplicate_safe_and_terminal() {
         let channel = RecordingChannel::confirming();
-        let service = RuntimeControlService::new(channel.clone());
+        let service = test_service(channel.clone());
         let ownership = ownership();
-        service.register_attempt(ownership.clone());
+        register_test_attempt(&service, ownership.clone());
 
         assert_eq!(
             service.cancel(&ownership.execution_id).unwrap(),
@@ -589,7 +921,9 @@ mod tests {
             ControlCommandOutcome::AlreadyTerminal
         );
         assert_eq!(
-            service.finish_attempt(&attempt(&ownership), AttemptOutcome::Succeeded),
+            service
+                .finish_attempt(&attempt(&ownership), AttemptOutcome::Succeeded)
+                .unwrap(),
             AttemptOutcome::Cancelled
         );
         let commands = channel.commands.lock().unwrap();
@@ -616,11 +950,13 @@ mod tests {
     #[test]
     fn completion_and_timeout_cannot_be_overwritten_by_cancellation() {
         for outcome in [AttemptOutcome::Succeeded, AttemptOutcome::TimedOut] {
-            let service = RuntimeControlService::new(RecordingChannel::confirming());
+            let service = test_service(RecordingChannel::confirming());
             let ownership = ownership();
-            service.register_attempt(ownership.clone());
+            register_test_attempt(&service, ownership.clone());
             assert_eq!(
-                service.finish_attempt(&attempt(&ownership), outcome),
+                service
+                    .finish_attempt(&attempt(&ownership), outcome)
+                    .unwrap(),
                 outcome
             );
             assert_eq!(
@@ -638,12 +974,12 @@ mod tests {
     fn cancellation_racing_with_success_keeps_the_success_winner() {
         let entered = Arc::new(Barrier::new(2));
         let release = Arc::new(Barrier::new(2));
-        let service = RuntimeControlService::new(Arc::new(PausedCancellationChannel {
+        let service = test_service(Arc::new(PausedCancellationChannel {
             entered: Arc::clone(&entered),
             release: Arc::clone(&release),
         }));
         let ownership = ownership();
-        service.register_attempt(ownership.clone());
+        register_test_attempt(&service, ownership.clone());
         let cancelling = {
             let service = service.clone();
             let execution_id = ownership.execution_id.clone();
@@ -652,7 +988,9 @@ mod tests {
         entered.wait();
 
         assert_eq!(
-            service.finish_attempt(&attempt(&ownership), AttemptOutcome::Succeeded),
+            service
+                .finish_attempt(&attempt(&ownership), AttemptOutcome::Succeeded)
+                .unwrap(),
             AttemptOutcome::Succeeded
         );
         release.wait();
@@ -670,12 +1008,12 @@ mod tests {
     fn cancellation_racing_with_timeout_keeps_the_timeout_winner() {
         let entered = Arc::new(Barrier::new(2));
         let release = Arc::new(Barrier::new(2));
-        let service = RuntimeControlService::new(Arc::new(PausedCancellationChannel {
+        let service = test_service(Arc::new(PausedCancellationChannel {
             entered: Arc::clone(&entered),
             release: Arc::clone(&release),
         }));
         let ownership = ownership();
-        service.register_attempt(ownership.clone());
+        register_test_attempt(&service, ownership.clone());
         let cancelling = {
             let service = service.clone();
             let execution_id = ownership.execution_id.clone();
@@ -684,7 +1022,9 @@ mod tests {
         entered.wait();
 
         assert_eq!(
-            service.finish_attempt(&attempt(&ownership), AttemptOutcome::TimedOut),
+            service
+                .finish_attempt(&attempt(&ownership), AttemptOutcome::TimedOut)
+                .unwrap(),
             AttemptOutcome::TimedOut
         );
         release.wait();
@@ -700,7 +1040,7 @@ mod tests {
 
     #[test]
     fn unknown_attempt_has_semantic_result() {
-        let service = RuntimeControlService::new(RecordingChannel::confirming());
+        let service = test_service(RecordingChannel::confirming());
         assert_eq!(
             service.cancel(&ExecutionId::new()).unwrap(),
             ControlCommandOutcome::AttemptNotFound
@@ -708,14 +1048,152 @@ mod tests {
     }
 
     #[test]
+    fn failed_ownership_persistence_does_not_publish_runtime() {
+        let mut store = crate::MockExecutionStateStore::new();
+        store
+            .expect_load()
+            .once()
+            .returning(|_| Err(StateStoreError::LockPoisoned));
+        let service = RuntimeControlService::new(RecordingChannel::confirming(), Arc::new(store));
+        let ownership = ownership();
+
+        assert!(matches!(
+            service.register_attempt(ownership.clone()),
+            Err(RuntimeControlError::StateStore(
+                StateStoreError::LockPoisoned
+            ))
+        ));
+        assert_eq!(service.current_session(&ownership.runtime_host_id), None);
+        let executor_error: crate::ExecutorError =
+            RuntimeControlError::StateStore(StateStoreError::LockPoisoned).into();
+        assert!(matches!(
+            executor_error,
+            crate::ExecutorError::RuntimeControl(RuntimeControlError::StateStore(
+                StateStoreError::LockPoisoned
+            ))
+        ));
+    }
+
+    #[test]
+    fn transport_failure_keeps_intent_for_reconciliation() {
+        let channel = Arc::new(SwitchableChannel {
+            fail: AtomicBool::new(true),
+            commands: Mutex::new(Vec::new()),
+        });
+        let service = test_service(channel.clone());
+        let ownership = ownership();
+        register_test_attempt(&service, ownership.clone());
+
+        assert!(matches!(
+            service.cancel(&ownership.execution_id),
+            Err(RuntimeControlError::Channel(_))
+        ));
+        let pending = service
+            .store
+            .load(&ownership.execution_id)
+            .unwrap()
+            .unwrap();
+        assert!(pending.cancellation_intent.is_some());
+        assert!(pending.terminal_state.is_none());
+
+        channel.fail.store(false, Ordering::SeqCst);
+        service.reconcile_cancellations().unwrap();
+        assert_eq!(
+            service.terminal_outcome(&ownership.execution_id),
+            Some(AttemptOutcome::Cancelled)
+        );
+        assert_eq!(channel.commands.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cancellation_intent_is_persisted_before_delivery() {
+        let store = Arc::new(crate::MemoryExecutionStateStore::default());
+        let service = RuntimeControlService::new(
+            Arc::new(IntentInspectingChannel {
+                store: store.clone(),
+            }),
+            store,
+        );
+        let ownership = ownership();
+        register_test_attempt(&service, ownership.clone());
+
+        assert_eq!(
+            service.cancel(&ownership.execution_id).unwrap(),
+            ControlCommandOutcome::Confirmed
+        );
+    }
+
+    #[test]
+    fn ownership_refresh_is_version_neutral_but_replacement_versions_once() {
+        let service = test_service(RecordingChannel::confirming());
+        let ownership = ownership();
+        register_test_attempt(&service, ownership.clone());
+        let assigned = service
+            .store
+            .load(&ownership.execution_id)
+            .unwrap()
+            .unwrap();
+
+        service.register_attempt(ownership.clone()).unwrap();
+        let unchanged = service
+            .store
+            .load(&ownership.execution_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.execution_version, assigned.execution_version);
+
+        let mut replacement = ownership;
+        replacement.runtime_session_id = RuntimeSessionId::new();
+        service.register_attempt(replacement).unwrap();
+        let replaced = service
+            .store
+            .load(&unchanged.execution_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(replaced.execution_version, unchanged.execution_version + 1);
+    }
+
+    #[test]
+    fn failed_lifecycle_event_does_not_preempt_retry_policy() {
+        let service = test_service(RecordingChannel::confirming());
+        let ownership = ownership();
+        register_test_attempt(&service, ownership.clone());
+        let ingress = service.ingress();
+
+        ingress
+            .apply(RuntimeControlEvent::AttemptFinished {
+                protocol_version: RUNTIME_CONTROL_PROTOCOL_VERSION.into(),
+                message_id: ControlMessageId::new(),
+                runtime_host_id: ownership.runtime_host_id.clone(),
+                runtime_session_id: ownership.runtime_session_id.clone(),
+                execution_id: ownership.execution_id.clone(),
+                attempt_id: ownership.attempt_id.clone(),
+                attempt_number: ownership.attempt_number,
+                worker_id: ownership.worker_id.clone(),
+                outcome: AttemptOutcome::Failed,
+            })
+            .unwrap();
+
+        let aggregate = service
+            .store
+            .load(&ownership.execution_id)
+            .unwrap()
+            .unwrap();
+        assert!(aggregate.terminal_state.is_none());
+        assert_eq!(aggregate.active_attempt_id, Some(ownership.attempt_id));
+    }
+
+    #[test]
     fn ingress_replaces_active_snapshot_and_fences_stale_events() {
-        let service = RuntimeControlService::new(RecordingChannel::confirming());
+        let service = test_service(RecordingChannel::confirming());
         let ingress = service.ingress();
         let runtime_host_id = RuntimeHostId::new();
         let stale_session = RuntimeSessionId::new();
         let current_session = RuntimeSessionId::new();
         let stale_attempt = ownership();
         let current_attempt = ownership();
+        seed_attempt(&service, &stale_attempt);
+        seed_attempt(&service, &current_attempt);
 
         ingress
             .register(registration(
@@ -760,6 +1238,12 @@ mod tests {
         assert!(service
             .attempt_ownership(&current_attempt.attempt_id)
             .is_some());
+        let version_before_stale = service
+            .store
+            .load(&current_attempt.execution_id)
+            .unwrap()
+            .unwrap()
+            .execution_version;
         let stale_event = RuntimeControlEvent::AttemptStarted {
             protocol_version: RUNTIME_CONTROL_PROTOCOL_VERSION.to_string(),
             message_id: ControlMessageId::new(),
@@ -774,14 +1258,93 @@ mod tests {
             ingress.apply(stale_event),
             Err(RuntimeControlError::StaleSession { .. })
         ));
+        assert_eq!(
+            service
+                .store
+                .load(&current_attempt.execution_id)
+                .unwrap()
+                .unwrap()
+                .execution_version,
+            version_before_stale
+        );
+    }
+
+    #[test]
+    fn concurrent_session_replacement_fences_in_flight_old_event() {
+        let store = Arc::new(BlockingAssignStore {
+            inner: crate::MemoryExecutionStateStore::default(),
+            armed: AtomicBool::new(false),
+            entered: Barrier::new(2),
+            release: Barrier::new(2),
+        });
+        let service = RuntimeControlService::new(RecordingChannel::confirming(), store.clone());
+        let ingress = service.ingress();
+        let old = ownership();
+        seed_attempt(&service, &old);
+        ingress
+            .register(registration(
+                &old.runtime_host_id,
+                &old.runtime_session_id,
+                &old,
+            ))
+            .unwrap();
+        store.armed.store(true, Ordering::SeqCst);
+
+        let old_event = RuntimeControlEvent::AttemptStarted {
+            protocol_version: RUNTIME_CONTROL_PROTOCOL_VERSION.into(),
+            message_id: ControlMessageId::new(),
+            runtime_host_id: old.runtime_host_id.clone(),
+            runtime_session_id: old.runtime_session_id.clone(),
+            execution_id: old.execution_id.clone(),
+            attempt_id: old.attempt_id.clone(),
+            attempt_number: old.attempt_number,
+            worker_id: WorkerId::from("old-event-worker"),
+        };
+        let applying = {
+            let ingress = ingress.clone();
+            std::thread::spawn(move || ingress.apply(old_event))
+        };
+        store.entered.wait();
+
+        let mut current = old.clone();
+        current.runtime_session_id = RuntimeSessionId::new();
+        current.worker_id = WorkerId::from("current-worker");
+        let (registered_tx, registered_rx) = std::sync::mpsc::channel();
+        let registering = {
+            let ingress = ingress.clone();
+            let registration = registration(
+                &current.runtime_host_id,
+                &current.runtime_session_id,
+                &current,
+            );
+            std::thread::spawn(move || {
+                let result = ingress.register(registration);
+                registered_tx.send(result).unwrap();
+            })
+        };
+        assert!(registered_rx
+            .recv_timeout(Duration::from_millis(20))
+            .is_err());
+        store.release.wait();
+        applying.join().unwrap().unwrap();
+        registered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        registering.join().unwrap();
+
+        assert_eq!(
+            service.attempt_ownership(&current.attempt_id),
+            Some(current)
+        );
     }
 
     #[test]
     fn drain_keeps_active_work_and_shutdown_honors_grace_before_termination() {
         let channel = RecordingChannel::confirming();
-        let service = RuntimeControlService::new(channel.clone());
+        let service = test_service(channel.clone());
         let ownership = ownership();
-        service.register_attempt(ownership.clone());
+        register_test_attempt(&service, ownership.clone());
 
         service.drain().unwrap();
         assert_eq!(service.terminal_outcome(&ownership.execution_id), None);
@@ -812,7 +1375,7 @@ mod tests {
         AttemptOwnership {
             execution_id: ExecutionId::new(),
             attempt_id: AttemptId::new(),
-            attempt_number: 2,
+            attempt_number: 1,
             runtime_host_id: RuntimeHostId::new(),
             runtime_session_id: RuntimeSessionId::new(),
             worker_id: WorkerId::new(),
@@ -851,5 +1414,66 @@ mod tests {
             attempt_id: ownership.attempt_id.clone(),
             attempt_number: ownership.attempt_number,
         }
+    }
+
+    fn test_service(channel: Arc<dyn RuntimeControlChannel>) -> RuntimeControlService {
+        RuntimeControlService::new(
+            channel,
+            Arc::new(crate::MemoryExecutionStateStore::default()),
+        )
+    }
+
+    fn register_test_attempt(service: &RuntimeControlService, ownership: AttemptOwnership) {
+        seed_attempt(service, &ownership);
+        service.register_attempt(ownership).unwrap();
+    }
+
+    fn seed_attempt(service: &RuntimeControlService, ownership: &AttemptOwnership) {
+        let attempt = attempt(ownership);
+        let request =
+            InvocationRequest::with_attempt(json!({}), Default::default(), attempt.clone());
+        service
+            .store
+            .create(crate::NewExecution {
+                action: ActionDefinition {
+                    runtime: RuntimeKind::Python,
+                    kind: ActionKind::Api(ApiAction {
+                        method: "POST".into(),
+                        path: "/test".into(),
+                        consumes: vec![],
+                        produces: vec![],
+                        request_schema: None,
+                        response_schema: None,
+                        query_params: vec![],
+                        authorizer: None,
+                    }),
+                    source: "test.py".into(),
+                    entrypoint: "run".into(),
+                    name: Some("test".into()),
+                    policy: Default::default(),
+                },
+                action_revision: "runtime-control-test-revision".into(),
+                request,
+                policy: crate::ExecutionPolicy {
+                    timeout: Duration::from_secs(1),
+                    retry: crate::RetryPolicy {
+                        max_attempts: 1,
+                        initial_delay: Duration::ZERO,
+                        backoff: 1.0,
+                    },
+                },
+                created_at: SystemTime::now(),
+            })
+            .unwrap();
+        service
+            .store
+            .compare_and_set(
+                &attempt.execution_id,
+                0,
+                ExecutionMutation::StartAttempt {
+                    attempt: crate::AttemptRecord::pending(attempt.clone(), 1),
+                },
+            )
+            .unwrap();
     }
 }

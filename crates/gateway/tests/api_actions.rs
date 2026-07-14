@@ -1,8 +1,11 @@
 mod support;
 
 use axum::http::{Method, StatusCode};
+use ryvus_execution::{ExecutionState, ExecutionStateStore, MemoryExecutionStateStore};
 use ryvus_gateway::server;
+use ryvus_protocol::ExecutionId;
 use serde_json::json;
+use std::sync::Arc;
 
 use support::*;
 
@@ -24,6 +27,40 @@ def hello(event, context):
 
     assert_eq!(response.status, StatusCode::OK, "{}", response.raw_body);
     assert_eq!(response.body, json!({"message": "Hello from Ryvus"}));
+}
+
+#[tokio::test]
+async fn local_gateway_records_execution_in_its_injected_store() {
+    let project = TestProject::new("shared-execution-store");
+    project.add_action(
+        "identity.py",
+        r#"
+@api_action(method="GET", path="/identity")
+def identity(context):
+    return {"execution_id": context.execution_id}
+"#,
+    );
+    project.write_manifest(&[action("GET", "/identity", "src/identity.py", "identity")]);
+
+    let store = Arc::new(MemoryExecutionStateStore::default());
+    let execution_service =
+        server::build_execution_service_with_store(project.config().project_root, store.clone());
+    let app = server::build_app_with_execution_service(&project.config(), execution_service)
+        .expect("gateway app should build");
+
+    let response = raw_request_with_headers_on_app(app, Method::GET, "/identity", "", &[]).await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.raw_body);
+    let execution_id = response.body["execution_id"]
+        .as_str()
+        .map(ExecutionId::from)
+        .expect("action should return its execution id");
+    let aggregate = store
+        .load(&execution_id)
+        .expect("store read should succeed")
+        .expect("execution should be recorded");
+    assert_eq!(aggregate.state, ExecutionState::Succeeded);
+    assert_eq!(aggregate.attempts.len(), 1);
 }
 
 #[tokio::test]

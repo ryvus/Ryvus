@@ -1,4 +1,5 @@
 pub mod artifacts;
+pub mod database;
 pub mod discover;
 pub mod new;
 pub mod project;

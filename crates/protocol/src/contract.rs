@@ -121,7 +121,7 @@ impl std::fmt::Display for ExecutionAttempt {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InvocationRequest {
     pub protocol_version: String,
     pub execution_id: ExecutionId,
@@ -187,12 +187,12 @@ impl InvocationRequest {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct InvocationContext {
     pub metadata: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InvocationResult {
     pub protocol_version: String,
     pub execution_id: ExecutionId,
@@ -244,7 +244,7 @@ pub enum InvocationStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InvocationError {
     pub code: String,
     pub message: String,
@@ -263,7 +263,7 @@ impl InvocationError {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InvocationEvent {
     Log(LogEvent),
@@ -287,7 +287,7 @@ impl InvocationEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogEvent {
     pub execution_id: ExecutionId,
     pub attempt_id: AttemptId,
@@ -297,7 +297,7 @@ pub struct LogEvent {
     pub fields: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogLevel {
     Trace,
@@ -307,7 +307,7 @@ pub enum LogLevel {
     Error,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MetricEvent {
     pub execution_id: ExecutionId,
     pub attempt_id: AttemptId,

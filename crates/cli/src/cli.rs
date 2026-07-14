@@ -27,12 +27,24 @@ pub enum Command {
         #[command(subcommand)]
         command: ScheduleCommand,
     },
+    Database {
+        #[command(subcommand)]
+        command: DatabaseCommand,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum ScheduleCommand {
     List,
     Run { selector: String },
+}
+
+#[derive(Subcommand)]
+pub enum DatabaseCommand {
+    Migrate {
+        #[arg(long)]
+        database_url: Option<String>,
+    },
 }
 
 #[derive(clap::ValueEnum, Clone)]
@@ -61,5 +73,26 @@ mod tests {
         let cli = Cli::try_parse_from(["ryvus", "start"]).unwrap();
 
         assert!(matches!(cli.command, Command::Start { schedules: false }));
+    }
+
+    #[test]
+    fn parses_database_migrate_url() {
+        let cli = Cli::try_parse_from([
+            "ryvus",
+            "database",
+            "migrate",
+            "--database-url",
+            "postgres://localhost/ryvus",
+        ])
+        .expect("database migrate command should parse");
+
+        assert!(matches!(
+            cli.command,
+            Command::Database {
+                command: DatabaseCommand::Migrate {
+                    database_url: Some(url)
+                }
+            } if url == "postgres://localhost/ryvus"
+        ));
     }
 }

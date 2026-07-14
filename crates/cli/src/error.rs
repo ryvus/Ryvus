@@ -49,4 +49,10 @@ pub enum CliError {
     },
     #[error("gateway failed: {0}")]
     Gateway(String),
+
+    #[error("database URL is required; pass --database-url or set DATABASE_URL")]
+    DatabaseUrlRequired,
+
+    #[error("database migration failed")]
+    DatabaseMigration,
 }

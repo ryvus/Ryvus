@@ -134,7 +134,6 @@ where
 }
 
 struct ManagedHost {
-    attempt: ExecutionAttempt,
     runtime_host_id: RuntimeHostId,
     runtime_host: RuntimeHost,
     shutdown: Option<oneshot::Sender<()>>,
@@ -220,11 +219,14 @@ impl RuntimeManager for LocalRuntimeManager {
         )?;
         self.channel
             .register(runtime_host_id, host.runtime_host.control_sender());
-        self.control.register_attempt(ownership);
+        if let Err(error) = self.control.register_attempt(ownership) {
+            self.channel.unregister(&host.runtime_host_id);
+            stop_runtime_host(host)?;
+            return Err(error.into());
+        }
         let mut state = self.state.lock().expect("runtime state should lock");
         if state.draining {
             drop(state);
-            self.control.unregister_attempt(&attempt.attempt_id);
             self.control.unregister_runtime(&host.runtime_host_id);
             self.channel.unregister(&host.runtime_host_id);
             stop_runtime_host(host)?;
@@ -266,7 +268,6 @@ impl RuntimeManager for LocalRuntimeManager {
         };
 
         let events = host.runtime_host.take_events(&handle.attempt);
-        self.control.unregister_attempt(&handle.attempt.attempt_id);
         self.control.unregister_runtime(&host.runtime_host_id);
         self.channel.unregister(&host.runtime_host_id);
         stop_runtime_host(host)?;
@@ -288,7 +289,6 @@ impl RuntimeManager for LocalRuntimeManager {
             state.hosts.drain().collect::<Vec<_>>()
         };
         for (_, host) in hosts {
-            self.control.unregister_attempt(&host.attempt.attempt_id);
             self.control.unregister_runtime(&host.runtime_host_id);
             self.channel.unregister(&host.runtime_host_id);
             stop_runtime_host(host)?;
@@ -360,7 +360,6 @@ fn start_runtime_host(
             })
         })?;
     let managed = ManagedHost {
-        attempt: attempt.clone(),
         runtime_host_id,
         runtime_host: host,
         shutdown: Some(shutdown_tx),

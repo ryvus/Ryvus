@@ -18,7 +18,7 @@ pub enum ExecutionState {
     TimedOut,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionResult {
     pub invocation_result: InvocationResult,
     pub events: Vec<InvocationEvent>,
@@ -28,7 +28,7 @@ pub struct ExecutionResult {
     pub exit_code: Option<i32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionRecord {
     pub attempt: ExecutionAttempt,
     pub request: InvocationRequest,
@@ -57,7 +57,7 @@ impl ExecutionRecord {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExecutionTarget {
     Process {
         command: String,

@@ -85,6 +85,9 @@ pub enum ExecutorError {
     #[error("runtime manager is shutting down")]
     RuntimeUnavailable,
 
+    #[error("runtime control failed: {0}")]
+    RuntimeControl(#[from] crate::RuntimeControlError),
+
     #[error("cancellation is not supported for externally managed runtime {endpoint}")]
     UnsupportedCancellation { endpoint: String },
 }
@@ -98,6 +101,9 @@ pub enum ExecutionServiceError {
 
     #[error("runtime control error: {0}")]
     RuntimeControl(#[from] crate::RuntimeControlError),
+
+    #[error("execution state store error: {0}")]
+    StateStore(#[from] crate::StateStoreError),
 
     #[error("invalid execution policy: {0}")]
     InvalidPolicy(String),

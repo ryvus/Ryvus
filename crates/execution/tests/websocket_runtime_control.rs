@@ -6,14 +6,15 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use ryvus_execution::{
-    RuntimeControlChannel, WebSocketHeaderValidator, WebSocketRuntimeControlChannel,
-    WebSocketRuntimeControlOptions,
+    AttemptRecord, ExecutionMutation, ExecutionPolicy, ExecutionStateStore,
+    MemoryExecutionStateStore, NewExecution, RetryPolicy, RuntimeControlChannel,
+    WebSocketHeaderValidator, WebSocketRuntimeControlChannel, WebSocketRuntimeControlOptions,
 };
 use ryvus_protocol::{
-    ActiveAttemptOwnership, AttemptId, ControlCommandOutcome, ControlMessageId, ExecutionId,
-    InvocationRequest, RuntimeCapabilities, RuntimeControlCommand, RuntimeControlEvent,
-    RuntimeHostId, RuntimeRegistration, RuntimeSessionId, WorkerId,
-    RUNTIME_CONTROL_PROTOCOL_VERSION,
+    ActionDefinition, ActionKind, ActiveAttemptOwnership, ApiAction, AttemptId,
+    ControlCommandOutcome, ControlMessageId, ExecutionId, InvocationRequest, RuntimeCapabilities,
+    RuntimeControlCommand, RuntimeControlEvent, RuntimeHostId, RuntimeKind, RuntimeRegistration,
+    RuntimeSessionId, WorkerId, RUNTIME_CONTROL_PROTOCOL_VERSION,
 };
 use ryvus_runtime_host::{
     ProcessInvocationWorkerFactory, ProcessWorkerConfig, RuntimeHost, WebSocketHeaderProvider,
@@ -107,7 +108,7 @@ async fn registration_is_first_and_new_session_fences_the_old_connection() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn authentication_validator_rejects_before_upgrade() {
     let validator: WebSocketHeaderValidator = Arc::new(|_| false);
-    let (_service, _channel, endpoint, server) =
+    let (_service, _channel, endpoint, server, _store) =
         start_server_with_auth(options(), Some(validator)).await;
 
     assert!(connect_async(endpoint).await.is_err());
@@ -239,7 +240,7 @@ async fn host_reconnect_reports_active_attempt_and_routes_exact_duplicate_comman
             .and_then(|value| value.to_str().ok())
             == Some("Bearer integration-test")
     });
-    let (service, channel, endpoint, server) =
+    let (service, channel, endpoint, server, store) =
         start_server_with_auth(options(), Some(validator)).await;
     let host = sleeping_host();
     let host_id = host.identity().0;
@@ -247,6 +248,7 @@ async fn host_reconnect_reports_active_attempt_and_routes_exact_duplicate_comman
     tokio::spawn(async move { control_host.run_control_loop().await });
 
     let request = invocation();
+    seed_execution(&store, &request);
     let execution_id = request.execution_id.clone();
     let attempt_id = request.attempt_id.clone();
     let invocation_host = host.clone();
@@ -266,7 +268,7 @@ async fn host_reconnect_reports_active_attempt_and_routes_exact_duplicate_comman
 
     let client = WebSocketRuntimeHostClient::new(endpoint, "test-revision")
         .heartbeat_interval(Duration::from_millis(20))
-        .reconnect_backoff(Duration::from_millis(10), Duration::from_millis(30))
+        .reconnect_backoff(Duration::from_millis(100), Duration::from_millis(100))
         .header_provider({
             let provider: WebSocketHeaderProvider = Arc::new(|headers| {
                 headers.insert(
@@ -312,12 +314,29 @@ async fn host_reconnect_reports_active_attempt_and_routes_exact_duplicate_comman
     let duplicate = send_blocking(Arc::clone(&channel), duplicate_command).await;
     assert_eq!(outcome(&first), ControlCommandOutcome::Confirmed);
     assert_eq!(first, duplicate);
+
     assert_eq!(
-        tokio::task::spawn_blocking(move || service.cancel(&execution_id).unwrap())
-            .await
-            .unwrap(),
+        tokio::task::spawn_blocking({
+            let service = service.clone();
+            let execution_id = execution_id.clone();
+            move || service.cancel(&execution_id).unwrap()
+        })
+        .await
+        .unwrap(),
         ControlCommandOutcome::Confirmed
     );
+    let aggregate = store.load(&execution_id).unwrap().unwrap();
+    assert_eq!(
+        aggregate.terminal_state.unwrap().state,
+        ryvus_execution::ExecutionState::Cancelled
+    );
+    assert!(aggregate
+        .attempts
+        .into_iter()
+        .find(|attempt| attempt.attempt.attempt_id == attempt_id)
+        .unwrap()
+        .ownership
+        .is_none());
 
     tokio::time::timeout(Duration::from_secs(2), invocation)
         .await
@@ -336,7 +355,8 @@ async fn start_server(
     String,
     tokio::task::JoinHandle<()>,
 ) {
-    start_server_with_auth(options, None).await
+    let (service, channel, endpoint, server, _) = start_server_with_auth(options, None).await;
+    (service, channel, endpoint, server)
 }
 
 async fn start_server_with_auth(
@@ -347,8 +367,10 @@ async fn start_server_with_auth(
     Arc<WebSocketRuntimeControlChannel>,
     String,
     tokio::task::JoinHandle<()>,
+    Arc<MemoryExecutionStateStore>,
 ) {
-    let (service, channel) = WebSocketRuntimeControlChannel::new(options, validator);
+    let store = Arc::new(MemoryExecutionStateStore::default());
+    let (service, channel) = WebSocketRuntimeControlChannel::new(options, validator, store.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let router = Arc::clone(&channel).router();
@@ -360,6 +382,7 @@ async fn start_server_with_auth(
         channel,
         format!("ws://{address}/runtime-control"),
         server,
+        store,
     )
 }
 
@@ -482,6 +505,50 @@ fn invocation() -> InvocationRequest {
     let mut request = InvocationRequest::new(serde_json::json!({}));
     request.set_deadline(now_unix_ms() + 10_000, 10_000);
     request
+}
+
+fn seed_execution(store: &MemoryExecutionStateStore, request: &InvocationRequest) {
+    let aggregate = store
+        .create(NewExecution {
+            action: ActionDefinition {
+                runtime: RuntimeKind::Python,
+                kind: ActionKind::Api(ApiAction {
+                    method: "POST".into(),
+                    path: "/test".into(),
+                    consumes: vec![],
+                    produces: vec![],
+                    request_schema: None,
+                    response_schema: None,
+                    query_params: vec![],
+                    authorizer: None,
+                }),
+                source: "test.py".into(),
+                entrypoint: "run".into(),
+                name: Some("test".into()),
+                policy: Default::default(),
+            },
+            action_revision: "websocket-test-revision".into(),
+            request: request.clone(),
+            policy: ExecutionPolicy {
+                timeout: Duration::from_secs(10),
+                retry: RetryPolicy {
+                    max_attempts: 1,
+                    initial_delay: Duration::ZERO,
+                    backoff: 1.0,
+                },
+            },
+            created_at: std::time::SystemTime::now(),
+        })
+        .unwrap();
+    store
+        .compare_and_set(
+            &request.execution_id,
+            aggregate.execution_version,
+            ExecutionMutation::StartAttempt {
+                attempt: AttemptRecord::pending(request.attempt(), request.deadline_unix_ms),
+            },
+        )
+        .unwrap();
 }
 
 fn now_unix_ms() -> i64 {

@@ -1,8 +1,8 @@
 use clap::Parser;
 use ryvus_cli::{
-    commands::{discover, new, schedule, start, validate},
+    commands::{database, discover, new, schedule, start, validate},
     error::CliError,
-    Cli, Command, ScheduleCommand,
+    Cli, Command, DatabaseCommand, ScheduleCommand,
 };
 
 fn main() {
@@ -36,6 +36,10 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::Schedule { command } => match command {
             ScheduleCommand::List => schedule::list(),
             ScheduleCommand::Run { selector } => schedule::run(selector),
+        },
+
+        Command::Database { command } => match command {
+            DatabaseCommand::Migrate { database_url } => database::migrate(database_url),
         },
     }
 }

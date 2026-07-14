@@ -9,6 +9,7 @@ pub mod resolver;
 pub mod runtime_control;
 pub mod runtime_manager;
 pub mod service;
+pub mod state_store;
 pub mod websocket_runtime_control;
 
 pub mod event_sink;
@@ -26,5 +27,6 @@ pub use resolver::*;
 pub use runtime_control::*;
 pub use runtime_manager::*;
 pub use service::*;
+pub use state_store::*;
 pub use target::*;
 pub use websocket_runtime_control::*;

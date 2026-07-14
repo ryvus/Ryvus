@@ -1,24 +1,25 @@
 use ryvus_protocol::ActionDefinition;
 
 use ryvus_protocol::{
-    AttemptId, AttemptOutcome, ControlCommandOutcome, ExecutionAttempt, ExecutionId,
-    InvocationRequest,
+    AttemptOutcome, ControlCommandOutcome, ExecutionAttempt, ExecutionId, InvocationRequest,
 };
-use std::{collections::HashMap, sync::Mutex};
+use serde::{Deserialize, Serialize};
+use std::{sync::Arc, time::SystemTime};
 
 use crate::{
-    assign_attempt_deadline, ExecutionOptions, ExecutionPersistence, ExecutionRecord,
-    ExecutionServiceError, ExecutionServiceResult, ExecutionState, Executor, ExecutorError,
-    RecordingExecutor, RuntimeControlService, RuntimeResolver,
+    action_revision, assign_attempt_deadline, AttemptRecord, ExecutionMutation, ExecutionOptions,
+    ExecutionPersistence, ExecutionRecord, ExecutionServiceError, ExecutionServiceResult,
+    ExecutionState, ExecutionStateStore, Executor, ExecutorError, NewExecution, RecordingExecutor,
+    RuntimeControlService, RuntimeResolver, StateStoreError, TerminalState, TransitionResult,
 };
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionPolicy {
     pub timeout: std::time::Duration,
     pub retry: RetryPolicy,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RetryPolicy {
     pub max_attempts: u32,
     pub initial_delay: std::time::Duration,
@@ -35,9 +36,9 @@ impl ExecutionPolicy {
             ));
         }
 
-        if policy.retry.backoff <= 0.0 {
+        if !policy.retry.backoff.is_finite() || policy.retry.backoff <= 0.0 {
             return Err(ExecutionServiceError::InvalidPolicy(
-                "retry.backoff must be greater than 0".to_string(),
+                "retry.backoff must be finite and greater than 0".to_string(),
             ));
         }
 
@@ -88,13 +89,7 @@ pub struct ExecutionService<RR, E, EP> {
     executor: RecordingExecutor<E>,
     persistence: EP,
     runtime_control: RuntimeControlService,
-    states: Mutex<HashMap<ExecutionId, ExecutionStatus>>,
-}
-
-#[derive(Debug, Clone)]
-struct ExecutionStatus {
-    state: ExecutionState,
-    active_attempt_id: Option<AttemptId>,
+    store: Arc<dyn ExecutionStateStore>,
 }
 
 impl<RR, E, EP> ExecutionService<RR, E, EP>
@@ -108,13 +103,14 @@ where
         executor: E,
         persistence: EP,
         runtime_control: RuntimeControlService,
+        store: Arc<dyn ExecutionStateStore>,
     ) -> Self {
         Self {
             resolver,
             executor: RecordingExecutor::new(executor),
             persistence,
             runtime_control,
-            states: Mutex::new(HashMap::new()),
+            store,
         }
     }
 
@@ -131,23 +127,32 @@ where
         }
 
         let execution_id = request.execution_id.clone();
-        self.set_state(&execution_id, ExecutionState::Pending);
+        let mut aggregate = self.store.create(NewExecution {
+            action: action.clone(),
+            action_revision: action_revision(action)?,
+            request: request.clone(),
+            policy: policy.clone(),
+            created_at: SystemTime::now(),
+        })?;
         let target = match self.resolver.resolve(action) {
             Ok(target) => target,
             Err(error) => {
-                self.set_state(&execution_id, ExecutionState::Failed);
+                self.finish_without_attempt(&mut aggregate, ExecutionState::Failed)?;
                 return Err(error.into());
             }
         };
         let mut delay = policy.retry.initial_delay;
         let mut attempt_request = request.clone();
+        assign_attempt_deadline(&mut attempt_request, policy.timeout)?;
 
         loop {
-            assign_attempt_deadline(&mut attempt_request, policy.timeout)?;
             let attempt = attempt_request.attempt();
-            if !self.start_attempt(&attempt) {
-                self.set_state(&execution_id, ExecutionState::Cancelled);
-                return Err(ExecutionServiceError::CancellationRequested { execution_id });
+            match self.start_attempt(&mut aggregate, &attempt_request)? {
+                true => {}
+                false => {
+                    self.finish_without_attempt(&mut aggregate, ExecutionState::Cancelled)?;
+                    return Err(ExecutionServiceError::CancellationRequested { execution_id });
+                }
             }
             let record = match self.executor.invoke_recorded(
                 &target,
@@ -158,57 +163,114 @@ where
             ) {
                 Ok(record) => record,
                 Err(error) => {
-                    let state = self
-                        .runtime_control
-                        .terminal_outcome(&execution_id)
-                        .map(outcome_state)
-                        .unwrap_or_else(|| {
-                            if matches!(error, ExecutorError::RuntimeCancelled { .. }) {
-                                ExecutionState::Cancelled
-                            } else if matches!(
-                                error,
-                                ExecutorError::ProcessTimedOut { .. }
-                                    | ExecutorError::RuntimeTimedOut { .. }
-                            ) {
-                                ExecutionState::TimedOut
-                            } else {
-                                ExecutionState::Failed
-                            }
-                        });
-                    self.finish_attempt(&attempt, state);
+                    let outcome = if matches!(error, ExecutorError::RuntimeCancelled { .. }) {
+                        AttemptOutcome::Cancelled
+                    } else if matches!(
+                        error,
+                        ExecutorError::ProcessTimedOut { .. }
+                            | ExecutorError::RuntimeTimedOut { .. }
+                    ) {
+                        AttemptOutcome::TimedOut
+                    } else {
+                        AttemptOutcome::InfrastructureFailed
+                    };
+                    let winner = self.finish_terminal(&mut aggregate, &attempt, outcome, None)?;
+                    if winner == AttemptOutcome::Cancelled && outcome != AttemptOutcome::Cancelled {
+                        return Err(ExecutorError::RuntimeCancelled { attempt }.into());
+                    }
+                    if winner == AttemptOutcome::TimedOut && outcome != AttemptOutcome::TimedOut {
+                        return Err(ExecutorError::RuntimeTimedOut { attempt }.into());
+                    }
                     return Err(error.into());
                 }
             };
 
             if let Err(error) = self.persistence.save_execution(&record) {
-                self.finish_attempt(&attempt, ExecutionState::Failed);
+                self.finish_terminal(
+                    &mut aggregate,
+                    &attempt,
+                    AttemptOutcome::InfrastructureFailed,
+                    Some(record.result.clone()),
+                )?;
                 return Err(error.into());
             }
 
-            if self.runtime_control.terminal_outcome(&execution_id)
-                == Some(AttemptOutcome::Cancelled)
-            {
-                self.finish_attempt(&attempt, ExecutionState::Cancelled);
-                return Err(ExecutorError::RuntimeCancelled { attempt }.into());
+            aggregate = self.reload(&execution_id)?;
+            if let Some(terminal) = &aggregate.terminal_state {
+                match terminal.state {
+                    ExecutionState::Cancelled => {
+                        return Err(ExecutorError::RuntimeCancelled { attempt }.into())
+                    }
+                    ExecutionState::TimedOut => {
+                        return Err(ExecutorError::RuntimeTimedOut { attempt }.into())
+                    }
+                    _ => {}
+                }
             }
 
             let result = &record.result.invocation_result;
             if result.status == ryvus_protocol::InvocationStatus::Success {
-                self.finish_attempt(&attempt, ExecutionState::Succeeded);
+                let winner = self.finish_terminal(
+                    &mut aggregate,
+                    &attempt,
+                    AttemptOutcome::Succeeded,
+                    Some(record.result.clone()),
+                )?;
+                if winner == AttemptOutcome::Cancelled {
+                    return Err(ExecutorError::RuntimeCancelled { attempt }.into());
+                }
+                if winner == AttemptOutcome::TimedOut {
+                    return Err(ExecutorError::RuntimeTimedOut { attempt }.into());
+                }
                 return Ok(record);
             }
 
             let retryable = result.error.as_ref().is_some_and(|error| error.retryable);
             let attempts_remain = attempt.attempt_number < policy.retry.max_attempts;
             if !retryable || !attempts_remain {
-                self.finish_attempt(&attempt, ExecutionState::Failed);
+                let winner = self.finish_terminal(
+                    &mut aggregate,
+                    &attempt,
+                    AttemptOutcome::Failed,
+                    Some(record.result.clone()),
+                )?;
+                if winner == AttemptOutcome::Cancelled {
+                    return Err(ExecutorError::RuntimeCancelled { attempt }.into());
+                }
+                if winner == AttemptOutcome::TimedOut {
+                    return Err(ExecutorError::RuntimeTimedOut { attempt }.into());
+                }
                 return Ok(record);
             }
 
-            self.finish_attempt(&attempt, ExecutionState::Pending);
+            let mut retry_request = attempt_request.retry();
+            assign_attempt_deadline(&mut retry_request, policy.timeout)?;
+            let delay_ms =
+                i64::try_from(delay.as_millis()).map_err(|_| ExecutorError::DeadlineOutOfRange)?;
+            retry_request.deadline_unix_ms = retry_request
+                .deadline_unix_ms
+                .checked_add(delay_ms)
+                .ok_or(ExecutorError::DeadlineOutOfRange)?;
+            if !self.finish_with_retry(&mut aggregate, &attempt, &record, &retry_request)? {
+                if aggregate
+                    .terminal_state
+                    .as_ref()
+                    .is_some_and(|terminal| terminal.state == ExecutionState::Cancelled)
+                {
+                    return Err(ExecutorError::RuntimeCancelled { attempt }.into());
+                }
+                if aggregate
+                    .terminal_state
+                    .as_ref()
+                    .is_some_and(|terminal| terminal.state == ExecutionState::TimedOut)
+                {
+                    return Err(ExecutorError::RuntimeTimedOut { attempt }.into());
+                }
+                return Ok(record);
+            }
             std::thread::sleep(delay);
             delay = delay.mul_f64(policy.retry.backoff);
-            attempt_request = attempt_request.retry();
+            attempt_request = retry_request;
 
             if attempt_request.attempt_number > policy.retry.max_attempts {
                 unreachable!("retry should only be created while attempts remain");
@@ -227,42 +289,8 @@ where
     }
 
     pub fn cancel(&self, execution_id: &ExecutionId) -> ExecutionServiceResult<bool> {
-        {
-            let states = self.states.lock().expect("execution states should lock");
-            match states.get(execution_id) {
-                Some(status)
-                    if matches!(
-                        status.state,
-                        ExecutionState::Pending | ExecutionState::Running
-                    ) => {}
-                Some(status)
-                    if matches!(
-                        status.state,
-                        ExecutionState::CancellationRequested | ExecutionState::Cancelled
-                    ) =>
-                {
-                    return Ok(true);
-                }
-                Some(status)
-                    if matches!(
-                        status.state,
-                        ExecutionState::Succeeded
-                            | ExecutionState::Failed
-                            | ExecutionState::TimedOut
-                    ) =>
-                {
-                    return Ok(false);
-                }
-                None => return Ok(false),
-                Some(_) => unreachable!("all execution states should be handled"),
-            }
-        }
-
         match self.runtime_control.cancel(execution_id)? {
-            ControlCommandOutcome::Confirmed => {
-                self.set_terminal_state(execution_id, ExecutionState::Cancelled);
-                Ok(true)
-            }
+            ControlCommandOutcome::Confirmed => Ok(true),
             ControlCommandOutcome::AlreadyTerminal => {
                 Ok(self.runtime_control.terminal_outcome(execution_id)
                     == Some(AttemptOutcome::Cancelled))
@@ -276,11 +304,11 @@ where
     }
 
     pub fn execution_state(&self, execution_id: &ExecutionId) -> Option<ExecutionState> {
-        self.states
-            .lock()
-            .expect("execution states should lock")
-            .get(execution_id)
-            .map(|status| status.state)
+        self.store
+            .load(execution_id)
+            .ok()
+            .flatten()
+            .map(|aggregate| aggregate.state)
     }
 
     pub fn shutdown(&self, grace: std::time::Duration) -> ExecutionServiceResult<()> {
@@ -288,89 +316,163 @@ where
         self.executor.shutdown(grace).map_err(Into::into)
     }
 
-    fn set_state(&self, execution_id: &ExecutionId, state: ExecutionState) {
-        // ponytail: terminal states remain in memory for local v0; add bounded persistence when run history is introduced.
-        self.states
-            .lock()
-            .expect("execution states should lock")
-            .entry(execution_id.clone())
-            .and_modify(|status| status.state = state)
-            .or_insert(ExecutionStatus {
-                state,
-                active_attempt_id: None,
-            });
-    }
-
-    fn start_attempt(&self, attempt: &ExecutionAttempt) -> bool {
-        let mut states = self.states.lock().expect("execution states should lock");
-        let status = states
-            .get_mut(&attempt.execution_id)
-            .expect("execution state should exist before an attempt starts");
-        if status.state == ExecutionState::CancellationRequested {
-            false
-        } else {
-            status.state = ExecutionState::Running;
-            status.active_attempt_id = Some(attempt.attempt_id.clone());
-            true
-        }
-    }
-
-    fn finish_attempt(&self, attempt: &ExecutionAttempt, state: ExecutionState) {
-        let state = match state {
-            ExecutionState::Succeeded => outcome_state(
-                self.runtime_control
-                    .finish_attempt(attempt, AttemptOutcome::Succeeded),
-            ),
-            ExecutionState::Failed => outcome_state(
-                self.runtime_control
-                    .finish_attempt(attempt, AttemptOutcome::Failed),
-            ),
-            ExecutionState::Cancelled => outcome_state(
-                self.runtime_control
-                    .finish_attempt(attempt, AttemptOutcome::Cancelled),
-            ),
-            ExecutionState::TimedOut => outcome_state(
-                self.runtime_control
-                    .finish_attempt(attempt, AttemptOutcome::TimedOut),
-            ),
-            state => state,
-        };
-        let mut states = self.states.lock().expect("execution states should lock");
-        let status = states
-            .get_mut(&attempt.execution_id)
-            .expect("execution state should exist while an attempt finishes");
-
-        if status.active_attempt_id.as_ref() == Some(&attempt.attempt_id) {
-            if !is_terminal(status.state) {
-                status.state = state;
+    fn reload(
+        &self,
+        execution_id: &ExecutionId,
+    ) -> ExecutionServiceResult<crate::ExecutionAggregate> {
+        self.store.load(execution_id)?.ok_or_else(|| {
+            StateStoreError::NotFound {
+                execution_id: execution_id.clone(),
             }
-            status.active_attempt_id = None;
-        }
+            .into()
+        })
     }
 
-    fn set_terminal_state(&self, execution_id: &ExecutionId, state: ExecutionState) {
-        if let Some(status) = self
-            .states
-            .lock()
-            .expect("execution states should lock")
-            .get_mut(execution_id)
-        {
-            if !is_terminal(status.state) {
-                status.state = state;
-                status.active_attempt_id = None;
+    fn start_attempt(
+        &self,
+        aggregate: &mut crate::ExecutionAggregate,
+        request: &InvocationRequest,
+    ) -> ExecutionServiceResult<bool> {
+        loop {
+            if aggregate.terminal_state.is_some() || aggregate.cancellation_intent.is_some() {
+                return Ok(false);
+            }
+            match self.store.compare_and_set(
+                &aggregate.execution_id,
+                aggregate.execution_version,
+                ExecutionMutation::StartAttempt {
+                    attempt: AttemptRecord::pending(request.attempt(), request.deadline_unix_ms),
+                },
+            )? {
+                TransitionResult::Applied { aggregate: current } => {
+                    *aggregate = current;
+                    return Ok(true);
+                }
+                TransitionResult::Unchanged { aggregate: current } => {
+                    *aggregate = current;
+                    return Ok(true);
+                }
+                TransitionResult::Conflict { .. } => {
+                    *aggregate = self.reload(&aggregate.execution_id)?
+                }
             }
         }
     }
-}
 
-fn is_terminal(state: ExecutionState) -> bool {
-    matches!(
-        state,
-        ExecutionState::Succeeded
-            | ExecutionState::Failed
-            | ExecutionState::Cancelled
-            | ExecutionState::TimedOut
-    )
+    fn finish_terminal(
+        &self,
+        aggregate: &mut crate::ExecutionAggregate,
+        attempt: &ExecutionAttempt,
+        outcome: AttemptOutcome,
+        result: Option<crate::ExecutionResult>,
+    ) -> ExecutionServiceResult<AttemptOutcome> {
+        loop {
+            if let Some(terminal) = &aggregate.terminal_state {
+                return Ok(state_outcome(terminal.state));
+            }
+            match self.store.compare_and_set(
+                &aggregate.execution_id,
+                aggregate.execution_version,
+                ExecutionMutation::FinishAttempt {
+                    attempt_id: attempt.attempt_id.clone(),
+                    outcome,
+                    result: result.clone(),
+                    retry: None,
+                    terminal: Some(TerminalState::new(
+                        outcome_state(outcome),
+                        Some(attempt.attempt_id.clone()),
+                    )),
+                },
+            )? {
+                TransitionResult::Applied { aggregate: current }
+                | TransitionResult::Unchanged { aggregate: current } => {
+                    *aggregate = current;
+                    return Ok(aggregate
+                        .terminal_state
+                        .as_ref()
+                        .map(|terminal| state_outcome(terminal.state))
+                        .unwrap_or(outcome));
+                }
+                TransitionResult::Conflict { .. } => {
+                    *aggregate = self.reload(&aggregate.execution_id)?
+                }
+            }
+        }
+    }
+
+    fn finish_with_retry(
+        &self,
+        aggregate: &mut crate::ExecutionAggregate,
+        attempt: &ExecutionAttempt,
+        record: &ExecutionRecord,
+        retry_request: &InvocationRequest,
+    ) -> ExecutionServiceResult<bool> {
+        loop {
+            if aggregate.terminal_state.is_some() {
+                return Ok(false);
+            }
+            if aggregate.cancellation_intent.is_some() {
+                self.finish_terminal(
+                    aggregate,
+                    attempt,
+                    AttemptOutcome::Failed,
+                    Some(record.result.clone()),
+                )?;
+                return Ok(false);
+            }
+            match self.store.compare_and_set(
+                &aggregate.execution_id,
+                aggregate.execution_version,
+                ExecutionMutation::FinishAttempt {
+                    attempt_id: attempt.attempt_id.clone(),
+                    outcome: AttemptOutcome::Failed,
+                    result: Some(record.result.clone()),
+                    retry: Some(AttemptRecord::pending(
+                        retry_request.attempt(),
+                        retry_request.deadline_unix_ms,
+                    )),
+                    terminal: None,
+                },
+            )? {
+                TransitionResult::Applied { aggregate: current }
+                | TransitionResult::Unchanged { aggregate: current } => {
+                    *aggregate = current;
+                    return Ok(true);
+                }
+                TransitionResult::Conflict { .. } => {
+                    *aggregate = self.reload(&aggregate.execution_id)?
+                }
+            }
+        }
+    }
+
+    fn finish_without_attempt(
+        &self,
+        aggregate: &mut crate::ExecutionAggregate,
+        state: ExecutionState,
+    ) -> ExecutionServiceResult<()> {
+        loop {
+            if aggregate.terminal_state.is_some() {
+                return Ok(());
+            }
+            match self.store.compare_and_set(
+                &aggregate.execution_id,
+                aggregate.execution_version,
+                ExecutionMutation::FinishExecution {
+                    terminal: TerminalState::new(state, None),
+                },
+            )? {
+                TransitionResult::Applied { aggregate: current }
+                | TransitionResult::Unchanged { aggregate: current } => {
+                    *aggregate = current;
+                    return Ok(());
+                }
+                TransitionResult::Conflict { .. } => {
+                    *aggregate = self.reload(&aggregate.execution_id)?
+                }
+            }
+        }
+    }
 }
 
 fn outcome_state(outcome: AttemptOutcome) -> ExecutionState {
@@ -379,6 +481,15 @@ fn outcome_state(outcome: AttemptOutcome) -> ExecutionState {
         AttemptOutcome::Failed | AttemptOutcome::InfrastructureFailed => ExecutionState::Failed,
         AttemptOutcome::Cancelled => ExecutionState::Cancelled,
         AttemptOutcome::TimedOut => ExecutionState::TimedOut,
+    }
+}
+
+fn state_outcome(state: ExecutionState) -> AttemptOutcome {
+    match state {
+        ExecutionState::Succeeded => AttemptOutcome::Succeeded,
+        ExecutionState::Cancelled => AttemptOutcome::Cancelled,
+        ExecutionState::TimedOut => AttemptOutcome::TimedOut,
+        _ => AttemptOutcome::Failed,
     }
 }
 
@@ -424,17 +535,205 @@ mod tests {
     }
 
     #[test]
+    fn store_failure_prevents_dispatch() {
+        let executor = FailsThenSucceeds::default();
+        let attempts = Arc::clone(&executor.attempts);
+        let mut store = crate::MockExecutionStateStore::new();
+        store
+            .expect_create()
+            .once()
+            .returning(|_| Err(StateStoreError::LockPoisoned));
+        let store: Arc<dyn ExecutionStateStore> = Arc::new(store);
+        let service = ExecutionService::new(
+            StaticResolver,
+            executor,
+            NoopPersistence,
+            test_runtime_control(store.clone()),
+            store,
+        );
+        let request = InvocationRequest::new(json!({}));
+        let policy = ExecutionPolicy {
+            timeout: Duration::from_secs(1),
+            retry: RetryPolicy {
+                max_attempts: 1,
+                initial_delay: Duration::ZERO,
+                backoff: 1.0,
+            },
+        };
+
+        assert!(matches!(
+            service.execute(&test_action(), &request, &policy),
+            Err(ExecutionServiceError::StateStore(
+                StateStoreError::LockPoisoned
+            ))
+        ));
+        assert!(attempts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn store_failure_while_recording_resolution_failure_is_propagated() {
+        let request = InvocationRequest::new(json!({}));
+        let policy = ExecutionPolicy {
+            timeout: Duration::from_secs(1),
+            retry: RetryPolicy {
+                max_attempts: 1,
+                initial_delay: Duration::ZERO,
+                backoff: 1.0,
+            },
+        };
+        let memory = crate::MemoryExecutionStateStore::default();
+        let created = memory
+            .create(NewExecution {
+                action: test_action(),
+                action_revision: "test-action-revision".into(),
+                request: request.clone(),
+                policy: policy.clone(),
+                created_at: SystemTime::now(),
+            })
+            .unwrap();
+        let mut store = crate::MockExecutionStateStore::new();
+        store
+            .expect_create()
+            .once()
+            .return_once(move |_| Ok(created));
+        store
+            .expect_compare_and_set()
+            .once()
+            .returning(|_, _, _| Err(StateStoreError::LockPoisoned));
+        let store: Arc<dyn ExecutionStateStore> = Arc::new(store);
+        let service = ExecutionService::new(
+            FailingResolver,
+            FailsThenSucceeds::default(),
+            NoopPersistence,
+            test_runtime_control(store.clone()),
+            store,
+        );
+
+        assert!(matches!(
+            service.execute(&test_action(), &request, &policy),
+            Err(ExecutionServiceError::StateStore(
+                StateStoreError::LockPoisoned
+            ))
+        ));
+    }
+
+    #[test]
+    fn execution_and_running_attempt_exist_before_dispatch() {
+        let store = Arc::new(crate::MemoryExecutionStateStore::default());
+        let observed = Arc::new(Mutex::new(false));
+        let executor = StoreInspectingSuccess {
+            store: store.clone(),
+            observed: observed.clone(),
+        };
+        let service = ExecutionService::new(
+            StaticResolver,
+            executor,
+            NoopPersistence,
+            test_runtime_control(store.clone()),
+            store,
+        );
+        let request = InvocationRequest::new(json!({}));
+        let policy = ExecutionPolicy {
+            timeout: Duration::from_secs(1),
+            retry: RetryPolicy {
+                max_attempts: 1,
+                initial_delay: Duration::ZERO,
+                backoff: 1.0,
+            },
+        };
+
+        service.execute(&test_action(), &request, &policy).unwrap();
+        assert!(*observed.lock().unwrap());
+    }
+
+    #[test]
+    fn cancellation_intent_during_retryable_result_finishes_active_attempt() {
+        let store = Arc::new(crate::MemoryExecutionStateStore::default());
+        let executor = CancellingFailure {
+            store: store.clone(),
+            invocations: Arc::new(Mutex::new(0)),
+        };
+        let invocations = executor.invocations.clone();
+        let service = ExecutionService::new(
+            StaticResolver,
+            executor,
+            NoopPersistence,
+            test_runtime_control(store.clone()),
+            store.clone(),
+        );
+        let request = InvocationRequest::new(json!({}));
+        let policy = ExecutionPolicy {
+            timeout: Duration::from_secs(1),
+            retry: RetryPolicy {
+                max_attempts: 2,
+                initial_delay: Duration::ZERO,
+                backoff: 1.0,
+            },
+        };
+
+        let record = service.execute(&test_action(), &request, &policy).unwrap();
+        assert_eq!(
+            record.result.invocation_result.status,
+            InvocationStatus::Failed
+        );
+        assert_eq!(*invocations.lock().unwrap(), 1);
+        let aggregate = store.load(&request.execution_id).unwrap().unwrap();
+        assert_eq!(aggregate.state, ExecutionState::Failed);
+        assert!(aggregate.active_attempt_id.is_none());
+        assert_eq!(aggregate.attempts.len(), 1);
+    }
+
+    #[test]
+    fn cancellation_before_dispatch_becomes_terminal_without_an_owner() {
+        let store = Arc::new(crate::MemoryExecutionStateStore::default());
+        let executor = FailsThenSucceeds::default();
+        let attempts = executor.attempts.clone();
+        let request = InvocationRequest::new(json!({}));
+        let service = ExecutionService::new(
+            CancellingResolver {
+                store: store.clone(),
+                execution_id: request.execution_id.clone(),
+            },
+            executor,
+            NoopPersistence,
+            test_runtime_control(store.clone()),
+            store.clone(),
+        );
+        let policy = ExecutionPolicy {
+            timeout: Duration::from_secs(1),
+            retry: RetryPolicy {
+                max_attempts: 1,
+                initial_delay: Duration::ZERO,
+                backoff: 1.0,
+            },
+        };
+
+        assert!(matches!(
+            service.execute(&test_action(), &request, &policy),
+            Err(ExecutionServiceError::CancellationRequested { .. })
+        ));
+        assert!(attempts.lock().unwrap().is_empty());
+        let aggregate = store.load(&request.execution_id).unwrap().unwrap();
+        assert_eq!(aggregate.state, ExecutionState::Cancelled);
+        assert!(aggregate.terminal_state.is_some());
+        assert!(aggregate.active_attempt_id.is_none());
+        assert!(aggregate.attempts.is_empty());
+    }
+
+    #[test]
     fn retries_until_success() {
         let executor = FailsThenSucceeds::default();
         let attempts = Arc::clone(&executor.attempts);
         let deadlines = Arc::clone(&executor.deadlines);
         let persistence = RecordingPersistence::default();
         let persisted_attempts = Arc::clone(&persistence.attempts);
+        let store = Arc::new(crate::MemoryExecutionStateStore::default());
         let service = ExecutionService::new(
             StaticResolver,
             executor,
             persistence,
-            test_runtime_control(),
+            test_runtime_control(store.clone()),
+            store.clone(),
         );
         let action = test_action();
         let request = InvocationRequest::new(json!({}));
@@ -442,7 +741,7 @@ mod tests {
             timeout: Duration::from_secs(3),
             retry: RetryPolicy {
                 max_attempts: 2,
-                initial_delay: Duration::from_millis(1),
+                initial_delay: Duration::from_millis(30),
                 backoff: 1.0,
             },
         };
@@ -469,17 +768,22 @@ mod tests {
         assert!(deadlines
             .iter()
             .all(|(deadline, budget)| *deadline > 0 && *budget == 3_000));
+        let aggregate = store.load(&request.execution_id).unwrap().unwrap();
+        assert_eq!(aggregate.attempts[0].deadline_unix_ms, deadlines[0].0);
+        assert_eq!(aggregate.attempts[1].deadline_unix_ms, deadlines[1].0);
     }
 
     #[test]
     fn non_retryable_handler_failure_stops_after_one_attempt() {
         let executor = NonRetryableFailure::default();
         let attempts = Arc::clone(&executor.attempts);
+        let store = Arc::new(crate::MemoryExecutionStateStore::default());
         let service = ExecutionService::new(
             StaticResolver,
             executor,
             NoopPersistence,
-            test_runtime_control(),
+            test_runtime_control(store.clone()),
+            store,
         );
         let request = InvocationRequest::new(json!({}));
         let policy = ExecutionPolicy {
@@ -512,11 +816,13 @@ mod tests {
             },
         };
 
+        let store = Arc::new(crate::MemoryExecutionStateStore::default());
         let timed_out = ExecutionService::new(
             StaticResolver,
             TimedOutExecutor,
             NoopPersistence,
-            test_runtime_control(),
+            test_runtime_control(store.clone()),
+            store,
         );
         let timeout_request = InvocationRequest::new(json!({}));
         assert!(timed_out
@@ -528,8 +834,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn accepted_timeout_winner_is_returned_over_late_success() {
+        let store = Arc::new(crate::MemoryExecutionStateStore::default());
+        let service = ExecutionService::new(
+            StaticResolver,
+            TimeoutWinningSuccess {
+                store: store.clone(),
+            },
+            NoopPersistence,
+            test_runtime_control(store.clone()),
+            store,
+        );
+        let request = InvocationRequest::new(json!({}));
+        let policy = ExecutionPolicy {
+            timeout: Duration::from_secs(1),
+            retry: RetryPolicy {
+                max_attempts: 1,
+                initial_delay: Duration::ZERO,
+                backoff: 1.0,
+            },
+        };
+
+        assert!(matches!(
+            service.execute(&test_action(), &request, &policy),
+            Err(ExecutionServiceError::Executor(
+                ExecutorError::RuntimeTimedOut { .. }
+            ))
+        ));
+        assert_eq!(
+            service.execution_state(&request.execution_id),
+            Some(ExecutionState::TimedOut)
+        );
+    }
+
     #[derive(Clone)]
     struct StaticResolver;
+
+    #[derive(Clone)]
+    struct FailingResolver;
+
+    #[derive(Clone)]
+    struct CancellingResolver {
+        store: Arc<crate::MemoryExecutionStateStore>,
+        execution_id: ExecutionId,
+    }
+
+    impl RuntimeResolver for CancellingResolver {
+        fn resolve(&self, _action: &ActionDefinition) -> crate::ExecutorResult<RuntimeTarget> {
+            let execution = self
+                .store
+                .load(&self.execution_id)
+                .unwrap()
+                .expect("execution should be created before resolution");
+            self.store
+                .compare_and_set(
+                    &execution.execution_id,
+                    execution.execution_version,
+                    ExecutionMutation::RequestCancellation {
+                        requested_at: SystemTime::now(),
+                    },
+                )
+                .unwrap();
+            Ok(RuntimeTarget::http("http://runtime.test"))
+        }
+    }
+
+    impl RuntimeResolver for FailingResolver {
+        fn resolve(&self, _action: &ActionDefinition) -> crate::ExecutorResult<RuntimeTarget> {
+            Err(ExecutorError::UnsupportedRuntimeTarget {
+                target: "test".into(),
+            })
+        }
+    }
 
     impl RuntimeResolver for StaticResolver {
         fn resolve(&self, _action: &ActionDefinition) -> crate::ExecutorResult<RuntimeTarget> {
@@ -631,6 +1008,109 @@ mod tests {
 
     struct TimedOutExecutor;
 
+    struct TimeoutWinningSuccess {
+        store: Arc<crate::MemoryExecutionStateStore>,
+    }
+
+    impl Executor for TimeoutWinningSuccess {
+        fn invoke(
+            &self,
+            _target: &RuntimeTarget,
+            request: &InvocationRequest,
+            _options: &ExecutionOptions,
+        ) -> crate::ExecutorResult<ExecutionResult> {
+            let aggregate = self.store.load(&request.execution_id).unwrap().unwrap();
+            self.store
+                .compare_and_set(
+                    &request.execution_id,
+                    aggregate.execution_version,
+                    ExecutionMutation::FinishAttempt {
+                        attempt_id: request.attempt_id.clone(),
+                        outcome: AttemptOutcome::TimedOut,
+                        result: None,
+                        retry: None,
+                        terminal: Some(TerminalState::new(
+                            ExecutionState::TimedOut,
+                            Some(request.attempt_id.clone()),
+                        )),
+                    },
+                )
+                .unwrap();
+            Ok(ExecutionResult {
+                invocation_result: InvocationResult::success(request, json!({})),
+                events: vec![],
+                stdout: String::new(),
+                stderr: String::new(),
+                duration: Duration::ZERO,
+                exit_code: Some(0),
+            })
+        }
+    }
+
+    struct CancellingFailure {
+        store: Arc<crate::MemoryExecutionStateStore>,
+        invocations: Arc<Mutex<u32>>,
+    }
+
+    struct StoreInspectingSuccess {
+        store: Arc<crate::MemoryExecutionStateStore>,
+        observed: Arc<Mutex<bool>>,
+    }
+
+    impl Executor for StoreInspectingSuccess {
+        fn invoke(
+            &self,
+            _target: &RuntimeTarget,
+            request: &InvocationRequest,
+            _options: &ExecutionOptions,
+        ) -> crate::ExecutorResult<ExecutionResult> {
+            let aggregate = self.store.load(&request.execution_id).unwrap().unwrap();
+            *self.observed.lock().unwrap() = aggregate.state == ExecutionState::Running
+                && aggregate.active_attempt_id.as_ref() == Some(&request.attempt_id)
+                && aggregate.attempts.len() == 1;
+            Ok(ExecutionResult {
+                invocation_result: InvocationResult::success(request, json!({})),
+                events: vec![],
+                stdout: String::new(),
+                stderr: String::new(),
+                duration: Duration::ZERO,
+                exit_code: Some(0),
+            })
+        }
+    }
+
+    impl Executor for CancellingFailure {
+        fn invoke(
+            &self,
+            _target: &RuntimeTarget,
+            request: &InvocationRequest,
+            _options: &ExecutionOptions,
+        ) -> crate::ExecutorResult<ExecutionResult> {
+            *self.invocations.lock().unwrap() += 1;
+            let aggregate = self.store.load(&request.execution_id).unwrap().unwrap();
+            self.store
+                .compare_and_set(
+                    &request.execution_id,
+                    aggregate.execution_version,
+                    ExecutionMutation::RequestCancellation {
+                        requested_at: SystemTime::now(),
+                    },
+                )
+                .unwrap();
+            Ok(ExecutionResult {
+                invocation_result: InvocationResult::failed(
+                    request,
+                    InvocationError::new("retryable", "try again", true),
+                ),
+                events: vec![],
+                stdout: String::new(),
+                stderr: String::new(),
+                duration: Duration::ZERO,
+                exit_code: Some(1),
+            })
+        }
+    }
+
     impl Executor for TimedOutExecutor {
         fn invoke(
             &self,
@@ -664,7 +1144,10 @@ mod tests {
         }
     }
 
-    fn test_runtime_control() -> RuntimeControlService {
-        RuntimeControlService::new(Arc::new(crate::InMemoryRuntimeControlChannel::default()))
+    fn test_runtime_control(store: Arc<dyn ExecutionStateStore>) -> RuntimeControlService {
+        RuntimeControlService::new(
+            Arc::new(crate::InMemoryRuntimeControlChannel::default()),
+            store,
+        )
     }
 }

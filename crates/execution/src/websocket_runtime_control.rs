@@ -28,8 +28,8 @@ use ryvus_protocol::{
 use tokio::sync::mpsc;
 
 use crate::{
-    RuntimeControlChannel, RuntimeControlError, RuntimeControlIngress, RuntimeControlResult,
-    RuntimeControlService,
+    ExecutionStateStore, RuntimeControlChannel, RuntimeControlError, RuntimeControlIngress,
+    RuntimeControlResult, RuntimeControlService,
 };
 
 pub type WebSocketHeaderValidator = Arc<dyn Fn(&HeaderMap) -> bool + Send + Sync>;
@@ -78,6 +78,7 @@ impl WebSocketRuntimeControlChannel {
     pub fn new(
         options: WebSocketRuntimeControlOptions,
         header_validator: Option<WebSocketHeaderValidator>,
+        store: Arc<dyn ExecutionStateStore>,
     ) -> (RuntimeControlService, Arc<Self>) {
         let channel = Arc::new(Self {
             ingress: OnceLock::new(),
@@ -85,7 +86,7 @@ impl WebSocketRuntimeControlChannel {
             header_validator,
             connections: Mutex::new(HashMap::new()),
         });
-        let service = RuntimeControlService::new(channel.clone());
+        let service = RuntimeControlService::new(channel.clone(), store);
         assert!(
             channel.ingress.set(service.ingress()).is_ok(),
             "runtime control ingress should only be bound once"
@@ -162,6 +163,16 @@ impl WebSocketRuntimeControlChannel {
             runtime_session_id: registration.runtime_session_id.clone(),
         };
         if send_json(&mut socket, &acknowledgement).await.is_ok() {
+            let ingress = self
+                .ingress
+                .get()
+                .expect("runtime control ingress should be bound")
+                .clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(error) = ingress.reconcile_cancellations() {
+                    tracing::debug!(%error, "runtime cancellation reconciliation deferred");
+                }
+            });
             self.run_connection(socket, registration, outbound_rx).await;
         }
     }
