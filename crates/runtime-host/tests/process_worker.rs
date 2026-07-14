@@ -9,7 +9,7 @@ use axum::{
     body::{to_bytes, Body},
     http::{Request, StatusCode},
 };
-use ryvus_protocol::{InvocationRequest, InvocationResult, InvocationStatus};
+use ryvus_protocol::{InvocationEvent, InvocationRequest, InvocationResult, InvocationStatus};
 use ryvus_runtime_host::{ProcessInvocationWorkerFactory, ProcessWorkerConfig, RuntimeHost};
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -58,6 +58,33 @@ async fn invokes_python_worker_and_preserves_attempt_identity() {
         }))
     );
     assert_eq!(host.active_attempt().await, None);
+    let events = host.take_events(&request.attempt());
+    assert!(matches!(
+        events.as_slice(),
+        [InvocationEvent::Log(log)]
+            if log.attempt_id == request.attempt_id && log.message == "structured worker log"
+    ));
+}
+
+#[tokio::test]
+async fn invokes_node_worker_and_preserves_structured_logs() {
+    let _guard = PROCESS_TEST_LOCK.lock().await;
+    let fixture = NodeActionFixture::new();
+    let host = fixture.host();
+    let request = invocation(json!({}), Duration::from_secs(5));
+
+    let response = call(&host, &request).await;
+
+    assert_eq!(response.0, StatusCode::OK, "{}", response_text(&response));
+    let events = host.take_events(&request.attempt());
+    assert!(matches!(
+        events.as_slice(),
+        [InvocationEvent::Log(log)]
+            if log.execution_id == request.execution_id
+                && log.attempt_id == request.attempt_id
+                && log.attempt_number == request.attempt_number
+                && log.message == "structured node log"
+    ));
 }
 
 #[tokio::test]
@@ -285,6 +312,43 @@ impl PythonActionFixture {
 }
 
 impl Drop for PythonActionFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
+struct NodeActionFixture {
+    directory: PathBuf,
+    source: PathBuf,
+}
+
+impl NodeActionFixture {
+    fn new() -> Self {
+        let directory = std::env::temp_dir().join(format!("ryvus-worker-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let source = directory.join("action.mjs");
+        let sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../sdk/node/dist/index.js");
+        fs::write(
+            &source,
+            format!(
+                "import {{ apiAction }} from {};\nexport default apiAction(() => {{ console.log('structured node log'); return {{ ok: true }}; }});\n",
+                serde_json::to_string(&format!("file://{}", sdk.canonicalize().unwrap().display())).unwrap()
+            ),
+        )
+        .unwrap();
+        Self { directory, source }
+    }
+
+    fn host(&self) -> RuntimeHost {
+        RuntimeHost::new(Arc::new(ProcessInvocationWorkerFactory::new(
+            ProcessWorkerConfig::new("node")
+                .arg(self.source.to_string_lossy())
+                .working_dir(&self.directory),
+        )))
+    }
+}
+
+impl Drop for NodeActionFixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.directory);
     }

@@ -6,6 +6,7 @@ pub mod http;
 pub mod persistence;
 pub mod recording;
 pub mod resolver;
+pub mod runtime_control;
 pub mod runtime_manager;
 pub mod service;
 
@@ -21,6 +22,7 @@ pub use http::*;
 pub use persistence::*;
 pub use recording::*;
 pub use resolver::*;
+pub use runtime_control::*;
 pub use runtime_manager::*;
 pub use service::*;
 pub use target::*;

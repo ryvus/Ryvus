@@ -27,6 +27,8 @@ pub enum RuntimeHostError {
     Supervision(#[from] tokio::task::JoinError),
     #[error("invocation timed out")]
     TimedOut,
+    #[error("invocation was cancelled")]
+    Cancelled,
     #[error("runtime response attempt mismatch: expected=({expected}), actual=({actual})")]
     AttemptMismatch {
         expected: ExecutionAttempt,
@@ -54,6 +56,7 @@ impl IntoResponse for RuntimeHostError {
             Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "RUNTIME_UNAVAILABLE"),
             Self::Busy => (StatusCode::CONFLICT, "RUNTIME_BUSY"),
             Self::TimedOut => (StatusCode::GATEWAY_TIMEOUT, "RUNTIME_TIMED_OUT"),
+            Self::Cancelled => (StatusCode::CONFLICT, "RUNTIME_CANCELLED"),
             Self::Worker(_) | Self::Supervision(_) => {
                 (StatusCode::BAD_GATEWAY, "RUNTIME_WORKER_ERROR")
             }

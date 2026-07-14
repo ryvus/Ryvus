@@ -3,8 +3,9 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use axum::Router;
 use ryvus_control::{ControlService, LocalControlConfig};
 use ryvus_execution::{
-    ExecutionPersistence, ExecutionService, Executor, HttpExecutor, LocalRuntimeManager,
-    LocalRuntimeResolver, RuntimeManager, RuntimeResolver,
+    ExecutionPersistence, ExecutionService, Executor, HttpExecutor, InMemoryRuntimeControlChannel,
+    LocalRuntimeManager, LocalRuntimeResolver, RuntimeControlService, RuntimeManager,
+    RuntimeResolver,
 };
 use ryvus_persistence::ConsoleExecutionPersistence;
 use ryvus_protocol::{ActionDefinition, ActionKind};
@@ -84,12 +85,15 @@ pub fn build_app_with_execution_service(
 }
 
 pub fn build_execution_service(project_root: PathBuf) -> Arc<GatewayExecutionService> {
+    let channel = Arc::new(InMemoryRuntimeControlChannel::default());
+    let runtime_control = RuntimeControlService::new(channel.clone());
+    let runtime_manager = Arc::new(LocalRuntimeManager::new(runtime_control.clone(), channel))
+        as Arc<dyn RuntimeManager>;
     Arc::new(ExecutionService::new(
         Arc::new(LocalRuntimeResolver::with_project_root(project_root)) as Arc<dyn RuntimeResolver>,
-        Arc::new(HttpExecutor::new(
-            Arc::new(LocalRuntimeManager::new()) as Arc<dyn RuntimeManager>
-        )) as Arc<dyn Executor>,
+        Arc::new(HttpExecutor::new(runtime_manager)) as Arc<dyn Executor>,
         Arc::new(ConsoleExecutionPersistence) as Arc<dyn ExecutionPersistence>,
+        runtime_control,
     ))
 }
 

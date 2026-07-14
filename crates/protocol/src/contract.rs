@@ -270,6 +270,23 @@ pub enum InvocationEvent {
     Metric(MetricEvent),
 }
 
+impl InvocationEvent {
+    pub fn attempt(&self) -> ExecutionAttempt {
+        match self {
+            Self::Log(event) => ExecutionAttempt {
+                execution_id: event.execution_id.clone(),
+                attempt_id: event.attempt_id.clone(),
+                attempt_number: event.attempt_number,
+            },
+            Self::Metric(event) => ExecutionAttempt {
+                execution_id: event.execution_id.clone(),
+                attempt_id: event.attempt_id.clone(),
+                attempt_number: event.attempt_number,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEvent {
     pub execution_id: ExecutionId,

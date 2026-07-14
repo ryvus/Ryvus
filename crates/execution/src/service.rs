@@ -1,12 +1,15 @@
 use ryvus_protocol::ActionDefinition;
 
-use ryvus_protocol::{AttemptId, ExecutionAttempt, ExecutionId, InvocationRequest};
+use ryvus_protocol::{
+    AttemptId, AttemptOutcome, ControlCommandOutcome, ExecutionAttempt, ExecutionId,
+    InvocationRequest,
+};
 use std::{collections::HashMap, sync::Mutex};
 
 use crate::{
     assign_attempt_deadline, ExecutionOptions, ExecutionPersistence, ExecutionRecord,
     ExecutionServiceError, ExecutionServiceResult, ExecutionState, Executor, ExecutorError,
-    RecordingExecutor, RuntimeResolver,
+    RecordingExecutor, RuntimeControlService, RuntimeResolver,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,6 +87,7 @@ pub struct ExecutionService<RR, E, EP> {
     resolver: RR,
     executor: RecordingExecutor<E>,
     persistence: EP,
+    runtime_control: RuntimeControlService,
     states: Mutex<HashMap<ExecutionId, ExecutionStatus>>,
 }
 
@@ -99,11 +103,17 @@ where
     E: Executor,
     EP: ExecutionPersistence,
 {
-    pub fn new(resolver: RR, executor: E, persistence: EP) -> Self {
+    pub fn new(
+        resolver: RR,
+        executor: E,
+        persistence: EP,
+        runtime_control: RuntimeControlService,
+    ) -> Self {
         Self {
             resolver,
             executor: RecordingExecutor::new(executor),
             persistence,
+            runtime_control,
             states: Mutex::new(HashMap::new()),
         }
     }
@@ -148,20 +158,23 @@ where
             ) {
                 Ok(record) => record,
                 Err(error) => {
-                    let state = if self.execution_state(&execution_id)
-                        == Some(ExecutionState::CancellationRequested)
-                        || matches!(error, ExecutorError::RuntimeCancelled { .. })
-                    {
-                        ExecutionState::Cancelled
-                    } else if matches!(
-                        error,
-                        ExecutorError::ProcessTimedOut { .. }
-                            | ExecutorError::RuntimeTimedOut { .. }
-                    ) {
-                        ExecutionState::TimedOut
-                    } else {
-                        ExecutionState::Failed
-                    };
+                    let state = self
+                        .runtime_control
+                        .terminal_outcome(&execution_id)
+                        .map(outcome_state)
+                        .unwrap_or_else(|| {
+                            if matches!(error, ExecutorError::RuntimeCancelled { .. }) {
+                                ExecutionState::Cancelled
+                            } else if matches!(
+                                error,
+                                ExecutorError::ProcessTimedOut { .. }
+                                    | ExecutorError::RuntimeTimedOut { .. }
+                            ) {
+                                ExecutionState::TimedOut
+                            } else {
+                                ExecutionState::Failed
+                            }
+                        });
                     self.finish_attempt(&attempt, state);
                     return Err(error.into());
                 }
@@ -172,7 +185,9 @@ where
                 return Err(error.into());
             }
 
-            if self.execution_state(&execution_id) == Some(ExecutionState::CancellationRequested) {
+            if self.runtime_control.terminal_outcome(&execution_id)
+                == Some(AttemptOutcome::Cancelled)
+            {
                 self.finish_attempt(&attempt, ExecutionState::Cancelled);
                 return Err(ExecutorError::RuntimeCancelled { attempt }.into());
             }
@@ -212,18 +227,14 @@ where
     }
 
     pub fn cancel(&self, execution_id: &ExecutionId) -> ExecutionServiceResult<bool> {
-        let active_attempt_id = {
-            let mut states = self.states.lock().expect("execution states should lock");
-            match states.get_mut(execution_id) {
+        {
+            let states = self.states.lock().expect("execution states should lock");
+            match states.get(execution_id) {
                 Some(status)
                     if matches!(
                         status.state,
                         ExecutionState::Pending | ExecutionState::Running
-                    ) =>
-                {
-                    status.state = ExecutionState::CancellationRequested;
-                    status.active_attempt_id.clone()
-                }
+                    ) => {}
                 Some(status)
                     if matches!(
                         status.state,
@@ -245,11 +256,22 @@ where
                 None => return Ok(false),
                 Some(_) => unreachable!("all execution states should be handled"),
             }
-        };
+        }
 
-        match active_attempt_id {
-            Some(attempt_id) => self.executor.cancel(&attempt_id).map_err(Into::into),
-            None => Ok(true),
+        match self.runtime_control.cancel(execution_id)? {
+            ControlCommandOutcome::Confirmed => {
+                self.set_terminal_state(execution_id, ExecutionState::Cancelled);
+                Ok(true)
+            }
+            ControlCommandOutcome::AlreadyTerminal => {
+                Ok(self.runtime_control.terminal_outcome(execution_id)
+                    == Some(AttemptOutcome::Cancelled))
+            }
+            ControlCommandOutcome::AttemptNotFound
+            | ControlCommandOutcome::OwnershipMismatch
+            | ControlCommandOutcome::StaleSession
+            | ControlCommandOutcome::Unsupported
+            | ControlCommandOutcome::Failed => Ok(false),
         }
     }
 
@@ -262,6 +284,7 @@ where
     }
 
     pub fn shutdown(&self, grace: std::time::Duration) -> ExecutionServiceResult<()> {
+        self.runtime_control.shutdown(grace)?;
         self.executor.shutdown(grace).map_err(Into::into)
     }
 
@@ -293,27 +316,81 @@ where
     }
 
     fn finish_attempt(&self, attempt: &ExecutionAttempt, state: ExecutionState) {
+        let state = match state {
+            ExecutionState::Succeeded => outcome_state(
+                self.runtime_control
+                    .finish_attempt(attempt, AttemptOutcome::Succeeded),
+            ),
+            ExecutionState::Failed => outcome_state(
+                self.runtime_control
+                    .finish_attempt(attempt, AttemptOutcome::Failed),
+            ),
+            ExecutionState::Cancelled => outcome_state(
+                self.runtime_control
+                    .finish_attempt(attempt, AttemptOutcome::Cancelled),
+            ),
+            ExecutionState::TimedOut => outcome_state(
+                self.runtime_control
+                    .finish_attempt(attempt, AttemptOutcome::TimedOut),
+            ),
+            state => state,
+        };
         let mut states = self.states.lock().expect("execution states should lock");
         let status = states
             .get_mut(&attempt.execution_id)
             .expect("execution state should exist while an attempt finishes");
 
         if status.active_attempt_id.as_ref() == Some(&attempt.attempt_id) {
-            status.state = state;
+            if !is_terminal(status.state) {
+                status.state = state;
+            }
             status.active_attempt_id = None;
         }
+    }
+
+    fn set_terminal_state(&self, execution_id: &ExecutionId, state: ExecutionState) {
+        if let Some(status) = self
+            .states
+            .lock()
+            .expect("execution states should lock")
+            .get_mut(execution_id)
+        {
+            if !is_terminal(status.state) {
+                status.state = state;
+                status.active_attempt_id = None;
+            }
+        }
+    }
+}
+
+fn is_terminal(state: ExecutionState) -> bool {
+    matches!(
+        state,
+        ExecutionState::Succeeded
+            | ExecutionState::Failed
+            | ExecutionState::Cancelled
+            | ExecutionState::TimedOut
+    )
+}
+
+fn outcome_state(outcome: AttemptOutcome) -> ExecutionState {
+    match outcome {
+        AttemptOutcome::Succeeded => ExecutionState::Succeeded,
+        AttemptOutcome::Failed | AttemptOutcome::InfrastructureFailed => ExecutionState::Failed,
+        AttemptOutcome::Cancelled => ExecutionState::Cancelled,
+        AttemptOutcome::TimedOut => ExecutionState::TimedOut,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::{Arc, Condvar, Mutex},
+        sync::{Arc, Mutex},
         time::Duration,
     };
 
     use ryvus_protocol::{
-        ActionDefinition, ActionKind, ApiAction, AttemptId, ExecutionAttempt, InvocationError,
+        ActionDefinition, ActionKind, ApiAction, ExecutionAttempt, InvocationError,
         InvocationResult, InvocationStatus, RuntimeKind,
     };
     use serde_json::json;
@@ -353,7 +430,12 @@ mod tests {
         let deadlines = Arc::clone(&executor.deadlines);
         let persistence = RecordingPersistence::default();
         let persisted_attempts = Arc::clone(&persistence.attempts);
-        let service = ExecutionService::new(StaticResolver, executor, persistence);
+        let service = ExecutionService::new(
+            StaticResolver,
+            executor,
+            persistence,
+            test_runtime_control(),
+        );
         let action = test_action();
         let request = InvocationRequest::new(json!({}));
         let policy = ExecutionPolicy {
@@ -393,7 +475,12 @@ mod tests {
     fn non_retryable_handler_failure_stops_after_one_attempt() {
         let executor = NonRetryableFailure::default();
         let attempts = Arc::clone(&executor.attempts);
-        let service = ExecutionService::new(StaticResolver, executor, NoopPersistence);
+        let service = ExecutionService::new(
+            StaticResolver,
+            executor,
+            NoopPersistence,
+            test_runtime_control(),
+        );
         let request = InvocationRequest::new(json!({}));
         let policy = ExecutionPolicy {
             timeout: Duration::from_secs(3),
@@ -425,7 +512,12 @@ mod tests {
             },
         };
 
-        let timed_out = ExecutionService::new(StaticResolver, TimedOutExecutor, NoopPersistence);
+        let timed_out = ExecutionService::new(
+            StaticResolver,
+            TimedOutExecutor,
+            NoopPersistence,
+            test_runtime_control(),
+        );
         let timeout_request = InvocationRequest::new(json!({}));
         assert!(timed_out
             .execute(&action, &timeout_request, &policy)
@@ -433,38 +525,6 @@ mod tests {
         assert_eq!(
             timed_out.execution_state(&timeout_request.execution_id),
             Some(ExecutionState::TimedOut)
-        );
-
-        let blocking = BlockingExecutor::default();
-        let blocking_state = Arc::clone(&blocking.state);
-        let cancelled = Arc::new(ExecutionService::new(
-            StaticResolver,
-            blocking,
-            NoopPersistence,
-        ));
-        let cancel_request = InvocationRequest::new(json!({}));
-        let execution_id = cancel_request.execution_id.clone();
-        let attempt_id = cancel_request.attempt_id.clone();
-        let task_service = Arc::clone(&cancelled);
-        let task =
-            std::thread::spawn(move || task_service.execute(&action, &cancel_request, &policy));
-        let (lock, changed) = &*blocking_state;
-        let mut state = lock.lock().unwrap();
-        while !state.started {
-            state = changed.wait(state).unwrap();
-        }
-        drop(state);
-
-        assert!(cancelled.cancel(&execution_id).unwrap());
-        assert!(cancelled.cancel(&execution_id).unwrap());
-        assert!(task.join().unwrap().is_err());
-        assert_eq!(
-            cancelled.execution_state(&execution_id),
-            Some(ExecutionState::Cancelled)
-        );
-        assert_eq!(
-            blocking_state.0.lock().unwrap().cancelled_attempt_id,
-            Some(attempt_id)
         );
     }
 
@@ -533,6 +593,7 @@ mod tests {
 
             Ok(ExecutionResult {
                 invocation_result,
+                events: Vec::new(),
                 stdout: String::new(),
                 stderr: String::new(),
                 duration: Duration::from_millis(1),
@@ -559,6 +620,7 @@ mod tests {
                     request,
                     InvocationError::new("invalid", "do not retry", false),
                 ),
+                events: Vec::new(),
                 stdout: String::new(),
                 stderr: String::new(),
                 duration: Duration::from_millis(1),
@@ -582,47 +644,6 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct BlockingExecutionState {
-        started: bool,
-        cancelled: bool,
-        cancelled_attempt_id: Option<AttemptId>,
-    }
-
-    #[derive(Default)]
-    struct BlockingExecutor {
-        state: Arc<(Mutex<BlockingExecutionState>, Condvar)>,
-    }
-
-    impl Executor for BlockingExecutor {
-        fn invoke(
-            &self,
-            _target: &RuntimeTarget,
-            request: &InvocationRequest,
-            _options: &ExecutionOptions,
-        ) -> crate::ExecutorResult<ExecutionResult> {
-            let (lock, changed) = &*self.state;
-            let mut state = lock.lock().unwrap();
-            state.started = true;
-            changed.notify_all();
-            while !state.cancelled {
-                state = changed.wait(state).unwrap();
-            }
-            Err(ExecutorError::RuntimeCancelled {
-                attempt: request.attempt(),
-            })
-        }
-
-        fn cancel(&self, attempt_id: &AttemptId) -> crate::ExecutorResult<bool> {
-            let (lock, changed) = &*self.state;
-            let mut state = lock.lock().unwrap();
-            state.cancelled = true;
-            state.cancelled_attempt_id = Some(attempt_id.clone());
-            changed.notify_all();
-            Ok(true)
-        }
-    }
-
     fn test_action() -> ActionDefinition {
         ActionDefinition {
             runtime: RuntimeKind::Python,
@@ -641,5 +662,9 @@ mod tests {
             name: Some("test".to_string()),
             policy: ryvus_protocol::ActionExecutionPolicy::default(),
         }
+    }
+
+    fn test_runtime_control() -> RuntimeControlService {
+        RuntimeControlService::new(Arc::new(crate::InMemoryRuntimeControlChannel::default()))
     }
 }

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ryvus_protocol::{InvocationRequest, InvocationResult, TerminationReason, WorkerId};
+use ryvus_protocol::{
+    InvocationEvent, InvocationRequest, InvocationResult, TerminationReason, WorkerId,
+};
 use thiserror::Error;
 use tokio::time::Instant;
 
@@ -26,10 +28,19 @@ pub struct StartedWorker {
     pub worker: Arc<dyn InvocationWorker>,
 }
 
+pub struct WorkerInvocation {
+    pub result: InvocationResult,
+    pub events: Vec<InvocationEvent>,
+}
+
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait InvocationWorkerFactory: Send + Sync {
-    async fn start(&self, request: &InvocationRequest) -> Result<StartedWorker, WorkerError>;
+    async fn start(
+        &self,
+        request: &InvocationRequest,
+        worker_id: WorkerId,
+    ) -> Result<StartedWorker, WorkerError>;
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -41,7 +52,7 @@ pub trait InvocationWorker: Send + Sync {
         &self,
         request: InvocationRequest,
         deadline: Instant,
-    ) -> Result<InvocationResult, WorkerError>;
+    ) -> Result<WorkerInvocation, WorkerError>;
 
     async fn terminate(&self, reason: TerminationReason) -> Result<(), WorkerError>;
 }

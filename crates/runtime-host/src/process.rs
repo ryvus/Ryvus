@@ -12,7 +12,9 @@ use tokio::{
     time::Instant,
 };
 
-use crate::{InvocationWorker, InvocationWorkerFactory, StartedWorker, WorkerError};
+use crate::{
+    InvocationWorker, InvocationWorkerFactory, StartedWorker, WorkerError, WorkerInvocation,
+};
 
 #[derive(Debug, Clone)]
 pub struct ProcessWorkerConfig {
@@ -60,7 +62,11 @@ impl ProcessInvocationWorkerFactory {
 
 #[async_trait]
 impl InvocationWorkerFactory for ProcessInvocationWorkerFactory {
-    async fn start(&self, _request: &InvocationRequest) -> Result<StartedWorker, WorkerError> {
+    async fn start(
+        &self,
+        _request: &InvocationRequest,
+        worker_id: WorkerId,
+    ) -> Result<StartedWorker, WorkerError> {
         let mut command = Command::new(&self.config.command);
         command
             .args(&self.config.args)
@@ -87,10 +93,7 @@ impl InvocationWorkerFactory for ProcessInvocationWorkerFactory {
             stdout: Mutex::new(BufReader::new(stdout)),
         });
 
-        Ok(StartedWorker {
-            worker_id: WorkerId::new(),
-            worker,
-        })
+        Ok(StartedWorker { worker_id, worker })
     }
 }
 
@@ -126,7 +129,7 @@ impl InvocationWorker for ProcessInvocationWorker {
         &self,
         request: InvocationRequest,
         deadline: Instant,
-    ) -> Result<InvocationResult, WorkerError> {
+    ) -> Result<WorkerInvocation, WorkerError> {
         let payload = serde_json::to_vec(&request).map_err(WorkerError::Serialize)?;
         let mut stdin = self.stdin.lock().await.take().ok_or_else(|| {
             WorkerError::Protocol("worker stdin was already consumed".to_string())
@@ -140,6 +143,7 @@ impl InvocationWorker for ProcessInvocationWorker {
         drop(stdin);
 
         let mut terminal = None;
+        let mut events = Vec::new();
         while let Some(frame) = self.read_frame(deadline).await? {
             if terminal.is_some() {
                 return Err(match frame {
@@ -158,16 +162,16 @@ impl InvocationWorker for ProcessInvocationWorker {
                         "worker emitted an unexpected ready frame".to_string(),
                     ));
                 }
-                WorkerFrame::Event { event } => {
-                    tracing::info!(?event, "worker invocation event");
-                }
+                WorkerFrame::Event { event } => events.push(event),
                 WorkerFrame::Result { result } => terminal = Some(result),
             }
         }
 
-        terminal.ok_or_else(|| {
-            WorkerError::Protocol("worker stdout ended before a terminal result".to_string())
-        })
+        terminal
+            .map(|result| WorkerInvocation { result, events })
+            .ok_or_else(|| {
+                WorkerError::Protocol("worker stdout ended before a terminal result".to_string())
+            })
     }
 
     async fn terminate(&self, _reason: TerminationReason) -> Result<(), WorkerError> {

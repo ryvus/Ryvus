@@ -96,6 +96,9 @@ pub enum ExecutionServiceError {
     #[error("executor error: {0}")]
     Executor(#[from] ExecutorError),
 
+    #[error("runtime control error: {0}")]
+    RuntimeControl(#[from] crate::RuntimeControlError),
+
     #[error("invalid execution policy: {0}")]
     InvalidPolicy(String),
 

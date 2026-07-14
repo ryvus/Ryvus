@@ -6,11 +6,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ryvus_protocol::{AttemptId, ExecutionAttempt};
+use ryvus_protocol::{
+    ActiveAttemptOwnership, ExecutionAttempt, RuntimeHostId, RuntimeSessionId, WorkerId,
+};
 use ryvus_runtime_host::{ProcessInvocationWorkerFactory, ProcessWorkerConfig, RuntimeHost};
 use tokio::sync::oneshot;
 
-use crate::{ExecutorError, ExecutorResult, LocalProcessTarget, RuntimeTarget};
+use crate::{
+    AttemptOwnership, ExecutorError, ExecutorResult, InMemoryRuntimeControlChannel,
+    LocalProcessTarget, RuntimeControlService, RuntimeTarget,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeOutcome {
@@ -67,9 +72,10 @@ pub struct RuntimeExit {
     pub exit_code: Option<i32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RuntimeRelease {
     pub exit: RuntimeExit,
+    pub events: Vec<ryvus_protocol::InvocationEvent>,
     pub disposition: RuntimeDisposition,
 }
 
@@ -77,6 +83,7 @@ impl RuntimeRelease {
     fn external() -> Self {
         Self {
             exit: RuntimeExit::default(),
+            events: Vec::new(),
             disposition: RuntimeDisposition::Unmanaged,
         }
     }
@@ -96,8 +103,6 @@ pub trait RuntimeManager: Send + Sync {
         handle: RuntimeHandle,
         outcome: RuntimeOutcome,
     ) -> ExecutorResult<RuntimeRelease>;
-
-    fn cancel(&self, attempt_id: &AttemptId) -> ExecutorResult<bool>;
 
     fn shutdown(&self, grace: Duration) -> ExecutorResult<()>;
 }
@@ -123,10 +128,6 @@ where
         self.as_ref().release(handle, outcome)
     }
 
-    fn cancel(&self, attempt_id: &AttemptId) -> ExecutorResult<bool> {
-        self.as_ref().cancel(attempt_id)
-    }
-
     fn shutdown(&self, grace: Duration) -> ExecutorResult<()> {
         self.as_ref().shutdown(grace)
     }
@@ -134,6 +135,8 @@ where
 
 struct ManagedHost {
     attempt: ExecutionAttempt,
+    runtime_host_id: RuntimeHostId,
+    runtime_host: RuntimeHost,
     shutdown: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<Result<(), String>>>,
 }
@@ -141,13 +144,13 @@ struct ManagedHost {
 #[derive(Default)]
 struct RuntimeState {
     hosts: HashMap<String, ManagedHost>,
-    completed: HashMap<String, RuntimeDisposition>,
     draining: bool,
 }
 
-#[derive(Default)]
 pub struct LocalRuntimeManager {
     state: Mutex<RuntimeState>,
+    control: RuntimeControlService,
+    channel: Arc<InMemoryRuntimeControlChannel>,
 }
 
 impl std::fmt::Debug for LocalRuntimeManager {
@@ -158,8 +161,15 @@ impl std::fmt::Debug for LocalRuntimeManager {
 }
 
 impl LocalRuntimeManager {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(
+        control: RuntimeControlService,
+        channel: Arc<InMemoryRuntimeControlChannel>,
+    ) -> Self {
+        Self {
+            state: Mutex::new(RuntimeState::default()),
+            control,
+            channel,
+        }
     }
 }
 
@@ -189,10 +199,34 @@ impl RuntimeManager for LocalRuntimeManager {
         };
 
         let runtime_id = uuid::Uuid::new_v4().to_string();
-        let (endpoint, host) = start_runtime_host(target, attempt, timeout)?;
+        let runtime_host_id = RuntimeHostId::new();
+        let runtime_session_id = RuntimeSessionId::new();
+        let worker_id = WorkerId::new();
+        let ownership = AttemptOwnership {
+            execution_id: attempt.execution_id.clone(),
+            attempt_id: attempt.attempt_id.clone(),
+            attempt_number: attempt.attempt_number,
+            runtime_host_id: runtime_host_id.clone(),
+            runtime_session_id: runtime_session_id.clone(),
+            worker_id: worker_id.clone(),
+        };
+        let (endpoint, host) = start_runtime_host(
+            target,
+            attempt,
+            timeout,
+            runtime_host_id.clone(),
+            runtime_session_id,
+            worker_id,
+        )?;
+        self.channel
+            .register(runtime_host_id, host.runtime_host.control_sender());
+        self.control.register_attempt(ownership);
         let mut state = self.state.lock().expect("runtime state should lock");
         if state.draining {
             drop(state);
+            self.control.unregister_attempt(&attempt.attempt_id);
+            self.control.unregister_runtime(&host.runtime_host_id);
+            self.channel.unregister(&host.runtime_host_id);
             stop_runtime_host(host)?;
             return Err(ExecutorError::RuntimeUnavailable);
         }
@@ -224,22 +258,21 @@ impl RuntimeManager for LocalRuntimeManager {
             match state.hosts.remove(&handle.runtime_id) {
                 Some(host) => host,
                 None => {
-                    if let Some(disposition) = state.completed.remove(&handle.runtime_id) {
-                        return Ok(RuntimeRelease {
-                            exit: RuntimeExit::default(),
-                            disposition,
-                        });
-                    }
                     return Err(ExecutorError::RuntimeHandleNotFound {
                         runtime_id: handle.runtime_id,
-                    });
+                    })
                 }
             }
         };
 
+        let events = host.runtime_host.take_events(&handle.attempt);
+        self.control.unregister_attempt(&handle.attempt.attempt_id);
+        self.control.unregister_runtime(&host.runtime_host_id);
+        self.channel.unregister(&host.runtime_host_id);
         stop_runtime_host(host)?;
         Ok(RuntimeRelease {
             exit: RuntimeExit::default(),
+            events,
             disposition: if outcome == RuntimeOutcome::TimedOut {
                 RuntimeDisposition::TimedOut
             } else {
@@ -248,45 +281,17 @@ impl RuntimeManager for LocalRuntimeManager {
         })
     }
 
-    fn cancel(&self, attempt_id: &AttemptId) -> ExecutorResult<bool> {
-        let selected = {
-            let mut state = self.state.lock().expect("runtime state should lock");
-            let runtime_id = state.hosts.iter().find_map(|(runtime_id, host)| {
-                (&host.attempt.attempt_id == attempt_id).then(|| runtime_id.clone())
-            });
-            runtime_id.and_then(|runtime_id| {
-                state
-                    .hosts
-                    .remove(&runtime_id)
-                    .map(|host| (runtime_id, host))
-            })
-        };
-
-        let Some((runtime_id, host)) = selected else {
-            return Ok(false);
-        };
-        stop_runtime_host(host)?;
-        self.state
-            .lock()
-            .expect("runtime state should lock")
-            .completed
-            .insert(runtime_id, RuntimeDisposition::Cancelled);
-        Ok(true)
-    }
-
     fn shutdown(&self, _grace: Duration) -> ExecutorResult<()> {
         let hosts = {
             let mut state = self.state.lock().expect("runtime state should lock");
             state.draining = true;
             state.hosts.drain().collect::<Vec<_>>()
         };
-        for (runtime_id, host) in hosts {
+        for (_, host) in hosts {
+            self.control.unregister_attempt(&host.attempt.attempt_id);
+            self.control.unregister_runtime(&host.runtime_host_id);
+            self.channel.unregister(&host.runtime_host_id);
             stop_runtime_host(host)?;
-            self.state
-                .lock()
-                .expect("runtime state should lock")
-                .completed
-                .insert(runtime_id, RuntimeDisposition::Cancelled);
         }
         Ok(())
     }
@@ -296,6 +301,9 @@ fn start_runtime_host(
     target: &LocalProcessTarget,
     attempt: &ExecutionAttempt,
     timeout: Duration,
+    runtime_host_id: RuntimeHostId,
+    runtime_session_id: RuntimeSessionId,
+    worker_id: WorkerId,
 ) -> ExecutorResult<(String, ManagedHost)> {
     let config = ProcessWorkerConfig {
         command: target.command.clone(),
@@ -303,9 +311,22 @@ fn start_runtime_host(
         working_dir: target.working_dir.clone(),
         env: target.env.clone(),
     };
-    let host = RuntimeHost::new(Arc::new(ProcessInvocationWorkerFactory::new(config)));
+    let expected_attempt = ActiveAttemptOwnership {
+        execution_id: attempt.execution_id.clone(),
+        attempt_id: attempt.attempt_id.clone(),
+        attempt_number: attempt.attempt_number,
+        worker_id,
+    };
+    let host = RuntimeHost::registered(
+        Arc::new(ProcessInvocationWorkerFactory::new(config)),
+        runtime_host_id.clone(),
+        runtime_session_id,
+        Some(expected_attempt),
+    );
     let router = host.router();
     let shutdown_host = host.clone();
+    let control_host = host.clone();
+    let stopped_host = host.clone();
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     listener.set_nonblocking(true)?;
     let endpoint = format!("http://{}", listener.local_addr()?);
@@ -320,19 +341,28 @@ fn start_runtime_host(
             runtime.block_on(async move {
                 let listener = tokio::net::TcpListener::from_std(listener)
                     .map_err(|error| error.to_string())?;
-                axum::serve(listener, router)
+                let control = tokio::spawn(async move { control_host.run_control_loop().await });
+                let result = axum::serve(listener, router)
                     .with_graceful_shutdown(async move {
-                        let _ = shutdown_rx.await;
-                        if let Err(error) = shutdown_host.shutdown().await {
-                            tracing::error!(%error, "runtime host shutdown failed");
+                        tokio::select! {
+                            _ = shutdown_rx => {
+                                if let Err(error) = shutdown_host.shutdown().await {
+                                    tracing::error!(%error, "runtime host shutdown failed");
+                                }
+                            }
+                            _ = stopped_host.wait_stopped() => {}
                         }
                     })
                     .await
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| error.to_string());
+                control.abort();
+                result
             })
         })?;
     let managed = ManagedHost {
         attempt: attempt.clone(),
+        runtime_host_id,
+        runtime_host: host,
         shutdown: Some(shutdown_tx),
         thread: Some(thread),
     };

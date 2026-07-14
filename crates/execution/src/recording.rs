@@ -1,10 +1,11 @@
 use std::time::Duration;
 use std::time::SystemTime;
 
-use ryvus_protocol::{AttemptId, InvocationRequest};
+use ryvus_protocol::InvocationRequest;
 
 use crate::{
-    ExecutionOptions, ExecutionRecord, ExecutionTarget, Executor, ExecutorResult, RuntimeTarget,
+    ConsoleInvocationEventSink, ExecutionOptions, ExecutionRecord, ExecutionTarget, Executor,
+    ExecutorResult, InvocationEventSink, RuntimeTarget,
 };
 
 pub struct RecordingExecutor<E> {
@@ -26,6 +27,9 @@ impl<E: Executor> RecordingExecutor<E> {
     ) -> ExecutorResult<ExecutionRecord> {
         let started_at = SystemTime::now();
         let result = self.inner.invoke(target, request, options)?;
+        for event in &result.events {
+            ConsoleInvocationEventSink.record(event);
+        }
         let finished_at = SystemTime::now();
 
         let execution_target = match target {
@@ -48,10 +52,6 @@ impl<E: Executor> RecordingExecutor<E> {
             started_at,
             finished_at,
         ))
-    }
-
-    pub fn cancel(&self, attempt_id: &AttemptId) -> ExecutorResult<bool> {
-        self.inner.cancel(attempt_id)
     }
 
     pub fn shutdown(&self, grace: Duration) -> ExecutorResult<()> {
@@ -118,6 +118,7 @@ mod tests {
                     request,
                     json!({ "ok": true }),
                 ),
+                events: Vec::new(),
                 stdout: String::new(),
                 stderr: String::new(),
                 duration: std::time::Duration::ZERO,

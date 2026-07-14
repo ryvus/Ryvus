@@ -6,7 +6,7 @@ use ryvus_execution::{
 };
 use ryvus_protocol::{
     ActionDefinition, ExecutionAttempt, ExecutionId, InvocationContext, InvocationEvent,
-    InvocationMessage, InvocationRequest, InvocationStatus, LogLevel,
+    InvocationRequest, InvocationStatus, LogLevel,
 };
 use serde_json::{json, Value};
 
@@ -518,20 +518,18 @@ fn flow_request(
 fn flow_step_logs(record: &ExecutionRecord) -> Vec<FlowStepLog> {
     record
         .result
-        .stdout
-        .lines()
-        .filter_map(|line| serde_json::from_str::<InvocationMessage>(line.trim()).ok())
-        .filter_map(|message| match message {
-            InvocationMessage::Event {
-                event: InvocationEvent::Log(log),
-            } if log.execution_id == record.attempt.execution_id
-                && log.attempt_id == record.attempt.attempt_id
-                && log.attempt_number == record.attempt.attempt_number =>
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            InvocationEvent::Log(log)
+                if log.execution_id == record.attempt.execution_id
+                    && log.attempt_id == record.attempt.attempt_id
+                    && log.attempt_number == record.attempt.attempt_number =>
             {
                 Some(FlowStepLog {
-                    level: log_level_label(log.level).to_string(),
-                    message: log.message,
-                    fields: log.fields,
+                    level: log_level_label(&log.level).to_string(),
+                    message: log.message.clone(),
+                    fields: log.fields.clone(),
                 })
             }
             _ => None,
@@ -539,7 +537,7 @@ fn flow_step_logs(record: &ExecutionRecord) -> Vec<FlowStepLog> {
         .collect()
 }
 
-fn log_level_label(level: LogLevel) -> &'static str {
+fn log_level_label(level: &LogLevel) -> &'static str {
     match level {
         LogLevel::Trace => "trace",
         LogLevel::Debug => "debug",
@@ -706,6 +704,47 @@ mod tests {
         assert_eq!(retried.output["receipt_sent"], true);
     }
 
+    #[test]
+    fn flow_cancellation_delegates_to_its_shared_step_executor() {
+        let store = Arc::new(InMemoryFlowStateStore::default());
+        let executor = Arc::new(RecordingFlowExecutor::default());
+        let service = FlowService::new(
+            flow_spec(false),
+            vec![
+                api_action("charge"),
+                api_action("receipt"),
+                api_action("failure_handler"),
+            ],
+            Arc::clone(&store),
+            Arc::clone(&executor),
+        )
+        .unwrap();
+        let run_id = "run-1";
+        let execution_id = ExecutionId::new();
+        store
+            .create(FlowExecution {
+                id: run_id.to_string(),
+                flow_key: "billing".to_string(),
+                status: FlowExecutionStatus::Running,
+                input: json!({}),
+                output: Value::Null,
+                error: None,
+                steps: Vec::new(),
+            })
+            .unwrap();
+        store
+            .set_active_execution(run_id, Some(execution_id.clone()))
+            .unwrap();
+
+        let cancelled = service.cancel_run(run_id).unwrap();
+
+        assert_eq!(cancelled.status, FlowExecutionStatus::Cancelled);
+        assert_eq!(
+            executor.cancellations.lock().unwrap().as_slice(),
+            &[execution_id]
+        );
+    }
+
     fn test_service(
         spec: FlowSpec,
     ) -> (
@@ -830,6 +869,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingFlowExecutor {
         requests: Mutex<Vec<InvocationRequest>>,
+        cancellations: Mutex<Vec<ExecutionId>>,
     }
 
     impl FlowStepExecutor for RecordingFlowExecutor {
@@ -845,24 +885,17 @@ mod tests {
                 .push(request.clone());
 
             if action.entrypoint == "charge" && request.event["invoice"] == "inv_1" {
-                return Ok(execution_record_with_stdout(
+                return Ok(execution_record_with_events(
                     request,
                     ryvus_protocol::InvocationResult::success(request, json!({ "status": "paid" })),
-                    &format!(
-                        "{}\n",
-                        json!({
-                            "type": "event",
-                            "event": {
-                                "type": "log",
-                                "execution_id": request.execution_id,
-                                "attempt_id": request.attempt_id,
-                                "attempt_number": request.attempt_number,
-                                "level": "info",
-                                "message": "charged invoice",
-                                "fields": {}
-                            }
-                        })
-                    ),
+                    vec![InvocationEvent::Log(ryvus_protocol::LogEvent {
+                        execution_id: request.execution_id.clone(),
+                        attempt_id: request.attempt_id.clone(),
+                        attempt_number: request.attempt_number,
+                        level: LogLevel::Info,
+                        message: "charged invoice".to_string(),
+                        fields: json!({}),
+                    })],
                 ));
             }
 
@@ -903,6 +936,14 @@ mod tests {
                 request,
                 ryvus_protocol::InvocationResult::success(request, output),
             ))
+        }
+
+        fn cancel_flow_step(&self, execution_id: &ExecutionId) -> FlowResult<bool> {
+            self.cancellations
+                .lock()
+                .expect("cancellations should lock")
+                .push(execution_id.clone());
+            Ok(true)
         }
     }
 
@@ -970,13 +1011,13 @@ mod tests {
         request: &InvocationRequest,
         invocation_result: ryvus_protocol::InvocationResult,
     ) -> ExecutionRecord {
-        execution_record_with_stdout(request, invocation_result, "")
+        execution_record_with_events(request, invocation_result, Vec::new())
     }
 
-    fn execution_record_with_stdout(
+    fn execution_record_with_events(
         request: &InvocationRequest,
         invocation_result: ryvus_protocol::InvocationResult,
-        stdout: &str,
+        events: Vec<InvocationEvent>,
     ) -> ExecutionRecord {
         let now = SystemTime::now();
         ExecutionRecord::new(
@@ -989,7 +1030,8 @@ mod tests {
             },
             ExecutionResult {
                 invocation_result,
-                stdout: stdout.to_string(),
+                events,
+                stdout: String::new(),
                 stderr: String::new(),
                 duration: Duration::from_millis(1),
                 exit_code: Some(0),

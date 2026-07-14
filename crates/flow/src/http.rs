@@ -290,6 +290,7 @@ mod tests {
             },
             ExecutionResult {
                 invocation_result,
+                events: Vec::new(),
                 stdout: String::new(),
                 stderr: String::new(),
                 duration: Duration::from_millis(1),

@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use ryvus_protocol::{AttemptId, InvocationRequest, InvocationResult, PROTOCOL_VERSION};
+use ryvus_protocol::{InvocationRequest, InvocationResult, PROTOCOL_VERSION};
 
 use crate::{
     refresh_transport_budget, ExecutionOptions, ExecutionResult, Executor, ExecutorError,
@@ -66,6 +66,7 @@ where
             }
             (Ok(invocation_result), Ok(release)) => Ok(ExecutionResult {
                 invocation_result,
+                events: release.events,
                 stdout: release.exit.stdout,
                 stderr: release.exit.stderr,
                 duration: started.elapsed(),
@@ -78,10 +79,6 @@ where
                 release: release.to_string(),
             }),
         }
-    }
-
-    fn cancel(&self, attempt_id: &AttemptId) -> ExecutorResult<bool> {
-        self.manager.cancel(attempt_id)
     }
 
     fn shutdown(&self, grace: Duration) -> ExecutorResult<()> {
@@ -219,6 +216,45 @@ mod tests {
     }
 
     #[test]
+    fn preserves_released_runtime_events() {
+        let request = request_with_deadline();
+        let body = serde_json::to_string(&InvocationResult::success(&request, json!({}))).unwrap();
+        let endpoint = one_response_server("200 OK", &body);
+        let expected_attempt = request.attempt();
+        let event = ryvus_protocol::InvocationEvent::Log(ryvus_protocol::LogEvent {
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            attempt_number: request.attempt_number,
+            level: ryvus_protocol::LogLevel::Info,
+            message: "worker log".to_string(),
+            fields: json!({}),
+        });
+        let mut manager = MockRuntimeManager::new();
+        manager.expect_acquire().return_once(move |_, attempt, _| {
+            Ok(RuntimeHandle::existing(attempt.clone(), endpoint))
+        });
+        manager.expect_release().return_once(move |_, _| {
+            Ok(RuntimeRelease {
+                exit: RuntimeExit::default(),
+                events: vec![event],
+                disposition: RuntimeDisposition::Unmanaged,
+            })
+        });
+        let result = HttpExecutor::new(manager)
+            .invoke(
+                &RuntimeTarget::http("unused"),
+                &request,
+                &ExecutionOptions {
+                    timeout: Duration::from_secs(1),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events[0].attempt(), expected_attempt);
+    }
+
+    #[test]
     fn releases_runtime_after_malformed_response() {
         let endpoint = one_response_server("200 OK", "not-json");
         let executor =
@@ -274,6 +310,7 @@ mod tests {
             .return_once(|_, _| {
                 Ok(RuntimeRelease {
                     exit: RuntimeExit::default(),
+                    events: Vec::new(),
                     disposition: RuntimeDisposition::TimedOut,
                 })
             });
@@ -311,6 +348,7 @@ mod tests {
             .returning(|_, _| {
                 Ok(RuntimeRelease {
                     exit: RuntimeExit::default(),
+                    events: Vec::new(),
                     disposition: RuntimeDisposition::Unmanaged,
                 })
             });

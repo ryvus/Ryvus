@@ -3,7 +3,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use ryvus_protocol::{ExecutionAttempt, InvocationRequest, InvocationResult};
+use ryvus_protocol::{ExecutionAttempt, InvocationEvent, InvocationRequest, InvocationResult};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,6 +21,7 @@ pub enum ExecutionState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionResult {
     pub invocation_result: InvocationResult,
+    pub events: Vec<InvocationEvent>,
     pub stdout: String,
     pub stderr: String,
     pub duration: Duration,
