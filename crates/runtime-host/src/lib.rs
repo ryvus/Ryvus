@@ -1,6 +1,7 @@
 mod deadline;
 mod error;
 mod process;
+mod websocket_control;
 mod worker;
 
 use std::{
@@ -21,15 +22,18 @@ use axum::{
 use ryvus_protocol::{
     ActiveAttemptOwnership, AttemptId, AttemptOutcome, ControlCommandOutcome, ControlMessageId,
     ExecutionAttempt, InvocationEvent, InvocationRequest, InvocationResult, RuntimeControlCommand,
-    RuntimeControlEvent, RuntimeHostId, RuntimeSessionId, TerminationReason, PROTOCOL_VERSION,
-    RUNTIME_CONTROL_PROTOCOL_VERSION,
+    RuntimeControlEvent, RuntimeHostId, RuntimeRegistration, RuntimeSessionId, TerminationReason,
+    PROTOCOL_VERSION, RUNTIME_CONTROL_PROTOCOL_VERSION,
 };
 use serde::Serialize;
-use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Semaphore};
 
 pub use deadline::{DeadlineValidator, ValidatedDeadline, DEFAULT_CLOCK_SKEW_TOLERANCE};
 pub use error::RuntimeHostError;
 pub use process::{ProcessInvocationWorker, ProcessInvocationWorkerFactory, ProcessWorkerConfig};
+pub use websocket_control::{
+    WebSocketHeaderProvider, WebSocketRuntimeHostClient, WebSocketRuntimeHostError,
+};
 pub use worker::{
     InvocationWorker, InvocationWorkerFactory, StartedWorker, WorkerError, WorkerInvocation,
 };
@@ -48,7 +52,12 @@ pub struct RuntimeHostControlSender {
 
 struct ControlRequest {
     command: RuntimeControlCommand,
-    response: std::sync::mpsc::Sender<RuntimeControlEvent>,
+    response: ControlResponse,
+}
+
+enum ControlResponse {
+    Blocking(std::sync::mpsc::Sender<RuntimeControlEvent>),
+    Async(oneshot::Sender<RuntimeControlEvent>),
 }
 
 struct HostState {
@@ -60,7 +69,8 @@ struct HostState {
     terminal_attempts: Mutex<HashMap<AttemptId, AttemptOutcome>>,
     command_results: Mutex<HashMap<ControlMessageId, RuntimeControlEvent>>,
     runtime_host_id: RuntimeHostId,
-    runtime_session_id: RuntimeSessionId,
+    runtime_session_id: StdMutex<RuntimeSessionId>,
+    control_events: broadcast::Sender<RuntimeControlEvent>,
     expected_attempt: Option<ActiveAttemptOwnership>,
     accepting: AtomicBool,
     stopped: AtomicBool,
@@ -95,6 +105,7 @@ impl RuntimeHost {
         expected_attempt: Option<ActiveAttemptOwnership>,
     ) -> Self {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let (control_events, _) = broadcast::channel(64);
         Self {
             state: Arc::new(HostState {
                 factory,
@@ -105,7 +116,8 @@ impl RuntimeHost {
                 terminal_attempts: Mutex::new(HashMap::new()),
                 command_results: Mutex::new(HashMap::new()),
                 runtime_host_id,
-                runtime_session_id,
+                runtime_session_id: StdMutex::new(runtime_session_id),
+                control_events,
                 expected_attempt,
                 accepting: AtomicBool::new(true),
                 stopped: AtomicBool::new(false),
@@ -132,7 +144,14 @@ impl RuntimeHost {
             .expect("runtime control loop should start once");
         while let Some(request) = receiver.recv().await {
             let result = self.state.handle_command(request.command).await;
-            let _ = request.response.send(result);
+            match request.response {
+                ControlResponse::Blocking(response) => {
+                    let _ = response.send(result);
+                }
+                ControlResponse::Async(response) => {
+                    let _ = response.send(result);
+                }
+            }
         }
     }
 
@@ -144,10 +163,38 @@ impl RuntimeHost {
     }
 
     pub fn identity(&self) -> (RuntimeHostId, RuntimeSessionId) {
-        (
-            self.state.runtime_host_id.clone(),
-            self.state.runtime_session_id.clone(),
-        )
+        (self.state.runtime_host_id.clone(), self.state.session_id())
+    }
+
+    pub fn begin_control_session(&self) -> RuntimeSessionId {
+        let session_id = RuntimeSessionId::new();
+        *self
+            .state
+            .runtime_session_id
+            .lock()
+            .expect("runtime session should lock") = session_id.clone();
+        session_id
+    }
+
+    pub async fn registration(&self, revision: impl Into<String>) -> RuntimeRegistration {
+        RuntimeRegistration {
+            protocol_version: RUNTIME_CONTROL_PROTOCOL_VERSION.to_string(),
+            message_id: ControlMessageId::new(),
+            runtime_host_id: self.state.runtime_host_id.clone(),
+            runtime_session_id: self.state.session_id(),
+            revision: revision.into(),
+            max_concurrency: u32::try_from(self.state.max_workers).unwrap_or(u32::MAX),
+            capabilities: ryvus_protocol::RuntimeCapabilities {
+                terminate_attempt: true,
+                drain: true,
+                shutdown: true,
+            },
+            active_attempts: self.active_attempt().await.into_iter().collect(),
+        }
+    }
+
+    pub fn subscribe_control_events(&self) -> broadcast::Receiver<RuntimeControlEvent> {
+        self.state.control_events.subscribe()
     }
 
     pub async fn drain(&self) {
@@ -200,11 +247,27 @@ impl RuntimeHostControlSender {
         self.tx
             .send(ControlRequest {
                 command,
-                response: response_tx,
+                response: ControlResponse::Blocking(response_tx),
             })
             .map_err(|_| "runtime control loop is unavailable".to_string())?;
         response_rx
             .recv()
+            .map_err(|_| "runtime control response was dropped".to_string())
+    }
+
+    pub async fn send_async(
+        &self,
+        command: RuntimeControlCommand,
+    ) -> Result<RuntimeControlEvent, String> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.tx
+            .send(ControlRequest {
+                command,
+                response: ControlResponse::Async(response_tx),
+            })
+            .map_err(|_| "runtime control loop is unavailable".to_string())?;
+        response_rx
+            .await
             .map_err(|_| "runtime control response was dropped".to_string())
     }
 }
@@ -225,7 +288,7 @@ impl HostState {
                 ControlCommandOutcome::OwnershipMismatch,
                 Some("runtime host id does not match".to_string()),
             )
-        } else if command_runtime_session_id(&command) != &self.runtime_session_id {
+        } else if command_runtime_session_id(&command) != &self.session_id() {
             (
                 ControlCommandOutcome::StaleSession,
                 Some("runtime session id is stale".to_string()),
@@ -256,7 +319,7 @@ impl HostState {
             protocol_version: RUNTIME_CONTROL_PROTOCOL_VERSION.to_string(),
             message_id: ControlMessageId::new(),
             runtime_host_id: self.runtime_host_id.clone(),
-            runtime_session_id: self.runtime_session_id.clone(),
+            runtime_session_id: self.session_id(),
             command_message_id: message_id.clone(),
             outcome: outcome.0,
             message: outcome.1,
@@ -278,20 +341,25 @@ impl HostState {
         if self.terminal_attempts.lock().await.contains_key(attempt_id) {
             return (ControlCommandOutcome::AlreadyTerminal, None);
         }
-        let Some(expected) = &self.expected_attempt else {
-            return (ControlCommandOutcome::AttemptNotFound, None);
-        };
-        if expected.attempt_id != *attempt_id {
-            return (ControlCommandOutcome::AttemptNotFound, None);
+        if let Some(expected) = &self.expected_attempt {
+            if expected.attempt_id != *attempt_id {
+                return (ControlCommandOutcome::AttemptNotFound, None);
+            }
+            if expected.execution_id != *execution_id || expected.attempt_number != attempt_number {
+                return (ControlCommandOutcome::OwnershipMismatch, None);
+            }
         }
-        if expected.execution_id != *execution_id || expected.attempt_number != attempt_number {
-            return (ControlCommandOutcome::OwnershipMismatch, None);
-        }
-
         let active = self.active.lock().await.clone();
         if let Some(active) = active {
-            if active.ownership.worker_id != expected.worker_id
-                || active.ownership.attempt_id != expected.attempt_id
+            if active.ownership.attempt_id != *attempt_id {
+                return (ControlCommandOutcome::AttemptNotFound, None);
+            }
+            if active.ownership.execution_id != *execution_id
+                || active.ownership.attempt_number != attempt_number
+                || self
+                    .expected_attempt
+                    .as_ref()
+                    .is_some_and(|expected| expected.worker_id != active.ownership.worker_id)
             {
                 return (ControlCommandOutcome::OwnershipMismatch, None);
             }
@@ -299,17 +367,28 @@ impl HostState {
                 return (ControlCommandOutcome::Failed, Some(error.to_string()));
             }
             self.clear_active(&active.ownership).await;
-        }
-        let outcome = match reason {
-            TerminationReason::Timeout => AttemptOutcome::TimedOut,
-            _ => AttemptOutcome::Cancelled,
-        };
-        let mut terminal = self.terminal_attempts.lock().await;
-        if terminal.contains_key(attempt_id) {
-            (ControlCommandOutcome::AlreadyTerminal, None)
+            let outcome = match reason {
+                TerminationReason::Timeout => AttemptOutcome::TimedOut,
+                _ => AttemptOutcome::Cancelled,
+            };
+            if self.transition_terminal(&active.ownership, outcome).await {
+                (ControlCommandOutcome::Confirmed, None)
+            } else {
+                (ControlCommandOutcome::AlreadyTerminal, None)
+            }
         } else {
-            terminal.insert(attempt_id.clone(), outcome);
-            (ControlCommandOutcome::Confirmed, None)
+            let Some(expected) = &self.expected_attempt else {
+                return (ControlCommandOutcome::AttemptNotFound, None);
+            };
+            let outcome = match reason {
+                TerminationReason::Timeout => AttemptOutcome::TimedOut,
+                _ => AttemptOutcome::Cancelled,
+            };
+            if self.transition_terminal(expected, outcome).await {
+                (ControlCommandOutcome::Confirmed, None)
+            } else {
+                (ControlCommandOutcome::AlreadyTerminal, None)
+            }
         }
     }
 
@@ -319,25 +398,47 @@ impl HostState {
         if let Some(active) = active {
             active.worker.terminate(TerminationReason::Shutdown).await?;
             self.clear_active(&active.ownership).await;
-            self.terminal_attempts
-                .lock()
-                .await
-                .entry(active.ownership.attempt_id)
-                .or_insert(AttemptOutcome::Cancelled);
+            self.transition_terminal(&active.ownership, AttemptOutcome::Cancelled)
+                .await;
         }
         self.stopped.store(true, Ordering::Release);
         self.stopped_notify.notify_waiters();
         Ok(())
     }
 
-    async fn transition_terminal(&self, attempt_id: &AttemptId, outcome: AttemptOutcome) -> bool {
+    async fn transition_terminal(
+        &self,
+        ownership: &ActiveAttemptOwnership,
+        outcome: AttemptOutcome,
+    ) -> bool {
         let mut terminal = self.terminal_attempts.lock().await;
-        if terminal.contains_key(attempt_id) {
+        if terminal.contains_key(&ownership.attempt_id) {
             false
         } else {
-            terminal.insert(attempt_id.clone(), outcome);
+            terminal.insert(ownership.attempt_id.clone(), outcome);
+            drop(terminal);
+            let _ = self
+                .control_events
+                .send(RuntimeControlEvent::AttemptFinished {
+                    protocol_version: RUNTIME_CONTROL_PROTOCOL_VERSION.to_string(),
+                    message_id: ControlMessageId::new(),
+                    runtime_host_id: self.runtime_host_id.clone(),
+                    runtime_session_id: self.session_id(),
+                    execution_id: ownership.execution_id.clone(),
+                    attempt_id: ownership.attempt_id.clone(),
+                    attempt_number: ownership.attempt_number,
+                    worker_id: ownership.worker_id.clone(),
+                    outcome,
+                });
             true
         }
+    }
+
+    fn session_id(&self) -> RuntimeSessionId {
+        self.runtime_session_id
+            .lock()
+            .expect("runtime session should lock")
+            .clone()
     }
 
     async fn clear_active(&self, ownership: &ActiveAttemptOwnership) {
@@ -481,6 +582,18 @@ async fn invoke(
         state.cleanup(&active, TerminationReason::Shutdown).await?;
         return Err(RuntimeHostError::Unavailable);
     }
+    let _ = state
+        .control_events
+        .send(RuntimeControlEvent::AttemptStarted {
+            protocol_version: RUNTIME_CONTROL_PROTOCOL_VERSION.to_string(),
+            message_id: ControlMessageId::new(),
+            runtime_host_id: state.runtime_host_id.clone(),
+            runtime_session_id: state.session_id(),
+            execution_id: ownership.execution_id.clone(),
+            attempt_id: ownership.attempt_id.clone(),
+            attempt_number: ownership.attempt_number,
+            worker_id: ownership.worker_id.clone(),
+        });
 
     let task_state = Arc::clone(&state);
     let recovery = active.clone();
@@ -514,7 +627,7 @@ async fn supervise_attempt(
         let timed_out = worker_timed_out(&error);
         if timed_out {
             state
-                .transition_terminal(&request.attempt_id, AttemptOutcome::TimedOut)
+                .transition_terminal(&active.ownership, AttemptOutcome::TimedOut)
                 .await;
         }
         state
@@ -549,7 +662,7 @@ async fn supervise_attempt(
     };
     if matches!(invocation, Err(RuntimeHostError::TimedOut)) {
         state
-            .transition_terminal(&request.attempt_id, AttemptOutcome::TimedOut)
+            .transition_terminal(&active.ownership, AttemptOutcome::TimedOut)
             .await;
     }
     let cleanup_reason = if matches!(invocation, Err(RuntimeHostError::TimedOut)) {
@@ -588,10 +701,7 @@ async fn supervise_attempt(
     } else {
         AttemptOutcome::Failed
     };
-    if !state
-        .transition_terminal(&request.attempt_id, outcome)
-        .await
-    {
+    if !state.transition_terminal(&active.ownership, outcome).await {
         return match state
             .terminal_attempts
             .lock()

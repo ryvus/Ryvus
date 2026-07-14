@@ -6,8 +6,8 @@ use std::{
 
 use ryvus_protocol::{
     AttemptId, AttemptOutcome, ControlCommandOutcome, ControlMessageId, ExecutionAttempt,
-    ExecutionId, RuntimeControlCommand, RuntimeControlEvent, RuntimeHostId, RuntimeSessionId,
-    TerminationReason, WorkerId, RUNTIME_CONTROL_PROTOCOL_VERSION,
+    ExecutionId, RuntimeControlCommand, RuntimeControlEvent, RuntimeHostId, RuntimeRegistration,
+    RuntimeSessionId, TerminationReason, WorkerId, RUNTIME_CONTROL_PROTOCOL_VERSION,
 };
 use ryvus_runtime_host::RuntimeHostControlSender;
 use thiserror::Error;
@@ -28,6 +28,15 @@ pub enum RuntimeControlError {
     Channel(String),
     #[error("runtime control returned an invalid command result")]
     InvalidCommandResult,
+    #[error("invalid runtime-control message: {0}")]
+    InvalidMessage(String),
+    #[error("runtime session '{runtime_session_id}' is stale for host '{runtime_host_id}'")]
+    StaleSession {
+        runtime_host_id: RuntimeHostId,
+        runtime_session_id: RuntimeSessionId,
+    },
+    #[error("runtime-control event does not match active attempt ownership")]
+    OwnershipMismatch,
 }
 
 pub type RuntimeControlResult<T> = Result<T, RuntimeControlError>;
@@ -88,12 +97,41 @@ pub struct RuntimeControlService {
     state: Arc<Mutex<ControlState>>,
 }
 
+#[derive(Clone)]
+pub struct RuntimeControlIngress {
+    state: Arc<Mutex<ControlState>>,
+}
+
 impl RuntimeControlService {
     pub fn new(channel: Arc<dyn RuntimeControlChannel>) -> Self {
         Self {
             channel,
             state: Arc::new(Mutex::new(ControlState::default())),
         }
+    }
+
+    pub fn ingress(&self) -> RuntimeControlIngress {
+        RuntimeControlIngress {
+            state: Arc::clone(&self.state),
+        }
+    }
+
+    pub fn current_session(&self, runtime_host_id: &RuntimeHostId) -> Option<RuntimeSessionId> {
+        self.state
+            .lock()
+            .expect("runtime control state should lock")
+            .runtimes
+            .get(runtime_host_id)
+            .cloned()
+    }
+
+    pub fn attempt_ownership(&self, attempt_id: &AttemptId) -> Option<AttemptOwnership> {
+        self.state
+            .lock()
+            .expect("runtime control state should lock")
+            .attempts
+            .get(attempt_id)
+            .cloned()
     }
 
     pub fn register_attempt(&self, ownership: AttemptOwnership) {
@@ -276,6 +314,118 @@ impl RuntimeControlService {
     }
 }
 
+impl RuntimeControlIngress {
+    pub fn register(&self, registration: RuntimeRegistration) -> RuntimeControlResult<()> {
+        registration
+            .validate()
+            .map_err(|error| RuntimeControlError::InvalidMessage(error.to_string()))?;
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime control state should lock");
+        state
+            .attempts
+            .retain(|_, ownership| ownership.runtime_host_id != registration.runtime_host_id);
+        state.runtimes.insert(
+            registration.runtime_host_id.clone(),
+            registration.runtime_session_id.clone(),
+        );
+        for active in registration.active_attempts {
+            let ownership = AttemptOwnership {
+                execution_id: active.execution_id,
+                attempt_id: active.attempt_id,
+                attempt_number: active.attempt_number,
+                runtime_host_id: registration.runtime_host_id.clone(),
+                runtime_session_id: registration.runtime_session_id.clone(),
+                worker_id: active.worker_id,
+            };
+            state
+                .attempts
+                .insert(ownership.attempt_id.clone(), ownership);
+        }
+        Ok(())
+    }
+
+    pub fn apply(&self, event: RuntimeControlEvent) -> RuntimeControlResult<()> {
+        event
+            .validate()
+            .map_err(|error| RuntimeControlError::InvalidMessage(error.to_string()))?;
+        let (runtime_host_id, runtime_session_id) = event_identity(&event);
+        let runtime_host_id = runtime_host_id.clone();
+        let runtime_session_id = runtime_session_id.clone();
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime control state should lock");
+        if state.runtimes.get(&runtime_host_id) != Some(&runtime_session_id) {
+            return Err(RuntimeControlError::StaleSession {
+                runtime_host_id,
+                runtime_session_id,
+            });
+        }
+        match event {
+            RuntimeControlEvent::AttemptStarted {
+                execution_id,
+                attempt_id,
+                attempt_number,
+                worker_id,
+                ..
+            } => {
+                if state.attempts.get(&attempt_id).is_some_and(|current| {
+                    current.execution_id != execution_id
+                        || current.attempt_number != attempt_number
+                        || current.worker_id != worker_id
+                }) || state.attempts.values().any(|current| {
+                    current.attempt_id != attempt_id
+                        && current.runtime_host_id == runtime_host_id
+                        && current.runtime_session_id == runtime_session_id
+                        && current.worker_id == worker_id
+                }) {
+                    return Err(RuntimeControlError::OwnershipMismatch);
+                }
+                state.attempts.insert(
+                    attempt_id.clone(),
+                    AttemptOwnership {
+                        execution_id,
+                        attempt_id,
+                        attempt_number,
+                        runtime_host_id: runtime_host_id.clone(),
+                        runtime_session_id: runtime_session_id.clone(),
+                        worker_id,
+                    },
+                );
+            }
+            RuntimeControlEvent::AttemptFinished {
+                execution_id,
+                attempt_id,
+                attempt_number,
+                worker_id,
+                outcome,
+                ..
+            } => {
+                let Some(current) = state.attempts.get(&attempt_id) else {
+                    tracing::debug!(%attempt_id, "ignoring terminal event for inactive attempt");
+                    return Ok(());
+                };
+                if current.execution_id != execution_id
+                    || current.attempt_number != attempt_number
+                    || current.worker_id != worker_id
+                    || current.runtime_host_id != runtime_host_id
+                    || current.runtime_session_id != runtime_session_id
+                {
+                    return Err(RuntimeControlError::OwnershipMismatch);
+                }
+                state.terminal.entry(execution_id).or_insert(outcome);
+                state.attempts.remove(&attempt_id);
+            }
+            RuntimeControlEvent::Heartbeat { .. }
+            | RuntimeControlEvent::Registered { .. }
+            | RuntimeControlEvent::CommandResult { .. } => {}
+        }
+        Ok(())
+    }
+}
+
 fn command_outcome(event: &RuntimeControlEvent) -> RuntimeControlResult<ControlCommandOutcome> {
     match event {
         RuntimeControlEvent::CommandResult { outcome, .. } => Ok(*outcome),
@@ -294,6 +444,36 @@ fn command_host_id(command: &RuntimeControlCommand) -> &RuntimeHostId {
         | RuntimeControlCommand::ShutdownRuntime {
             runtime_host_id, ..
         } => runtime_host_id,
+    }
+}
+
+fn event_identity(event: &RuntimeControlEvent) -> (&RuntimeHostId, &RuntimeSessionId) {
+    match event {
+        RuntimeControlEvent::Registered {
+            runtime_host_id,
+            runtime_session_id,
+            ..
+        }
+        | RuntimeControlEvent::AttemptStarted {
+            runtime_host_id,
+            runtime_session_id,
+            ..
+        }
+        | RuntimeControlEvent::AttemptFinished {
+            runtime_host_id,
+            runtime_session_id,
+            ..
+        }
+        | RuntimeControlEvent::CommandResult {
+            runtime_host_id,
+            runtime_session_id,
+            ..
+        }
+        | RuntimeControlEvent::Heartbeat {
+            runtime_host_id,
+            runtime_session_id,
+            ..
+        } => (runtime_host_id, runtime_session_id),
     }
 }
 
@@ -528,6 +708,75 @@ mod tests {
     }
 
     #[test]
+    fn ingress_replaces_active_snapshot_and_fences_stale_events() {
+        let service = RuntimeControlService::new(RecordingChannel::confirming());
+        let ingress = service.ingress();
+        let runtime_host_id = RuntimeHostId::new();
+        let stale_session = RuntimeSessionId::new();
+        let current_session = RuntimeSessionId::new();
+        let stale_attempt = ownership();
+        let current_attempt = ownership();
+
+        ingress
+            .register(registration(
+                &runtime_host_id,
+                &stale_session,
+                &stale_attempt,
+            ))
+            .unwrap();
+        ingress
+            .register(registration(
+                &runtime_host_id,
+                &current_session,
+                &current_attempt,
+            ))
+            .unwrap();
+
+        assert!(service
+            .attempt_ownership(&stale_attempt.attempt_id)
+            .is_none());
+        assert_eq!(
+            service
+                .attempt_ownership(&current_attempt.attempt_id)
+                .unwrap()
+                .runtime_session_id,
+            current_session
+        );
+        let mismatched_finish = RuntimeControlEvent::AttemptFinished {
+            protocol_version: RUNTIME_CONTROL_PROTOCOL_VERSION.to_string(),
+            message_id: ControlMessageId::new(),
+            runtime_host_id: runtime_host_id.clone(),
+            runtime_session_id: current_session,
+            execution_id: current_attempt.execution_id.clone(),
+            attempt_id: current_attempt.attempt_id.clone(),
+            attempt_number: current_attempt.attempt_number,
+            worker_id: WorkerId::new(),
+            outcome: AttemptOutcome::Succeeded,
+        };
+        assert!(matches!(
+            ingress.apply(mismatched_finish),
+            Err(RuntimeControlError::OwnershipMismatch)
+        ));
+        assert!(service
+            .attempt_ownership(&current_attempt.attempt_id)
+            .is_some());
+        let stale_event = RuntimeControlEvent::AttemptStarted {
+            protocol_version: RUNTIME_CONTROL_PROTOCOL_VERSION.to_string(),
+            message_id: ControlMessageId::new(),
+            runtime_host_id,
+            runtime_session_id: stale_session,
+            execution_id: ExecutionId::new(),
+            attempt_id: AttemptId::new(),
+            attempt_number: 1,
+            worker_id: WorkerId::new(),
+        };
+        assert!(matches!(
+            ingress.apply(stale_event),
+            Err(RuntimeControlError::StaleSession { .. })
+        ));
+    }
+
+    #[test]
     fn drain_keeps_active_work_and_shutdown_honors_grace_before_termination() {
         let channel = RecordingChannel::confirming();
         let service = RuntimeControlService::new(channel.clone());
@@ -567,6 +816,32 @@ mod tests {
             runtime_host_id: RuntimeHostId::new(),
             runtime_session_id: RuntimeSessionId::new(),
             worker_id: WorkerId::new(),
+        }
+    }
+
+    fn registration(
+        runtime_host_id: &RuntimeHostId,
+        runtime_session_id: &RuntimeSessionId,
+        ownership: &AttemptOwnership,
+    ) -> RuntimeRegistration {
+        RuntimeRegistration {
+            protocol_version: RUNTIME_CONTROL_PROTOCOL_VERSION.to_string(),
+            message_id: ControlMessageId::new(),
+            runtime_host_id: runtime_host_id.clone(),
+            runtime_session_id: runtime_session_id.clone(),
+            revision: "test".into(),
+            max_concurrency: 1,
+            capabilities: ryvus_protocol::RuntimeCapabilities {
+                terminate_attempt: true,
+                drain: true,
+                shutdown: true,
+            },
+            active_attempts: vec![ryvus_protocol::ActiveAttemptOwnership {
+                execution_id: ownership.execution_id.clone(),
+                attempt_id: ownership.attempt_id.clone(),
+                attempt_number: ownership.attempt_number,
+                worker_id: ownership.worker_id.clone(),
+            }],
         }
     }
 
