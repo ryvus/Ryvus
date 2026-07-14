@@ -1,6 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
-use axum::{body::Body, http::Request};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use futures_util::{SinkExt, StreamExt};
 use ryvus_execution::{
     RuntimeControlChannel, WebSocketHeaderValidator, WebSocketRuntimeControlChannel,
@@ -183,6 +186,48 @@ async fn heartbeat_expiry_removes_transport_routing_only() {
     })
     .await
     .is_some());
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drain_and_shutdown_reach_the_real_host() {
+    let (service, _channel, endpoint, server) = start_server(options()).await;
+    let host = sleeping_host();
+    let host_id = host.identity().0;
+    let control_host = host.clone();
+    tokio::spawn(async move { control_host.run_control_loop().await });
+    let client = WebSocketRuntimeHostClient::new(endpoint, "test-revision")
+        .heartbeat_interval(Duration::from_millis(20));
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let client_host = host.clone();
+    let client_task = tokio::spawn(async move { client.run(client_host, shutdown_rx).await });
+
+    wait_until_value(Duration::from_secs(2), || {
+        let service = service.clone();
+        let host_id = host_id.clone();
+        async move { service.current_session(&host_id) }
+    })
+    .await
+    .expect("runtime host did not register");
+    let drain_service = service.clone();
+    tokio::task::spawn_blocking(move || drain_service.drain().unwrap())
+        .await
+        .unwrap();
+    let readiness = host
+        .router()
+        .oneshot(Request::get("/ready").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(readiness.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    tokio::task::spawn_blocking(move || service.shutdown(Duration::ZERO).unwrap())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), host.wait_stopped())
+        .await
+        .expect("runtime host did not stop");
+    shutdown_tx.send(true).unwrap();
+    client_task.await.unwrap();
     server.abort();
 }
 
