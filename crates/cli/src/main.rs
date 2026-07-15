@@ -1,6 +1,6 @@
 use clap::Parser;
 use ryvus_cli::{
-    commands::{database, discover, new, schedule, start, validate},
+    commands::{database, discover, new, project, schedule, start, validate},
     error::CliError,
     Cli, Command, DatabaseCommand, ScheduleCommand,
 };
@@ -21,6 +21,8 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<(), CliError> {
+    project::load_environment()?;
+
     match cli.command {
         Command::New {
             project_name,

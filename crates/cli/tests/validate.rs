@@ -595,6 +595,37 @@ def sync_inventory(event):
 }
 
 #[test]
+fn schedule_run_does_not_fall_back_when_postgres_is_unavailable() {
+    let project = TestProject::new("schedule-run-postgres-unavailable");
+    project.add_schedule_action(
+        "sync.py",
+        r#"
+@scheduled_action(every="10s")
+def sync_inventory(context):
+    return {"ok": True}
+"#,
+    );
+    let database_url = "postgres://user:secret@127.0.0.1:1/ryvus";
+    fs::write(
+        project.root.join(".env"),
+        format!("RYVUS_EXECUTION_STORE=postgres\nDATABASE_URL={database_url}\n"),
+    )
+    .expect("environment should be written");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ryvus"))
+        .args(["schedule", "run", "sync_inventory"])
+        .current_dir(&project.root)
+        .output()
+        .expect("schedule run should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("PostgreSQL execution store initialization failed"));
+    assert!(!stderr.contains(database_url));
+    assert!(!stderr.contains("status: success"));
+}
+
+#[test]
 fn schedule_run_reports_unknown_selector() {
     let project = TestProject::new("schedule-run-missing");
     project.add_schedule_action(

@@ -52,6 +52,6 @@ Generated execution output under `.ryvus-test/` is ignored repository-wide. It i
 
 ## Current limitations
 
-This suite validates persistence correctness, not hosted production readiness. The provider currently uses one mutex-protected synchronous client, blocking database I/O, and `NoTls`; it has no pool or bounded query timeout. Managed PostgreSQL and configurable TLS compatibility require separate operational validation.
+This suite validates persistence correctness, not hosted production readiness. The provider currently owns one synchronous client on a dedicated worker thread; callers block while awaiting each result. It uses `NoTls` and has no pool or bounded query timeout. Managed PostgreSQL and configurable TLS compatibility require separate operational validation.
 
 If a worker result reaches the control plane but PostgreSQL fails before the terminal compare-and-set commits, the durable aggregate can remain `Running` after the worker exits. Completed-result acknowledgement and retention are not implemented yet.

@@ -124,6 +124,9 @@ fn postgres_integration_suite() {
         run_provider_contract(&store);
     }
 
+    eprintln!("phase: Tokio runtime compatibility");
+    validate_tokio_runtime_compatibility(db.url());
+
     eprintln!("phase: restart validation");
     validate_restart(db.url());
 
@@ -134,6 +137,18 @@ fn postgres_integration_suite() {
 
     eprintln!("phase: rollback validation");
     validate_transaction_rollback(db.url());
+}
+
+fn validate_tokio_runtime_compatibility(url: &str) {
+    let url = url.to_owned();
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(async move {
+            let store = PostgresExecutionStateStore::connect(&url).unwrap();
+            let created = store.create(new_execution()).unwrap();
+            assert_eq!(store.load(&created.execution_id).unwrap(), Some(created));
+            drop(store);
+        });
 }
 
 fn validate_url_construction() {

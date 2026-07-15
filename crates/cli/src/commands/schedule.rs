@@ -38,8 +38,7 @@ pub fn run(selector: String) -> Result<()> {
     ryvus_scheduler::validate_schedule_actions(action_catalog.all())
         .map_err(|err| CliError::Validation(err.to_string()))?;
 
-    let execution_service =
-        ryvus_gateway::server::build_execution_service(config.project_root.clone());
+    let execution_service = project::build_execution_service(&config)?;
     let result =
         ryvus_scheduler::run_schedule_once(action_catalog.all(), &selector, execution_service)
             .map_err(|err| CliError::Validation(err.to_string()))?;

@@ -57,6 +57,10 @@ fn render_project_templates(project_dir: &Path, context: &TemplateContext) -> Re
             content: include_str!("../../templates/new-project/.gitignore"),
         },
         TemplateFile {
+            target_path: ".env",
+            content: include_str!("../../templates/new-project/env.template"),
+        },
+        TemplateFile {
             target_path: "README.md",
             content: include_str!("../../templates/new-project/README.md"),
         },
@@ -142,3 +146,36 @@ const RUST_TEMPLATE_FILES: &[TemplateFile] = &[
         ),
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    #[test]
+    fn project_template_creates_ignored_memory_dotenv() {
+        let id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("ryvus-new-dotenv-{id}"));
+        fs::create_dir_all(&root).unwrap();
+        let context = TemplateContext {
+            project_name: "test-project".into(),
+            language: Language::Python,
+        };
+
+        render_project_templates(&root, &context).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(root.join(".env")).unwrap(),
+            "RYVUS_EXECUTION_STORE=memory\n"
+        );
+        assert!(fs::read_to_string(root.join(".gitignore"))
+            .unwrap()
+            .lines()
+            .any(|line| line == ".env"));
+        fs::remove_dir_all(root).unwrap();
+    }
+}

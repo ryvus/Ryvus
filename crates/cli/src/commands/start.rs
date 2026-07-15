@@ -27,8 +27,7 @@ pub fn run(run_schedules: bool) -> Result<()> {
         .map_err(|err| CliError::Validation(err.to_string()))?;
     let scheduler = ryvus_scheduler::Scheduler::from_actions(action_catalog.all())
         .map_err(|err| CliError::Validation(err.to_string()))?;
-    let execution_service =
-        ryvus_gateway::server::build_execution_service(config.project_root.clone());
+    let execution_service = project::build_execution_service(&config)?;
     let scheduler_service = Arc::new(ryvus_scheduler::http::SchedulerService::new(
         action_catalog.all().cloned().collect(),
         Arc::clone(&execution_service),

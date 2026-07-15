@@ -175,6 +175,116 @@ POST /internal/flows/runs/{id}/steps/{step_key}/retry
 
 Schedules and Flows do not execute through the public gateway.
 
+## Execution Persistence
+
+Ryvus has two execution-state providers:
+
+- `MemoryExecutionStateStore` is the default used by `ryvus start`. It requires no database, but execution state is lost when Ryvus stops.
+- `PostgresExecutionStateStore` stores executions, attempts, retries, cancellation intent, Runtime Host ownership, structured results, and terminal outcomes durably.
+
+PostgreSQL support is explicit. Ryvus does not embed PostgreSQL, start it automatically, or run migrations during application startup.
+
+The CLI loads configuration from `.env` in the current project directory. Values already present in the process environment take precedence over the file. New projects generate an ignored, credential-free `.env` using the memory provider.
+
+### Start PostgreSQL with Docker Compose
+
+The repository provides a PostgreSQL-only Compose service for local development and integration testing:
+
+```bash
+docker compose -f compose.postgres-test.yml up -d --wait
+```
+
+It exposes PostgreSQL on `localhost:55432` with these development credentials:
+
+```text
+Host:     localhost
+Port:     55432
+User:     ryvus_test
+Password: ryvus_test
+Admin DB: postgres
+```
+
+The Compose service creates only the administrative `postgres` database. Create a separate application database once:
+
+```bash
+docker compose -f compose.postgres-test.yml exec postgres \
+  createdb -U ryvus_test ryvus
+```
+
+The application database URL is:
+
+```text
+postgres://ryvus_test:ryvus_test@localhost:55432/ryvus
+```
+
+Use that URL in a database application such as DBeaver, DataGrip, or `psql`. The integration-test administrator URL is different because it targets the administrative database:
+
+```text
+postgres://ryvus_test:ryvus_test@localhost:55432/postgres
+```
+
+### Run Ryvus migrations
+
+Run migrations explicitly before using a new application database or after pulling schema changes:
+
+```bash
+DATABASE_URL=postgres://ryvus_test:ryvus_test@localhost:55432/ryvus \
+  ryvus database migrate
+```
+
+When running the CLI directly from this workspace:
+
+```bash
+DATABASE_URL=postgres://ryvus_test:ryvus_test@localhost:55432/ryvus \
+  cargo run -p ryvus-cli -- database migrate
+```
+
+Migrations are repeatable. They create and track the Ryvus-owned execution schema; they do not start Ryvus or execute application work.
+
+### Start Ryvus
+
+With no `RYVUS_EXECUTION_STORE` variable, or with this project configuration, Ryvus remains database-free:
+
+```dotenv
+RYVUS_EXECUTION_STORE=memory
+```
+
+```bash
+ryvus start
+```
+
+To persist execution state, put both values in the project's ignored `.env`:
+
+```dotenv
+RYVUS_EXECUTION_STORE=postgres
+DATABASE_URL=postgres://ryvus_test:ryvus_test@localhost:55432/ryvus
+```
+
+Run the explicit migration once, then start normally:
+
+```bash
+ryvus database migrate
+ryvus start
+```
+
+The PostgreSQL provider is shared by API actions, scheduled actions, Flow steps, and manual scheduled execution through the same `ExecutionService`. Setting only `DATABASE_URL` does not select PostgreSQL; `RYVUS_EXECUTION_STORE=postgres` is required. Invalid or unavailable explicit PostgreSQL configuration fails startup instead of silently falling back to memory.
+
+### Stop PostgreSQL
+
+Stop the container while preserving the database volume:
+
+```bash
+docker compose -f compose.postgres-test.yml down
+```
+
+Delete the container and all local PostgreSQL data:
+
+```bash
+docker compose -f compose.postgres-test.yml down -v
+```
+
+Do not use `-v` when you want to keep the local `ryvus` database.
+
 ## Development
 
 Build:
@@ -202,9 +312,7 @@ RYVUS_POSTGRES_TEST_ADMIN_URL=postgres://ryvus_test:ryvus_test@localhost:55432/p
 docker compose -f compose.postgres-test.yml down -v
 ```
 
-The test harness creates and removes its own random database. See [PostgreSQL Integration Testing](docs/postgres-integration-testing.md) for external PostgreSQL and CI usage.
-
-PostgreSQL-backed application execution is not wired into `ryvus start` yet. Setting `DATABASE_URL` and running `ryvus database migrate` creates the schema, but `ryvus start` still selects `MemoryExecutionStateStore`. An explicit startup persistence option is required before PostgreSQL can store normal Ryvus executions.
+The test harness creates and removes its own random database. It does not use the `ryvus` application database described above. See [PostgreSQL Integration Testing](docs/postgres-integration-testing.md) for external PostgreSQL and CI usage.
 
 Format:
 

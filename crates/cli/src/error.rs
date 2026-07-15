@@ -1,5 +1,6 @@
-use std::io;
+use std::{io, path::PathBuf};
 
+use ryvus_execution::StateStoreError;
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, CliError>;
@@ -55,4 +56,16 @@ pub enum CliError {
 
     #[error("database migration failed")]
     DatabaseMigration,
+
+    #[error("invalid project environment file: {path}")]
+    EnvironmentFile { path: PathBuf },
+
+    #[error("invalid RYVUS_EXECUTION_STORE '{value}'; expected 'memory' or 'postgres'")]
+    InvalidExecutionStore { value: String },
+
+    #[error("DATABASE_URL is required when RYVUS_EXECUTION_STORE=postgres")]
+    ExecutionDatabaseUrlRequired,
+
+    #[error("PostgreSQL execution store initialization failed: {0}")]
+    ExecutionStore(#[source] StateStoreError),
 }

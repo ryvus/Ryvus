@@ -1,5 +1,9 @@
 use std::{
-    sync::Mutex,
+    sync::{
+        mpsc::{self, Sender},
+        Mutex,
+    },
+    thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -17,35 +21,98 @@ const MIGRATION_LOCK_ID: i64 = 7_823_981_045_710_001;
 const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../migrations/0001_execution_state.sql"))];
 
 pub struct PostgresExecutionStateStore {
-    client: Mutex<Client>,
+    commands: Option<Sender<ClientCommand>>,
+    worker: Mutex<Option<JoinHandle<()>>>,
 }
+
+type ClientCommand = Box<dyn FnOnce(&mut Client) + Send>;
 
 impl PostgresExecutionStateStore {
     pub fn connect(database_url: &str) -> StateStoreResult<Self> {
-        let client = Client::connect(database_url, NoTls)
-            .map_err(|error| backend("connect to PostgreSQL", error))?;
+        let database_url = database_url.to_owned();
+        let (commands, receiver) = mpsc::channel::<ClientCommand>();
+        let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
+        let worker = thread::Builder::new()
+            .name("ryvus-postgres-store".into())
+            .spawn(move || {
+                let mut client = match Client::connect(&database_url, NoTls) {
+                    Ok(client) => client,
+                    Err(error) => {
+                        let _ = startup_sender.send(Err(backend("connect to PostgreSQL", error)));
+                        return;
+                    }
+                };
+                if startup_sender.send(Ok(())).is_err() {
+                    return;
+                }
+                while let Ok(command) = receiver.recv() {
+                    command(&mut client);
+                }
+            })
+            .map_err(|error| {
+                StateStoreError::Backend(format!("start PostgreSQL store worker: {error}"))
+            })?;
+        if let Err(error) = startup_receiver
+            .recv()
+            .map_err(|_| StateStoreError::Backend("PostgreSQL store worker stopped".into()))?
+        {
+            let _ = worker.join();
+            return Err(error);
+        }
         Ok(Self {
-            client: Mutex::new(client),
+            commands: Some(commands),
+            worker: Mutex::new(Some(worker)),
         })
     }
 
-    fn transaction<T>(
+    fn run<T>(
         &self,
-        operation: impl FnOnce(&mut Transaction<'_>) -> StateStoreResult<T>,
-    ) -> StateStoreResult<T> {
-        let mut client = self
-            .client
-            .lock()
-            .map_err(|_| StateStoreError::Backend("PostgreSQL client lock is poisoned".into()))?;
-        let mut transaction = client
-            .transaction()
-            .map_err(|error| backend("begin PostgreSQL transaction", error))?;
-        let value = operation(&mut transaction)?;
-        transaction
-            .commit()
-            .map_err(|error| backend("commit PostgreSQL transaction", error))?;
-        Ok(value)
+        operation: impl FnOnce(&mut Client) -> StateStoreResult<T> + Send + 'static,
+    ) -> StateStoreResult<T>
+    where
+        T: Send + 'static,
+    {
+        let (result_sender, result_receiver) = mpsc::sync_channel(1);
+        let command = Box::new(move |client: &mut Client| {
+            let _ = result_sender.send(operation(client));
+        });
+        self.commands
+            .as_ref()
+            .ok_or_else(|| StateStoreError::Backend("PostgreSQL store is closed".into()))?
+            .send(command)
+            .map_err(|_| StateStoreError::Backend("PostgreSQL store worker stopped".into()))?;
+        result_receiver
+            .recv()
+            .map_err(|_| StateStoreError::Backend("PostgreSQL store worker stopped".into()))?
     }
+}
+
+impl Drop for PostgresExecutionStateStore {
+    fn drop(&mut self) {
+        self.commands.take();
+        let worker = self
+            .worker
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(worker) = worker {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn transaction<T>(
+    client: &mut Client,
+    operation: impl FnOnce(&mut Transaction<'_>) -> StateStoreResult<T>,
+) -> StateStoreResult<T> {
+    let mut transaction = client
+        .transaction()
+        .map_err(|error| backend("begin PostgreSQL transaction", error))?;
+    let value = operation(&mut transaction)?;
+    transaction
+        .commit()
+        .map_err(|error| backend("commit PostgreSQL transaction", error))?;
+    Ok(value)
 }
 
 impl ExecutionStateStore for PostgresExecutionStateStore {
@@ -68,23 +135,30 @@ impl ExecutionStateStore for PostgresExecutionStateStore {
             execution_version: 0,
         };
 
-        self.transaction(
-            |transaction| match insert_execution(transaction, &aggregate) {
-                Ok(()) => Ok(aggregate.clone()),
-                Err(StateStoreError::BackendCode { code, .. })
-                    if code == SqlState::UNIQUE_VIOLATION.code() =>
-                {
-                    Err(StateStoreError::AlreadyExists {
-                        execution_id: execution_id.clone(),
-                    })
+        self.run(move |client| {
+            transaction(client, |transaction| {
+                match insert_execution(transaction, &aggregate) {
+                    Ok(()) => Ok(aggregate.clone()),
+                    Err(StateStoreError::BackendCode { code, .. })
+                        if code == SqlState::UNIQUE_VIOLATION.code() =>
+                    {
+                        Err(StateStoreError::AlreadyExists {
+                            execution_id: execution_id.clone(),
+                        })
+                    }
+                    Err(error) => Err(error),
                 }
-                Err(error) => Err(error),
-            },
-        )
+            })
+        })
     }
 
     fn load(&self, execution_id: &ExecutionId) -> StateStoreResult<Option<ExecutionAggregate>> {
-        self.transaction(|transaction| load_aggregate(transaction, execution_id, "FOR SHARE"))
+        let execution_id = execution_id.clone();
+        self.run(move |client| {
+            transaction(client, |transaction| {
+                load_aggregate(transaction, &execution_id, "FOR SHARE")
+            })
+        })
     }
 
     fn compare_and_set(
@@ -93,48 +167,52 @@ impl ExecutionStateStore for PostgresExecutionStateStore {
         expected_version: u64,
         mutation: ExecutionMutation,
     ) -> StateStoreResult<TransitionResult> {
-        self.transaction(|transaction| {
-            let current =
-                load_aggregate(transaction, execution_id, "FOR UPDATE")?.ok_or_else(|| {
-                    StateStoreError::NotFound {
+        let execution_id = execution_id.clone();
+        self.run(move |client| {
+            transaction(client, |transaction| {
+                let current = load_aggregate(transaction, &execution_id, "FOR UPDATE")?
+                    .ok_or_else(|| StateStoreError::NotFound {
                         execution_id: execution_id.clone(),
-                    }
-                })?;
-            if current.execution_version != expected_version {
-                return Ok(TransitionResult::Conflict {
-                    current_version: current.execution_version,
-                });
-            }
+                    })?;
+                if current.execution_version != expected_version {
+                    return Ok(TransitionResult::Conflict {
+                        current_version: current.execution_version,
+                    });
+                }
 
-            let transition = apply_mutation(&current, mutation)?;
-            let TransitionResult::Applied { aggregate } = &transition else {
-                return Ok(transition);
-            };
-            let updated = update_execution(transaction, aggregate, expected_version)?;
-            if updated == 0 {
-                let version = transaction
+                let transition = apply_mutation(&current, mutation)?;
+                let TransitionResult::Applied { aggregate } = &transition else {
+                    return Ok(transition);
+                };
+                let updated = update_execution(transaction, aggregate, expected_version)?;
+                if updated == 0 {
+                    let version = transaction
                     .query_one(
                         "SELECT execution_version FROM ryvus_executions WHERE execution_id = $1",
                         &[&execution_id.as_ref()],
                     )
                     .map_err(|error| backend("reload conflicting execution version", error))?
                     .get::<_, i64>(0);
-                return Ok(TransitionResult::Conflict {
-                    current_version: from_i64(version, "execution_version")?,
-                });
-            }
-            replace_children(transaction, aggregate)?;
-            Ok(transition)
+                    return Ok(TransitionResult::Conflict {
+                        current_version: from_i64(version, "execution_version")?,
+                    });
+                }
+                replace_children(transaction, aggregate)?;
+                Ok(transition)
+            })
         })
     }
 
     fn reconcilable_cancellations(&self) -> StateStoreResult<Vec<ExecutionAggregate>> {
-        let mut aggregates = self.query_aggregates(
-            "SELECT e.execution_id FROM ryvus_executions e \
+        let mut aggregates = self.run(|client| {
+            query_aggregates(
+                client,
+                "SELECT e.execution_id FROM ryvus_executions e \
              JOIN ryvus_cancellation_intents c USING (execution_id) \
              LEFT JOIN ryvus_terminal_states t USING (execution_id) \
              WHERE t.execution_id IS NULL ORDER BY e.execution_id",
-        )?;
+            )
+        })?;
         aggregates.retain(|aggregate| {
             aggregate.cancellation_intent.is_some() && aggregate.terminal_state.is_none()
         });
@@ -142,33 +220,37 @@ impl ExecutionStateStore for PostgresExecutionStateStore {
     }
 
     fn active_executions(&self) -> StateStoreResult<Vec<ExecutionAggregate>> {
-        let mut aggregates = self.query_aggregates(
-            "SELECT execution_id FROM ryvus_executions \
+        let mut aggregates = self.run(|client| {
+            query_aggregates(
+                client,
+                "SELECT execution_id FROM ryvus_executions \
              WHERE active_attempt_id IS NOT NULL ORDER BY execution_id",
-        )?;
+            )
+        })?;
         aggregates.retain(|aggregate| aggregate.active_attempt_id.is_some());
         Ok(aggregates)
     }
 }
 
-impl PostgresExecutionStateStore {
-    fn query_aggregates(&self, sql: &str) -> StateStoreResult<Vec<ExecutionAggregate>> {
-        self.transaction(|transaction| {
-            let ids = transaction
-                .query(sql, &[])
-                .map_err(|error| backend("query execution aggregates", error))?
-                .into_iter()
-                .map(|row| ExecutionId::from(row.get::<_, String>(0)))
-                .collect::<Vec<_>>();
-            let mut aggregates = Vec::with_capacity(ids.len());
-            for execution_id in ids {
-                let aggregate = load_aggregate(transaction, &execution_id, "FOR SHARE")?
-                    .ok_or_else(|| corrupt("execution disappeared during consistent read"))?;
-                aggregates.push(aggregate);
-            }
-            Ok(aggregates)
-        })
-    }
+fn query_aggregates(
+    client: &mut Client,
+    sql: &'static str,
+) -> StateStoreResult<Vec<ExecutionAggregate>> {
+    transaction(client, |transaction| {
+        let ids = transaction
+            .query(sql, &[])
+            .map_err(|error| backend("query execution aggregates", error))?
+            .into_iter()
+            .map(|row| ExecutionId::from(row.get::<_, String>(0)))
+            .collect::<Vec<_>>();
+        let mut aggregates = Vec::with_capacity(ids.len());
+        for execution_id in ids {
+            let aggregate = load_aggregate(transaction, &execution_id, "FOR SHARE")?
+                .ok_or_else(|| corrupt("execution disappeared during consistent read"))?;
+            aggregates.push(aggregate);
+        }
+        Ok(aggregates)
+    })
 }
 
 pub fn migrate(database_url: &str) -> StateStoreResult<()> {
