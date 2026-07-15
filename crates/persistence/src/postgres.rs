@@ -71,8 +71,8 @@ impl ExecutionStateStore for PostgresExecutionStateStore {
         self.transaction(
             |transaction| match insert_execution(transaction, &aggregate) {
                 Ok(()) => Ok(aggregate.clone()),
-                Err(StateStoreError::Backend(message))
-                    if message.starts_with("unique violation:") =>
+                Err(StateStoreError::BackendCode { code, .. })
+                    if code == SqlState::UNIQUE_VIOLATION.code() =>
                 {
                     Err(StateStoreError::AlreadyExists {
                         execution_id: execution_id.clone(),
@@ -258,7 +258,7 @@ fn insert_execution(
                 &version,
             ],
         )
-        .map_err(|error| database_write_error("insert execution", error))?;
+        .map_err(|error| backend("insert execution", error))?;
     Ok(())
 }
 
@@ -292,7 +292,7 @@ fn update_execution(
                 &expected,
             ],
         )
-        .map_err(|error| database_write_error("update execution", error))
+        .map_err(|error| backend("update execution", error))
 }
 
 fn replace_children(
@@ -379,7 +379,7 @@ fn insert_attempt(
                 &finished_at,
             ],
         )
-        .map_err(|error| database_write_error("insert attempt", error))?;
+        .map_err(|error| backend("insert attempt", error))?;
     Ok(())
 }
 
@@ -595,19 +595,14 @@ fn from_i64(value: i64, field: &str) -> StateStoreResult<u64> {
     u64::try_from(value).map_err(|_| corrupt(format!("{field} cannot be negative")))
 }
 
-fn database_write_error(operation: &str, error: postgres::Error) -> StateStoreError {
-    if error
-        .as_db_error()
-        .is_some_and(|error| error.code() == &SqlState::UNIQUE_VIOLATION)
-    {
-        StateStoreError::Backend(format!("unique violation: {operation}"))
-    } else {
-        backend(operation, error)
-    }
-}
-
 fn backend(operation: &str, error: postgres::Error) -> StateStoreError {
-    StateStoreError::Backend(format!("{operation}: {error}"))
+    match error.as_db_error() {
+        Some(database_error) => StateStoreError::BackendCode {
+            code: database_error.code().code().into(),
+            message: format!("{operation}: {error}"),
+        },
+        None => StateStoreError::Backend(format!("{operation}: {error}")),
+    }
 }
 
 fn corrupt(message: impl Into<String>) -> StateStoreError {

@@ -25,6 +25,8 @@ docker compose -f compose.postgres-test.yml down -v
 
 The Rust harness depends only on `RYVUS_POSTGRES_TEST_ADMIN_URL`. It creates one random `ryvus_test_<uuid>` database, runs the production migrations and provider checks, closes its connections, and drops that database. Docker is not used by the harness.
 
+The suite reports migration, provider-contract, restart, CAS, and rollback phases while retaining one database per run. Rollback validation asserts PostgreSQL SQLSTATE `23505` and verifies that the failed transaction leaves no partial aggregate writes.
+
 ## CI and external PostgreSQL
 
 Point the same command at the administrator database of a CI service container, developer-managed server, or compatible external test server:
@@ -45,6 +47,8 @@ SELECT datname FROM pg_database WHERE datname ~ '^ryvus_test_[a-z0-9_]+$';
 ```
 
 After checking the result, terminate connections and drop a named stale database explicitly. Never automate deletion from a broader pattern.
+
+Generated execution output under `.ryvus-test/` is ignored repository-wide. It is developer output, not a test fixture; curated fixtures must use an intentional fixture directory instead.
 
 ## Current limitations
 

@@ -5,7 +5,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use postgres::{Client, NoTls};
+use postgres::{error::SqlState, Client, NoTls};
 use ryvus_execution::{
     AttemptOwnership, AttemptRecord, ExecutionAggregate, ExecutionMutation, ExecutionPolicy,
     ExecutionResult, ExecutionState, ExecutionStateStore, MemoryExecutionStateStore, NewExecution,
@@ -112,20 +112,27 @@ fn target_database_url(admin_url: &str, database_name: &str) -> Result<String, S
 fn postgres_integration_suite() {
     let db = TestDatabase::create().unwrap_or_else(|error| panic!("{error}"));
     validate_url_construction();
+
+    eprintln!("phase: migration validation");
     validate_migrations(db.url());
 
-    eprintln!("running shared MemoryExecutionStateStore contract");
+    eprintln!("phase: provider contract (memory)");
     run_provider_contract(&MemoryExecutionStateStore::default());
-    eprintln!("running shared PostgresExecutionStateStore contract");
+    eprintln!("phase: provider contract (PostgreSQL)");
     {
         let store = PostgresExecutionStateStore::connect(db.url()).unwrap();
         run_provider_contract(&store);
     }
 
+    eprintln!("phase: restart validation");
     validate_restart(db.url());
+
+    eprintln!("phase: CAS validation");
     validate_terminal_races(db.url());
     validate_retry_cancellation_race(db.url());
     validate_ownership_race(db.url());
+
+    eprintln!("phase: rollback validation");
     validate_transaction_rollback(db.url());
 }
 
@@ -183,7 +190,8 @@ fn validate_migrations(url: &str) {
     drop(client);
     assert!(matches!(
         migrate(url),
-        Err(StateStoreError::Backend(message)) if message.contains("migration")
+        Err(StateStoreError::BackendCode { code, .. })
+            if code == SqlState::UNDEFINED_COLUMN.code()
     ));
     let mut client = Client::connect(url, NoTls).unwrap();
     client
@@ -701,7 +709,8 @@ fn validate_transaction_rollback(url: &str) {
                 ),
             },
         ),
-        Err(StateStoreError::Backend(message)) if message.contains("unique violation")
+        Err(StateStoreError::BackendCode { code, .. })
+            if code == SqlState::UNIQUE_VIOLATION.code()
     ));
     assert_eq!(
         store.load(&second_execution.execution_id).unwrap(),

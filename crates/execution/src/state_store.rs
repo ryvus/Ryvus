@@ -135,6 +135,8 @@ pub enum StateStoreError {
     LockPoisoned,
     #[error("execution state store backend error: {0}")]
     Backend(String),
+    #[error("execution state store backend error [{code}]: {message}")]
+    BackendCode { code: String, message: String },
 }
 
 pub type StateStoreResult<T> = Result<T, StateStoreError>;

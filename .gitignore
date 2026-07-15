@@ -120,5 +120,6 @@ coverage_html/
 # Ignore any accidental nested git repos
 **/.git/
 .ryvus/
+**/.ryvus-test/
 .ryvus-service-test
 *.log
