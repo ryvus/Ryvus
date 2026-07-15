@@ -189,6 +189,23 @@ Test:
 cargo test --workspace
 ```
 
+### PostgreSQL integration tests
+
+PostgreSQL validation is opt-in; normal tests and `ryvus start` continue to use the in-memory store. Start the test database and run the gated suite:
+
+```bash
+docker compose -f compose.postgres-test.yml up -d --wait
+
+RYVUS_POSTGRES_TEST_ADMIN_URL=postgres://ryvus_test:ryvus_test@localhost:55432/postgres \
+  cargo test -p ryvus-persistence --features postgres-integration
+
+docker compose -f compose.postgres-test.yml down -v
+```
+
+The test harness creates and removes its own random database. See [PostgreSQL Integration Testing](docs/postgres-integration-testing.md) for external PostgreSQL and CI usage.
+
+PostgreSQL-backed application execution is not wired into `ryvus start` yet. Setting `DATABASE_URL` and running `ryvus database migrate` creates the schema, but `ryvus start` still selects `MemoryExecutionStateStore`. An explicit startup persistence option is required before PostgreSQL can store normal Ryvus executions.
+
 Format:
 
 ```bash

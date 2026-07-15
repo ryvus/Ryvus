@@ -1,29 +1,758 @@
 use std::{
+    env,
     sync::{Arc, Barrier},
     thread,
     time::{Duration, SystemTime},
 };
 
+use postgres::{Client, NoTls};
 use ryvus_execution::{
-    AttemptOwnership, AttemptRecord, ExecutionMutation, ExecutionPolicy, ExecutionResult,
-    ExecutionState, ExecutionStateStore, NewExecution, RetryPolicy, StateStoreError, TerminalState,
-    TransitionResult,
+    AttemptOwnership, AttemptRecord, ExecutionAggregate, ExecutionMutation, ExecutionPolicy,
+    ExecutionResult, ExecutionState, ExecutionStateStore, MemoryExecutionStateStore, NewExecution,
+    RetryPolicy, StateStoreError, TerminalState, TransitionResult,
 };
 use ryvus_persistence::{migrate, PostgresExecutionStateStore};
 use ryvus_protocol::{
     ActionDefinition, ActionExecutionPolicy, ActionKind, ApiAction, AttemptId, AttemptOutcome,
-    ExecutionAttempt, InvocationContext, InvocationEvent, InvocationRequest, InvocationResult,
-    LogEvent, LogLevel, RuntimeHostId, RuntimeKind, RuntimeSessionId, WorkerId,
+    ExecutionAttempt, ExecutionId, InvocationContext, InvocationEvent, InvocationRequest,
+    InvocationResult, LogEvent, LogLevel, RuntimeHostId, RuntimeKind, RuntimeSessionId, WorkerId,
 };
 use serde_json::json;
+use url::Url;
+use uuid::Uuid;
 
-fn database_url() -> Option<String> {
-    match std::env::var("DATABASE_URL") {
-        Ok(url) if !url.trim().is_empty() => Some(url),
-        _ => {
-            eprintln!("skipping PostgreSQL execution-state test: DATABASE_URL is not set");
-            None
+const ADMIN_URL_ENV: &str = "RYVUS_POSTGRES_TEST_ADMIN_URL";
+const TEST_DATABASE_PREFIX: &str = "ryvus_test_";
+
+struct TestDatabase {
+    admin_url: String,
+    database_url: String,
+    name: String,
+}
+
+impl TestDatabase {
+    fn create() -> Result<Self, String> {
+        let admin_url = env::var(ADMIN_URL_ENV)
+            .map_err(|_| format!("{ADMIN_URL_ENV} is required for postgres-integration tests"))?;
+        let name = format!("{TEST_DATABASE_PREFIX}{}", Uuid::new_v4().simple());
+        let quoted_name = quote_database_name(&name)?;
+        let database_url = target_database_url(&admin_url, &name)?;
+        let mut admin = Client::connect(&admin_url, NoTls)
+            .map_err(|error| format!("connect to PostgreSQL administrator database: {error}"))?;
+        admin
+            .batch_execute(&format!("CREATE DATABASE {quoted_name}"))
+            .map_err(|error| format!("create PostgreSQL test database '{name}': {error}"))?;
+        eprintln!("created PostgreSQL integration database {name}");
+        Ok(Self {
+            admin_url,
+            database_url,
+            name,
+        })
+    }
+
+    fn url(&self) -> &str {
+        &self.database_url
+    }
+}
+
+impl Drop for TestDatabase {
+    fn drop(&mut self) {
+        let cleanup = (|| -> Result<(), String> {
+            let quoted_name = quote_database_name(&self.name)?;
+            let mut admin = Client::connect(&self.admin_url, NoTls)
+                .map_err(|error| format!("connect for cleanup: {error}"))?;
+            admin
+                .execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                     WHERE datname = $1 AND pid <> pg_backend_pid()",
+                    &[&self.name],
+                )
+                .map_err(|error| format!("terminate test database connections: {error}"))?;
+            admin
+                .batch_execute(&format!("DROP DATABASE IF EXISTS {quoted_name}"))
+                .map_err(|error| format!("drop test database: {error}"))?;
+            Ok(())
+        })();
+        match cleanup {
+            Ok(()) => eprintln!("dropped PostgreSQL integration database {}", self.name),
+            Err(error) => eprintln!(
+                "failed to clean PostgreSQL integration database {}: {error}",
+                self.name
+            ),
         }
+    }
+}
+
+fn quote_database_name(name: &str) -> Result<String, String> {
+    if name.len() > 63
+        || !name.starts_with(TEST_DATABASE_PREFIX)
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err("generated PostgreSQL test database name is invalid".into());
+    }
+    Ok(format!("\"{name}\""))
+}
+
+fn target_database_url(admin_url: &str, database_name: &str) -> Result<String, String> {
+    quote_database_name(database_name)?;
+    let mut url = Url::parse(admin_url)
+        .map_err(|error| format!("parse {ADMIN_URL_ENV} as a URL: {error}"))?;
+    if !matches!(url.scheme(), "postgres" | "postgresql") {
+        return Err(format!(
+            "{ADMIN_URL_ENV} must use postgres or postgresql scheme"
+        ));
+    }
+    url.set_path(&format!("/{database_name}"));
+    Ok(url.into())
+}
+
+#[test]
+fn postgres_integration_suite() {
+    let db = TestDatabase::create().unwrap_or_else(|error| panic!("{error}"));
+    validate_url_construction();
+    validate_migrations(db.url());
+
+    eprintln!("running shared MemoryExecutionStateStore contract");
+    run_provider_contract(&MemoryExecutionStateStore::default());
+    eprintln!("running shared PostgresExecutionStateStore contract");
+    {
+        let store = PostgresExecutionStateStore::connect(db.url()).unwrap();
+        run_provider_contract(&store);
+    }
+
+    validate_restart(db.url());
+    validate_terminal_races(db.url());
+    validate_retry_cancellation_race(db.url());
+    validate_ownership_race(db.url());
+    validate_transaction_rollback(db.url());
+}
+
+fn validate_url_construction() {
+    let target = target_database_url(
+        "postgres://user:secret@localhost:55432/postgres?application_name=ryvus&sslmode=disable",
+        "ryvus_test_a1b2c3",
+    )
+    .unwrap();
+    let parsed = Url::parse(&target).unwrap();
+    assert_eq!(parsed.path(), "/ryvus_test_a1b2c3");
+    assert_eq!(
+        parsed.query(),
+        Some("application_name=ryvus&sslmode=disable")
+    );
+}
+
+fn validate_migrations(url: &str) {
+    let barrier = Arc::new(Barrier::new(3));
+    let migrations = (0..2)
+        .map(|_| {
+            let url = url.to_owned();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                migrate(&url)
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    for migration in migrations {
+        migration.join().unwrap().unwrap();
+    }
+    migrate(url).unwrap();
+
+    let mut client = Client::connect(url, NoTls).unwrap();
+    let versions = client
+        .query(
+            "SELECT version FROM ryvus_schema_migrations ORDER BY version",
+            &[],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get::<_, i64>(0))
+        .collect::<Vec<_>>();
+    assert_eq!(versions, vec![1]);
+
+    client
+        .batch_execute(
+            "ALTER TABLE ryvus_schema_migrations \
+                 RENAME TO ryvus_schema_migrations_valid; \
+             CREATE TABLE ryvus_schema_migrations (broken TEXT NOT NULL)",
+        )
+        .unwrap();
+    drop(client);
+    assert!(matches!(
+        migrate(url),
+        Err(StateStoreError::Backend(message)) if message.contains("migration")
+    ));
+    let mut client = Client::connect(url, NoTls).unwrap();
+    client
+        .batch_execute(
+            "DROP TABLE ryvus_schema_migrations; \
+             ALTER TABLE ryvus_schema_migrations_valid \
+                 RENAME TO ryvus_schema_migrations",
+        )
+        .unwrap();
+    let execution_count = client
+        .query_one("SELECT COUNT(*) FROM ryvus_executions", &[])
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(execution_count, 0);
+    drop(client);
+    migrate(url).unwrap();
+}
+
+fn run_provider_contract(store: &dyn ExecutionStateStore) {
+    let new = new_execution();
+    let expected_revision = new.action_revision.clone();
+    let created = store.create(new.clone()).unwrap();
+    assert_eq!(created.execution_version, 0);
+    assert_eq!(created.action_revision, expected_revision);
+    assert_eq!(
+        store.load(&created.execution_id).unwrap(),
+        Some(created.clone())
+    );
+    assert!(matches!(
+        store.create(new),
+        Err(StateStoreError::AlreadyExists { .. })
+    ));
+
+    let first = attempt_with_id(&created.execution_id, AttemptId::new(), 1);
+    let running = applied(
+        store
+            .compare_and_set(
+                &created.execution_id,
+                0,
+                ExecutionMutation::StartAttempt {
+                    attempt: first.clone(),
+                },
+            )
+            .unwrap(),
+    );
+    assert_eq!(running.execution_version, 1);
+    assert!(matches!(
+        store
+            .compare_and_set(
+                &created.execution_id,
+                0,
+                ExecutionMutation::StartAttempt {
+                    attempt: attempt(&created.execution_id, 2),
+                },
+            )
+            .unwrap(),
+        TransitionResult::Conflict { current_version: 1 }
+    ));
+    let after_conflict = store.load(&created.execution_id).unwrap().unwrap();
+    assert_eq!(after_conflict.execution_version, running.execution_version);
+    assert_eq!(after_conflict.attempts, running.attempts);
+
+    let first_ownership = ownership(&first, "session-1");
+    let assigned = applied(
+        store
+            .compare_and_set(
+                &created.execution_id,
+                running.execution_version,
+                ExecutionMutation::AssignOwnership {
+                    attempt_id: first.attempt.attempt_id.clone(),
+                    ownership: first_ownership.clone(),
+                },
+            )
+            .unwrap(),
+    );
+    assert!(matches!(
+        store
+            .compare_and_set(
+                &created.execution_id,
+                assigned.execution_version,
+                ExecutionMutation::AssignOwnership {
+                    attempt_id: first.attempt.attempt_id.clone(),
+                    ownership: first_ownership,
+                },
+            )
+            .unwrap(),
+        TransitionResult::Unchanged { aggregate }
+            if aggregate.execution_version == assigned.execution_version
+    ));
+    let replacement = ownership(&first, "session-2");
+    let replaced = applied(
+        store
+            .compare_and_set(
+                &created.execution_id,
+                assigned.execution_version,
+                ExecutionMutation::AssignOwnership {
+                    attempt_id: first.attempt.attempt_id.clone(),
+                    ownership: replacement.clone(),
+                },
+            )
+            .unwrap(),
+    );
+    assert_eq!(replaced.execution_version, assigned.execution_version + 1);
+    assert_eq!(replaced.attempts[0].ownership, Some(replacement));
+
+    let cancelled = applied(
+        store
+            .compare_and_set(
+                &created.execution_id,
+                replaced.execution_version,
+                ExecutionMutation::RequestCancellation {
+                    requested_at: SystemTime::now(),
+                },
+            )
+            .unwrap(),
+    );
+    assert!(matches!(
+        store
+            .compare_and_set(
+                &created.execution_id,
+                cancelled.execution_version,
+                ExecutionMutation::RequestCancellation {
+                    requested_at: SystemTime::now(),
+                },
+            )
+            .unwrap(),
+        TransitionResult::Unchanged { aggregate }
+            if aggregate.execution_version == cancelled.execution_version
+    ));
+    assert!(store
+        .reconcilable_cancellations()
+        .unwrap()
+        .iter()
+        .any(|aggregate| aggregate.execution_id == created.execution_id));
+    assert!(store
+        .active_executions()
+        .unwrap()
+        .iter()
+        .any(|aggregate| aggregate.execution_id == created.execution_id));
+
+    let terminal = applied(
+        store
+            .compare_and_set(
+                &created.execution_id,
+                cancelled.execution_version,
+                terminal_mutation(&first, AttemptOutcome::Cancelled, ExecutionState::Cancelled),
+            )
+            .unwrap(),
+    );
+    assert_eq!(terminal.state, ExecutionState::Cancelled);
+    assert!(store
+        .compare_and_set(
+            &created.execution_id,
+            terminal.execution_version,
+            ExecutionMutation::RequestCancellation {
+                requested_at: SystemTime::now(),
+            },
+        )
+        .is_err());
+    assert!(store
+        .compare_and_set(
+            &created.execution_id,
+            terminal.execution_version,
+            terminal_mutation(&first, AttemptOutcome::Cancelled, ExecutionState::Cancelled),
+        )
+        .is_err());
+    assert!(!store
+        .reconcilable_cancellations()
+        .unwrap()
+        .iter()
+        .any(|aggregate| aggregate.execution_id == created.execution_id));
+
+    validate_retry_contract(store);
+    validate_structured_result_contract(store);
+}
+
+fn validate_retry_contract(store: &dyn ExecutionStateStore) {
+    let created = store.create(new_execution()).unwrap();
+    let first = attempt(&created.execution_id, 1);
+    let running = applied(
+        store
+            .compare_and_set(
+                &created.execution_id,
+                0,
+                ExecutionMutation::StartAttempt {
+                    attempt: first.clone(),
+                },
+            )
+            .unwrap(),
+    );
+    let retry = attempt(&created.execution_id, 2);
+    let pending = applied(
+        store
+            .compare_and_set(
+                &created.execution_id,
+                running.execution_version,
+                ExecutionMutation::FinishAttempt {
+                    attempt_id: first.attempt.attempt_id.clone(),
+                    outcome: AttemptOutcome::Failed,
+                    result: None,
+                    retry: Some(retry.clone()),
+                    terminal: None,
+                },
+            )
+            .unwrap(),
+    );
+    assert_eq!(pending.state, ExecutionState::Pending);
+    assert_eq!(pending.attempts.len(), 2);
+    assert_eq!(pending.attempts[0].outcome, Some(AttemptOutcome::Failed));
+    assert_eq!(pending.attempts[1], retry);
+    assert_eq!(store.load(&created.execution_id).unwrap(), Some(pending));
+}
+
+fn validate_structured_result_contract(store: &dyn ExecutionStateStore) {
+    let created = store.create(new_execution()).unwrap();
+    let first = attempt(&created.execution_id, 1);
+    let running = applied(
+        store
+            .compare_and_set(
+                &created.execution_id,
+                0,
+                ExecutionMutation::StartAttempt {
+                    attempt: first.clone(),
+                },
+            )
+            .unwrap(),
+    );
+    let result = structured_result(&first.attempt);
+    let finished = applied(
+        store
+            .compare_and_set(
+                &created.execution_id,
+                running.execution_version,
+                ExecutionMutation::FinishAttempt {
+                    attempt_id: first.attempt.attempt_id.clone(),
+                    outcome: AttemptOutcome::Succeeded,
+                    result: Some(result.clone()),
+                    retry: None,
+                    terminal: Some(TerminalState::new(
+                        ExecutionState::Succeeded,
+                        Some(first.attempt.attempt_id.clone()),
+                    )),
+                },
+            )
+            .unwrap(),
+    );
+    let reloaded = store.load(&created.execution_id).unwrap().unwrap();
+    assert_eq!(reloaded, finished);
+    assert_eq!(reloaded.attempts[0].result, Some(result));
+}
+
+fn validate_restart(url: &str) {
+    let aggregate = {
+        let store = PostgresExecutionStateStore::connect(url).unwrap();
+        let created = store.create(new_execution()).unwrap();
+        let first = attempt(&created.execution_id, 1);
+        let running = applied(
+            store
+                .compare_and_set(
+                    &created.execution_id,
+                    0,
+                    ExecutionMutation::StartAttempt {
+                        attempt: first.clone(),
+                    },
+                )
+                .unwrap(),
+        );
+        applied(
+            store
+                .compare_and_set(
+                    &created.execution_id,
+                    running.execution_version,
+                    ExecutionMutation::AssignOwnership {
+                        attempt_id: first.attempt.attempt_id.clone(),
+                        ownership: ownership(&first, "restart-session"),
+                    },
+                )
+                .unwrap(),
+        )
+    };
+    let restarted = PostgresExecutionStateStore::connect(url).unwrap();
+    assert_eq!(
+        restarted.load(&aggregate.execution_id).unwrap(),
+        Some(aggregate)
+    );
+}
+
+fn validate_terminal_races(url: &str) {
+    run_terminal_race(
+        url,
+        (AttemptOutcome::Succeeded, ExecutionState::Succeeded),
+        (AttemptOutcome::Cancelled, ExecutionState::Cancelled),
+    );
+    run_terminal_race(
+        url,
+        (AttemptOutcome::TimedOut, ExecutionState::TimedOut),
+        (AttemptOutcome::Succeeded, ExecutionState::Succeeded),
+    );
+}
+
+fn run_terminal_race(
+    url: &str,
+    left: (AttemptOutcome, ExecutionState),
+    right: (AttemptOutcome, ExecutionState),
+) {
+    let seed = PostgresExecutionStateStore::connect(url).unwrap();
+    let created = seed.create(new_execution()).unwrap();
+    let first = attempt(&created.execution_id, 1);
+    let running = applied(
+        seed.compare_and_set(
+            &created.execution_id,
+            0,
+            ExecutionMutation::StartAttempt {
+                attempt: first.clone(),
+            },
+        )
+        .unwrap(),
+    );
+    drop(seed);
+
+    let barrier = Arc::new(Barrier::new(3));
+    let spawn = |(outcome, state)| {
+        let url = url.to_owned();
+        let barrier = Arc::clone(&barrier);
+        let execution_id = created.execution_id.clone();
+        let attempt = first.clone();
+        thread::spawn(move || {
+            let store = PostgresExecutionStateStore::connect(&url).unwrap();
+            barrier.wait();
+            store
+                .compare_and_set(
+                    &execution_id,
+                    running.execution_version,
+                    terminal_mutation(&attempt, outcome, state),
+                )
+                .unwrap()
+        })
+    };
+    let left = spawn(left);
+    let right = spawn(right);
+    barrier.wait();
+    assert_one_applied_one_conflict([left.join().unwrap(), right.join().unwrap()]);
+
+    let store = PostgresExecutionStateStore::connect(url).unwrap();
+    let final_aggregate = store.load(&created.execution_id).unwrap().unwrap();
+    assert!(final_aggregate.terminal_state.is_some());
+    assert!(store
+        .compare_and_set(
+            &created.execution_id,
+            final_aggregate.execution_version,
+            ExecutionMutation::RequestCancellation {
+                requested_at: SystemTime::now(),
+            },
+        )
+        .is_err());
+}
+
+fn validate_retry_cancellation_race(url: &str) {
+    let seed = PostgresExecutionStateStore::connect(url).unwrap();
+    let created = seed.create(new_execution()).unwrap();
+    let first = attempt(&created.execution_id, 1);
+    let running = applied(
+        seed.compare_and_set(
+            &created.execution_id,
+            0,
+            ExecutionMutation::StartAttempt {
+                attempt: first.clone(),
+            },
+        )
+        .unwrap(),
+    );
+    drop(seed);
+
+    let barrier = Arc::new(Barrier::new(3));
+    let retry = {
+        let url = url.to_owned();
+        let barrier = Arc::clone(&barrier);
+        let execution_id = created.execution_id.clone();
+        let first = first.clone();
+        thread::spawn(move || {
+            let store = PostgresExecutionStateStore::connect(&url).unwrap();
+            barrier.wait();
+            store
+                .compare_and_set(
+                    &execution_id,
+                    running.execution_version,
+                    ExecutionMutation::FinishAttempt {
+                        attempt_id: first.attempt.attempt_id,
+                        outcome: AttemptOutcome::Failed,
+                        result: None,
+                        retry: Some(attempt(&execution_id, 2)),
+                        terminal: None,
+                    },
+                )
+                .unwrap()
+        })
+    };
+    let cancellation = {
+        let url = url.to_owned();
+        let barrier = Arc::clone(&barrier);
+        let execution_id = created.execution_id.clone();
+        thread::spawn(move || {
+            let store = PostgresExecutionStateStore::connect(&url).unwrap();
+            barrier.wait();
+            store
+                .compare_and_set(
+                    &execution_id,
+                    running.execution_version,
+                    ExecutionMutation::RequestCancellation {
+                        requested_at: SystemTime::now(),
+                    },
+                )
+                .unwrap()
+        })
+    };
+    barrier.wait();
+    assert_one_applied_one_conflict([retry.join().unwrap(), cancellation.join().unwrap()]);
+    let aggregate = PostgresExecutionStateStore::connect(url)
+        .unwrap()
+        .load(&created.execution_id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        (aggregate.cancellation_intent.is_some() && aggregate.attempts.len() == 1)
+            || (aggregate.cancellation_intent.is_none() && aggregate.attempts.len() == 2)
+    );
+}
+
+fn validate_ownership_race(url: &str) {
+    let seed = PostgresExecutionStateStore::connect(url).unwrap();
+    let created = seed.create(new_execution()).unwrap();
+    let first = attempt(&created.execution_id, 1);
+    let running = applied(
+        seed.compare_and_set(
+            &created.execution_id,
+            0,
+            ExecutionMutation::StartAttempt {
+                attempt: first.clone(),
+            },
+        )
+        .unwrap(),
+    );
+    let assigned = applied(
+        seed.compare_and_set(
+            &created.execution_id,
+            running.execution_version,
+            ExecutionMutation::AssignOwnership {
+                attempt_id: first.attempt.attempt_id.clone(),
+                ownership: ownership(&first, "initial-session"),
+            },
+        )
+        .unwrap(),
+    );
+    drop(seed);
+
+    let barrier = Arc::new(Barrier::new(3));
+    let spawn = |session: &'static str| {
+        let url = url.to_owned();
+        let barrier = Arc::clone(&barrier);
+        let execution_id = created.execution_id.clone();
+        let first = first.clone();
+        thread::spawn(move || {
+            let store = PostgresExecutionStateStore::connect(&url).unwrap();
+            barrier.wait();
+            store
+                .compare_and_set(
+                    &execution_id,
+                    assigned.execution_version,
+                    ExecutionMutation::AssignOwnership {
+                        attempt_id: first.attempt.attempt_id.clone(),
+                        ownership: ownership(&first, session),
+                    },
+                )
+                .unwrap()
+        })
+    };
+    let left = spawn("replacement-a");
+    let right = spawn("replacement-b");
+    barrier.wait();
+    assert_one_applied_one_conflict([left.join().unwrap(), right.join().unwrap()]);
+}
+
+fn validate_transaction_rollback(url: &str) {
+    let store = PostgresExecutionStateStore::connect(url).unwrap();
+    let shared_attempt_id = AttemptId::new();
+
+    let first_execution = store.create(new_execution()).unwrap();
+    applied(
+        store
+            .compare_and_set(
+                &first_execution.execution_id,
+                0,
+                ExecutionMutation::StartAttempt {
+                    attempt: attempt_with_id(
+                        &first_execution.execution_id,
+                        shared_attempt_id.clone(),
+                        1,
+                    ),
+                },
+            )
+            .unwrap(),
+    );
+
+    let second_execution = store.create(new_execution()).unwrap();
+    let before = store.load(&second_execution.execution_id).unwrap().unwrap();
+    assert!(matches!(
+        store.compare_and_set(
+            &second_execution.execution_id,
+            before.execution_version,
+            ExecutionMutation::StartAttempt {
+                attempt: attempt_with_id(
+                    &second_execution.execution_id,
+                    shared_attempt_id,
+                    1,
+                ),
+            },
+        ),
+        Err(StateStoreError::Backend(message)) if message.contains("unique violation")
+    ));
+    assert_eq!(
+        store.load(&second_execution.execution_id).unwrap(),
+        Some(before.clone())
+    );
+    let recovered = applied(
+        store
+            .compare_and_set(
+                &second_execution.execution_id,
+                before.execution_version,
+                ExecutionMutation::StartAttempt {
+                    attempt: attempt(&second_execution.execution_id, 1),
+                },
+            )
+            .unwrap(),
+    );
+    assert_eq!(recovered.execution_version, before.execution_version + 1);
+    assert_eq!(recovered.attempts.len(), 1);
+}
+
+fn assert_one_applied_one_conflict(results: [TransitionResult; 2]) {
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, TransitionResult::Applied { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, TransitionResult::Conflict { .. }))
+            .count(),
+        1
+    );
+}
+
+fn terminal_mutation(
+    attempt: &AttemptRecord,
+    outcome: AttemptOutcome,
+    state: ExecutionState,
+) -> ExecutionMutation {
+    ExecutionMutation::FinishAttempt {
+        attempt_id: attempt.attempt.attempt_id.clone(),
+        outcome,
+        result: None,
+        retry: None,
+        terminal: Some(TerminalState::new(
+            state,
+            Some(attempt.attempt.attempt_id.clone()),
+        )),
     }
 }
 
@@ -60,11 +789,19 @@ fn new_execution() -> NewExecution {
     }
 }
 
-fn attempt(execution_id: &ryvus_protocol::ExecutionId, number: u32) -> AttemptRecord {
+fn attempt(execution_id: &ExecutionId, number: u32) -> AttemptRecord {
+    attempt_with_id(execution_id, AttemptId::new(), number)
+}
+
+fn attempt_with_id(
+    execution_id: &ExecutionId,
+    attempt_id: AttemptId,
+    number: u32,
+) -> AttemptRecord {
     AttemptRecord::pending(
         ExecutionAttempt {
             execution_id: execution_id.clone(),
-            attempt_id: AttemptId::new(),
+            attempt_id,
             attempt_number: number,
         },
         10_000 + i64::from(number),
@@ -82,7 +819,7 @@ fn ownership(attempt: &AttemptRecord, session: &str) -> AttemptOwnership {
     }
 }
 
-fn applied(result: TransitionResult) -> ryvus_execution::ExecutionAggregate {
+fn applied(result: TransitionResult) -> ExecutionAggregate {
     match result {
         TransitionResult::Applied { aggregate } => aggregate,
         other => panic!("expected applied transition, got {other:?}"),
@@ -110,499 +847,4 @@ fn structured_result(attempt: &ExecutionAttempt) -> ExecutionResult {
         duration: Duration::from_millis(7),
         exit_code: Some(0),
     }
-}
-
-#[test]
-fn postgres_matches_authoritative_memory_contract() {
-    let Some(url) = database_url() else { return };
-    migrate(&url).unwrap();
-    let store = PostgresExecutionStateStore::connect(&url).unwrap();
-    let new = new_execution();
-    let created = store.create(new.clone()).unwrap();
-    assert_eq!(
-        store.load(&created.execution_id).unwrap(),
-        Some(created.clone())
-    );
-    assert!(matches!(
-        store.create(new),
-        Err(StateStoreError::AlreadyExists { .. })
-    ));
-
-    let first = attempt(&created.execution_id, 1);
-    let running = applied(
-        store
-            .compare_and_set(
-                &created.execution_id,
-                0,
-                ExecutionMutation::StartAttempt {
-                    attempt: first.clone(),
-                },
-            )
-            .unwrap(),
-    );
-    let assigned = applied(
-        store
-            .compare_and_set(
-                &created.execution_id,
-                running.execution_version,
-                ExecutionMutation::AssignOwnership {
-                    attempt_id: first.attempt.attempt_id.clone(),
-                    ownership: ownership(&first, "session-1"),
-                },
-            )
-            .unwrap(),
-    );
-    assert!(matches!(
-        store.compare_and_set(
-            &created.execution_id,
-            assigned.execution_version,
-            ExecutionMutation::AssignOwnership {
-                attempt_id: first.attempt.attempt_id.clone(),
-                ownership: ownership(&first, "session-1"),
-            },
-        ).unwrap(),
-        TransitionResult::Unchanged { aggregate }
-            if aggregate.execution_version == assigned.execution_version
-    ));
-    let replaced = applied(
-        store
-            .compare_and_set(
-                &created.execution_id,
-                assigned.execution_version,
-                ExecutionMutation::AssignOwnership {
-                    attempt_id: first.attempt.attempt_id.clone(),
-                    ownership: ownership(&first, "session-2"),
-                },
-            )
-            .unwrap(),
-    );
-    let reloaded = PostgresExecutionStateStore::connect(&url)
-        .unwrap()
-        .load(&created.execution_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        reloaded.attempts[0].ownership,
-        Some(ownership(&first, "session-2"))
-    );
-    let cancelled = applied(
-        store
-            .compare_and_set(
-                &created.execution_id,
-                replaced.execution_version,
-                ExecutionMutation::RequestCancellation {
-                    requested_at: SystemTime::now(),
-                },
-            )
-            .unwrap(),
-    );
-    assert!(matches!(
-        store
-            .compare_and_set(
-                &created.execution_id,
-                cancelled.execution_version,
-                ExecutionMutation::RequestCancellation {
-                    requested_at: SystemTime::now()
-                },
-            )
-            .unwrap(),
-        TransitionResult::Unchanged { aggregate }
-            if aggregate.execution_version == cancelled.execution_version
-    ));
-    assert!(store
-        .reconcilable_cancellations()
-        .unwrap()
-        .iter()
-        .any(|aggregate| aggregate.execution_id == created.execution_id));
-    assert!(store
-        .active_executions()
-        .unwrap()
-        .iter()
-        .any(|aggregate| aggregate.execution_id == created.execution_id));
-    assert!(matches!(
-        store.compare_and_set(
-            &created.execution_id,
-            replaced.execution_version,
-            ExecutionMutation::FinishExecution {
-                terminal: TerminalState::new(ExecutionState::Cancelled, None),
-            },
-        ).unwrap(),
-        TransitionResult::Conflict { current_version }
-            if current_version == cancelled.execution_version
-    ));
-    let terminal = applied(
-        store
-            .compare_and_set(
-                &created.execution_id,
-                cancelled.execution_version,
-                ExecutionMutation::FinishAttempt {
-                    attempt_id: first.attempt.attempt_id.clone(),
-                    outcome: AttemptOutcome::Cancelled,
-                    result: None,
-                    retry: None,
-                    terminal: Some(TerminalState::new(
-                        ExecutionState::Cancelled,
-                        Some(first.attempt.attempt_id.clone()),
-                    )),
-                },
-            )
-            .unwrap(),
-    );
-    assert_eq!(terminal.state, ExecutionState::Cancelled);
-    assert!(!store
-        .reconcilable_cancellations()
-        .unwrap()
-        .iter()
-        .any(|aggregate| aggregate.execution_id == created.execution_id));
-    assert!(!store
-        .active_executions()
-        .unwrap()
-        .iter()
-        .any(|aggregate| aggregate.execution_id == created.execution_id));
-    assert!(store
-        .compare_and_set(
-            &created.execution_id,
-            terminal.execution_version,
-            ExecutionMutation::RequestCancellation {
-                requested_at: SystemTime::now()
-            },
-        )
-        .is_err());
-
-    let inconsistent = store.create(new_execution()).unwrap();
-    let inconsistent_attempt = attempt(&inconsistent.execution_id, 1);
-    let inconsistent_running = applied(
-        store
-            .compare_and_set(
-                &inconsistent.execution_id,
-                0,
-                ExecutionMutation::StartAttempt {
-                    attempt: inconsistent_attempt.clone(),
-                },
-            )
-            .unwrap(),
-    );
-    assert!(store
-        .compare_and_set(
-            &inconsistent.execution_id,
-            inconsistent_running.execution_version,
-            ExecutionMutation::FinishAttempt {
-                attempt_id: inconsistent_attempt.attempt.attempt_id.clone(),
-                outcome: AttemptOutcome::Succeeded,
-                result: None,
-                retry: None,
-                terminal: Some(TerminalState::new(
-                    ExecutionState::Cancelled,
-                    Some(inconsistent_attempt.attempt.attempt_id.clone()),
-                )),
-            },
-        )
-        .is_err());
-    assert_eq!(
-        store
-            .load(&inconsistent.execution_id)
-            .unwrap()
-            .unwrap()
-            .execution_version,
-        inconsistent_running.execution_version
-    );
-    applied(
-        store
-            .compare_and_set(
-                &inconsistent.execution_id,
-                inconsistent_running.execution_version,
-                ExecutionMutation::FinishAttempt {
-                    attempt_id: inconsistent_attempt.attempt.attempt_id.clone(),
-                    outcome: AttemptOutcome::Succeeded,
-                    result: None,
-                    retry: None,
-                    terminal: Some(TerminalState::new(
-                        ExecutionState::Succeeded,
-                        Some(inconsistent_attempt.attempt.attempt_id),
-                    )),
-                },
-            )
-            .unwrap(),
-    );
-
-    let result_execution = store.create(new_execution()).unwrap();
-    let result_attempt = attempt(&result_execution.execution_id, 1);
-    let running = applied(
-        store
-            .compare_and_set(
-                &result_execution.execution_id,
-                0,
-                ExecutionMutation::StartAttempt {
-                    attempt: result_attempt.clone(),
-                },
-            )
-            .unwrap(),
-    );
-    let result = structured_result(&result_attempt.attempt);
-    let finished = applied(
-        store
-            .compare_and_set(
-                &result_execution.execution_id,
-                running.execution_version,
-                ExecutionMutation::FinishAttempt {
-                    attempt_id: result_attempt.attempt.attempt_id.clone(),
-                    outcome: AttemptOutcome::Succeeded,
-                    result: Some(result.clone()),
-                    retry: None,
-                    terminal: Some(TerminalState::new(
-                        ExecutionState::Succeeded,
-                        Some(result_attempt.attempt.attempt_id.clone()),
-                    )),
-                },
-            )
-            .unwrap(),
-    );
-    let reloaded = PostgresExecutionStateStore::connect(&url)
-        .unwrap()
-        .load(&result_execution.execution_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(reloaded, finished);
-    assert_eq!(reloaded.attempts[0].result, Some(result));
-}
-
-#[test]
-fn postgres_rejects_non_finite_policy_without_creating_a_row() {
-    let Some(url) = database_url() else { return };
-    migrate(&url).unwrap();
-    let store = PostgresExecutionStateStore::connect(&url).unwrap();
-    for backoff in [f64::NAN, f64::INFINITY] {
-        let mut execution = new_execution();
-        execution.policy.retry.backoff = backoff;
-        let execution_id = execution.request.execution_id.clone();
-        assert!(store.create(execution).is_err());
-        assert!(store.load(&execution_id).unwrap().is_none());
-
-        let mut execution = new_execution();
-        execution.action.policy.retry.backoff = backoff;
-        let execution_id = execution.request.execution_id.clone();
-        assert!(store.create(execution).is_err());
-        assert!(store.load(&execution_id).unwrap().is_none());
-    }
-}
-
-#[test]
-fn postgres_persists_atomic_retry_across_connections() {
-    let Some(url) = database_url() else { return };
-    migrate(&url).unwrap();
-    let first_store = PostgresExecutionStateStore::connect(&url).unwrap();
-    let created = first_store.create(new_execution()).unwrap();
-    let first = attempt(&created.execution_id, 1);
-    let running = applied(
-        first_store
-            .compare_and_set(
-                &created.execution_id,
-                0,
-                ExecutionMutation::StartAttempt {
-                    attempt: first.clone(),
-                },
-            )
-            .unwrap(),
-    );
-    let retry = attempt(&created.execution_id, 2);
-    let pending = applied(
-        first_store
-            .compare_and_set(
-                &created.execution_id,
-                running.execution_version,
-                ExecutionMutation::FinishAttempt {
-                    attempt_id: first.attempt.attempt_id.clone(),
-                    outcome: AttemptOutcome::Failed,
-                    result: None,
-                    retry: Some(retry),
-                    terminal: None,
-                },
-            )
-            .unwrap(),
-    );
-
-    let second_store = PostgresExecutionStateStore::connect(&url).unwrap();
-    assert_eq!(
-        second_store.load(&created.execution_id).unwrap(),
-        Some(pending)
-    );
-}
-
-#[test]
-fn postgres_terminal_cas_has_exactly_one_winner_across_connections() {
-    let Some(url) = database_url() else { return };
-    migrate(&url).unwrap();
-    let seed = PostgresExecutionStateStore::connect(&url).unwrap();
-    let created = seed.create(new_execution()).unwrap();
-    let first = attempt(&created.execution_id, 1);
-    let running = applied(
-        seed.compare_and_set(
-            &created.execution_id,
-            0,
-            ExecutionMutation::StartAttempt {
-                attempt: first.clone(),
-            },
-        )
-        .unwrap(),
-    );
-    let barrier = Arc::new(Barrier::new(3));
-
-    let spawn = |outcome: AttemptOutcome, state: ExecutionState| {
-        let url = url.clone();
-        let barrier = barrier.clone();
-        let execution_id = created.execution_id.clone();
-        let attempt_id = first.attempt.attempt_id.clone();
-        thread::spawn(move || {
-            let store = PostgresExecutionStateStore::connect(&url).unwrap();
-            barrier.wait();
-            store
-                .compare_and_set(
-                    &execution_id,
-                    running.execution_version,
-                    ExecutionMutation::FinishAttempt {
-                        attempt_id: attempt_id.clone(),
-                        outcome,
-                        result: None,
-                        retry: None,
-                        terminal: Some(TerminalState::new(state, Some(attempt_id))),
-                    },
-                )
-                .unwrap()
-        })
-    };
-    let success = spawn(AttemptOutcome::Succeeded, ExecutionState::Succeeded);
-    let timeout = spawn(AttemptOutcome::TimedOut, ExecutionState::TimedOut);
-    barrier.wait();
-    let results = [success.join().unwrap(), timeout.join().unwrap()];
-    assert_eq!(
-        results
-            .iter()
-            .filter(|result| matches!(result, TransitionResult::Applied { .. }))
-            .count(),
-        1
-    );
-    assert_eq!(
-        results
-            .iter()
-            .filter(|result| matches!(result, TransitionResult::Conflict { .. }))
-            .count(),
-        1
-    );
-}
-
-#[test]
-fn postgres_rejects_corrupt_cross_row_authoritative_facts() {
-    let Some(url) = database_url() else { return };
-    migrate(&url).unwrap();
-    let store = PostgresExecutionStateStore::connect(&url).unwrap();
-    let created = store.create(new_execution()).unwrap();
-    let first = attempt(&created.execution_id, 1);
-    let running = applied(
-        store
-            .compare_and_set(
-                &created.execution_id,
-                0,
-                ExecutionMutation::StartAttempt {
-                    attempt: first.clone(),
-                },
-            )
-            .unwrap(),
-    );
-    let assigned = applied(
-        store
-            .compare_and_set(
-                &created.execution_id,
-                running.execution_version,
-                ExecutionMutation::AssignOwnership {
-                    attempt_id: first.attempt.attempt_id.clone(),
-                    ownership: ownership(&first, "corruption-session"),
-                },
-            )
-            .unwrap(),
-    );
-
-    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
-    let invalid_ownership = json!({
-        "execution_id": created.execution_id,
-        "attempt_id": AttemptId::new(),
-        "attempt_number": 99,
-        "runtime_host_id": "wrong-host",
-        "runtime_session_id": "wrong-session",
-        "worker_id": "wrong-worker"
-    });
-    client
-        .execute(
-            "UPDATE ryvus_attempts SET ownership = $2 WHERE attempt_id = $1",
-            &[&first.attempt.attempt_id.as_ref(), &invalid_ownership],
-        )
-        .unwrap();
-    assert!(matches!(
-        store.load(&created.execution_id),
-        Err(StateStoreError::Backend(message)) if message.contains("aggregate invariants failed")
-    ));
-    let valid_ownership = serde_json::to_value(ownership(&first, "corruption-session")).unwrap();
-    client
-        .execute(
-            "UPDATE ryvus_attempts SET ownership = $2 WHERE attempt_id = $1",
-            &[&first.attempt.attempt_id.as_ref(), &valid_ownership],
-        )
-        .unwrap();
-
-    let terminal = applied(
-        store
-            .compare_and_set(
-                &created.execution_id,
-                assigned.execution_version,
-                ExecutionMutation::FinishAttempt {
-                    attempt_id: first.attempt.attempt_id.clone(),
-                    outcome: AttemptOutcome::Succeeded,
-                    result: Some(structured_result(&first.attempt)),
-                    retry: None,
-                    terminal: Some(TerminalState::new(
-                        ExecutionState::Succeeded,
-                        Some(first.attempt.attempt_id.clone()),
-                    )),
-                },
-            )
-            .unwrap(),
-    );
-    client
-        .execute(
-            "UPDATE ryvus_terminal_states SET state = 'failed' WHERE execution_id = $1",
-            &[&created.execution_id.as_ref()],
-        )
-        .unwrap();
-    assert!(matches!(
-        store.load(&created.execution_id),
-        Err(StateStoreError::Backend(message)) if message.contains("aggregate invariants failed")
-    ));
-    client
-        .execute(
-            "UPDATE ryvus_terminal_states SET state = 'succeeded' WHERE execution_id = $1",
-            &[&created.execution_id.as_ref()],
-        )
-        .unwrap();
-    assert_eq!(store.load(&created.execution_id).unwrap(), Some(terminal));
-
-    let missing_active = store.create(new_execution()).unwrap();
-    client
-        .execute(
-            "UPDATE ryvus_executions SET state = 'running' WHERE execution_id = $1",
-            &[&missing_active.execution_id.as_ref()],
-        )
-        .unwrap();
-    assert!(matches!(
-        store.load(&missing_active.execution_id),
-        Err(StateStoreError::Backend(message)) if message.contains("aggregate invariants failed")
-    ));
-    client
-        .execute(
-            "UPDATE ryvus_executions SET state = 'pending' WHERE execution_id = $1",
-            &[&missing_active.execution_id.as_ref()],
-        )
-        .unwrap();
-    assert_eq!(
-        store.load(&missing_active.execution_id).unwrap(),
-        Some(missing_active)
-    );
 }
