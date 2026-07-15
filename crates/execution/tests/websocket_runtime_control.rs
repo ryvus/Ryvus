@@ -100,7 +100,10 @@ async fn registration_is_first_and_new_session_fences_the_old_connection() {
     let _ = first.close(None).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(channel.connected_session(&host_id), Some(second_session));
-    assert!(service.attempt_ownership(&stale_attempt_id).is_none());
+    assert!(service
+        .attempt_ownership(&stale_attempt_id)
+        .unwrap()
+        .is_none());
     assert!(second.send(Message::Ping(Vec::new().into())).await.is_ok());
     server.abort();
 }
@@ -296,6 +299,7 @@ async fn host_reconnect_reports_active_attempt_and_routes_exact_duplicate_comman
         async move {
             service
                 .attempt_ownership(&attempt_id)
+                .unwrap()
                 .filter(|current| current.runtime_session_id != first_session)
         }
     })
@@ -576,7 +580,7 @@ async fn wait_for_ownership(
     wait_until_value(Duration::from_secs(2), || {
         let service = service.clone();
         let attempt_id = attempt_id.clone();
-        async move { service.attempt_ownership(&attempt_id) }
+        async move { service.attempt_ownership(&attempt_id).unwrap() }
     })
     .await
     .expect("active attempt was not registered")

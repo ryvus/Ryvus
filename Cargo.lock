@@ -1584,6 +1584,7 @@ dependencies = [
  "ryvus-control",
  "ryvus-docs",
  "ryvus-execution",
+ "ryvus-flow",
  "ryvus-persistence",
  "ryvus-protocol",
  "ryvus-scheduler",

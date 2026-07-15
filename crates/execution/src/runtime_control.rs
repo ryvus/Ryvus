@@ -139,14 +139,17 @@ impl RuntimeControlService {
             .cloned()
     }
 
-    pub fn attempt_ownership(&self, attempt_id: &AttemptId) -> Option<AttemptOwnership> {
-        self.store
-            .active_executions()
-            .ok()?
+    pub fn attempt_ownership(
+        &self,
+        attempt_id: &AttemptId,
+    ) -> RuntimeControlResult<Option<AttemptOwnership>> {
+        Ok(self
+            .store
+            .active_executions()?
             .into_iter()
             .flat_map(|aggregate| aggregate.attempts)
             .find(|attempt| &attempt.attempt.attempt_id == attempt_id)
-            .and_then(|attempt| attempt.ownership)
+            .and_then(|attempt| attempt.ownership))
     }
 
     pub fn register_attempt(&self, ownership: AttemptOwnership) -> RuntimeControlResult<()> {
@@ -265,12 +268,15 @@ impl RuntimeControlService {
         )
     }
 
-    pub fn terminal_outcome(&self, execution_id: &ExecutionId) -> Option<AttemptOutcome> {
-        self.store
-            .load(execution_id)
-            .ok()??
-            .terminal_state
-            .map(|terminal| state_outcome(terminal.state))
+    pub fn terminal_outcome(
+        &self,
+        execution_id: &ExecutionId,
+    ) -> RuntimeControlResult<Option<AttemptOutcome>> {
+        Ok(self
+            .store
+            .load(execution_id)?
+            .and_then(|aggregate| aggregate.terminal_state)
+            .map(|terminal| state_outcome(terminal.state)))
     }
 
     pub fn drain(&self) -> RuntimeControlResult<()> {
@@ -964,7 +970,7 @@ mod tests {
                 ControlCommandOutcome::AlreadyTerminal
             );
             assert_eq!(
-                service.terminal_outcome(&ownership.execution_id),
+                service.terminal_outcome(&ownership.execution_id).unwrap(),
                 Some(outcome)
             );
         }
@@ -999,7 +1005,7 @@ mod tests {
             ControlCommandOutcome::AlreadyTerminal
         );
         assert_eq!(
-            service.terminal_outcome(&ownership.execution_id),
+            service.terminal_outcome(&ownership.execution_id).unwrap(),
             Some(AttemptOutcome::Succeeded)
         );
     }
@@ -1033,7 +1039,7 @@ mod tests {
             ControlCommandOutcome::AlreadyTerminal
         );
         assert_eq!(
-            service.terminal_outcome(&ownership.execution_id),
+            service.terminal_outcome(&ownership.execution_id).unwrap(),
             Some(AttemptOutcome::TimedOut)
         );
     }
@@ -1075,6 +1081,40 @@ mod tests {
     }
 
     #[test]
+    fn ownership_lookup_propagates_store_failure() {
+        let mut store = crate::MockExecutionStateStore::new();
+        store
+            .expect_active_executions()
+            .once()
+            .returning(|| Err(StateStoreError::Backend("unavailable".into())));
+        let service = RuntimeControlService::new(RecordingChannel::confirming(), Arc::new(store));
+
+        assert!(matches!(
+            service.attempt_ownership(&AttemptId::new()),
+            Err(RuntimeControlError::StateStore(StateStoreError::Backend(
+                message
+            ))) if message == "unavailable"
+        ));
+    }
+
+    #[test]
+    fn terminal_lookup_propagates_store_failure() {
+        let mut store = crate::MockExecutionStateStore::new();
+        store
+            .expect_load()
+            .once()
+            .returning(|_| Err(StateStoreError::Backend("unavailable".into())));
+        let service = RuntimeControlService::new(RecordingChannel::confirming(), Arc::new(store));
+
+        assert!(matches!(
+            service.terminal_outcome(&ExecutionId::new()),
+            Err(RuntimeControlError::StateStore(StateStoreError::Backend(
+                message
+            ))) if message == "unavailable"
+        ));
+    }
+
+    #[test]
     fn transport_failure_keeps_intent_for_reconciliation() {
         let channel = Arc::new(SwitchableChannel {
             fail: AtomicBool::new(true),
@@ -1099,10 +1139,144 @@ mod tests {
         channel.fail.store(false, Ordering::SeqCst);
         service.reconcile_cancellations().unwrap();
         assert_eq!(
-            service.terminal_outcome(&ownership.execution_id),
+            service.terminal_outcome(&ownership.execution_id).unwrap(),
             Some(AttemptOutcome::Cancelled)
         );
         assert_eq!(channel.commands.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cancellation_reconciles_after_service_recreation_and_registration() {
+        let store = Arc::new(crate::MemoryExecutionStateStore::default());
+        let channel = Arc::new(SwitchableChannel {
+            fail: AtomicBool::new(true),
+            commands: Mutex::new(Vec::new()),
+        });
+        let ownership = ownership();
+        {
+            let service = RuntimeControlService::new(channel.clone(), store.clone());
+            register_test_attempt(&service, ownership.clone());
+            assert!(matches!(
+                service.cancel(&ownership.execution_id),
+                Err(RuntimeControlError::Channel(_))
+            ));
+        }
+
+        channel.fail.store(false, Ordering::SeqCst);
+        let restarted = RuntimeControlService::new(channel.clone(), store.clone());
+        let ingress = restarted.ingress();
+        ingress
+            .register(registration(
+                &ownership.runtime_host_id,
+                &ownership.runtime_session_id,
+                &ownership,
+            ))
+            .unwrap();
+        ingress.reconcile_cancellations().unwrap();
+
+        assert_eq!(
+            restarted.terminal_outcome(&ownership.execution_id).unwrap(),
+            Some(AttemptOutcome::Cancelled)
+        );
+        assert_eq!(
+            restarted
+                .finish_attempt(&attempt(&ownership), AttemptOutcome::Succeeded)
+                .unwrap(),
+            AttemptOutcome::Cancelled
+        );
+        assert_eq!(
+            restarted.cancel(&ownership.execution_id).unwrap(),
+            ControlCommandOutcome::AlreadyTerminal
+        );
+        assert_eq!(channel.commands.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ownership_and_terminal_outcomes_reconstruct_after_service_recreation() {
+        for outcome in [
+            AttemptOutcome::Succeeded,
+            AttemptOutcome::Failed,
+            AttemptOutcome::TimedOut,
+        ] {
+            let store = Arc::new(crate::MemoryExecutionStateStore::default());
+            let ownership = ownership();
+            {
+                let service =
+                    RuntimeControlService::new(RecordingChannel::confirming(), store.clone());
+                register_test_attempt(&service, ownership.clone());
+                assert_eq!(
+                    service.attempt_ownership(&ownership.attempt_id).unwrap(),
+                    Some(ownership.clone())
+                );
+                assert_eq!(
+                    service
+                        .finish_attempt(&attempt(&ownership), outcome)
+                        .unwrap(),
+                    outcome
+                );
+            }
+
+            let restarted =
+                RuntimeControlService::new(RecordingChannel::confirming(), store.clone());
+            assert_eq!(restarted.current_session(&ownership.runtime_host_id), None);
+            assert_eq!(
+                restarted.terminal_outcome(&ownership.execution_id).unwrap(),
+                Some(outcome)
+            );
+            assert_eq!(
+                restarted
+                    .finish_attempt(&attempt(&ownership), AttemptOutcome::Succeeded)
+                    .unwrap(),
+                outcome
+            );
+        }
+    }
+
+    #[test]
+    fn recreated_service_rebuilds_ownership_and_fences_previous_session() {
+        let store = Arc::new(crate::MemoryExecutionStateStore::default());
+        let previous = ownership();
+        {
+            let service = RuntimeControlService::new(RecordingChannel::confirming(), store.clone());
+            register_test_attempt(&service, previous.clone());
+        }
+
+        let restarted = RuntimeControlService::new(RecordingChannel::confirming(), store);
+        assert_eq!(
+            restarted.attempt_ownership(&previous.attempt_id).unwrap(),
+            Some(previous.clone())
+        );
+        let mut current = previous.clone();
+        current.runtime_session_id = RuntimeSessionId::new();
+        current.worker_id = WorkerId::new();
+        let ingress = restarted.ingress();
+        ingress
+            .register(registration(
+                &current.runtime_host_id,
+                &current.runtime_session_id,
+                &current,
+            ))
+            .unwrap();
+
+        let stale_event = RuntimeControlEvent::AttemptFinished {
+            protocol_version: RUNTIME_CONTROL_PROTOCOL_VERSION.into(),
+            message_id: ControlMessageId::new(),
+            runtime_host_id: previous.runtime_host_id.clone(),
+            runtime_session_id: previous.runtime_session_id,
+            execution_id: previous.execution_id,
+            attempt_id: previous.attempt_id,
+            attempt_number: previous.attempt_number,
+            worker_id: previous.worker_id,
+            outcome: AttemptOutcome::Succeeded,
+        };
+        assert!(matches!(
+            ingress.apply(stale_event),
+            Err(RuntimeControlError::StaleSession { .. })
+        ));
+        assert_eq!(
+            restarted.attempt_ownership(&current.attempt_id).unwrap(),
+            Some(current)
+        );
     }
 
     #[test]
@@ -1212,10 +1386,12 @@ mod tests {
 
         assert!(service
             .attempt_ownership(&stale_attempt.attempt_id)
+            .unwrap()
             .is_none());
         assert_eq!(
             service
                 .attempt_ownership(&current_attempt.attempt_id)
+                .unwrap()
                 .unwrap()
                 .runtime_session_id,
             current_session
@@ -1237,6 +1413,7 @@ mod tests {
         ));
         assert!(service
             .attempt_ownership(&current_attempt.attempt_id)
+            .unwrap()
             .is_some());
         let version_before_stale = service
             .store
@@ -1334,7 +1511,7 @@ mod tests {
         registering.join().unwrap();
 
         assert_eq!(
-            service.attempt_ownership(&current.attempt_id),
+            service.attempt_ownership(&current.attempt_id).unwrap(),
             Some(current)
         );
     }
@@ -1347,13 +1524,16 @@ mod tests {
         register_test_attempt(&service, ownership.clone());
 
         service.drain().unwrap();
-        assert_eq!(service.terminal_outcome(&ownership.execution_id), None);
+        assert_eq!(
+            service.terminal_outcome(&ownership.execution_id).unwrap(),
+            None
+        );
         let started = Instant::now();
         service.shutdown(Duration::from_millis(35)).unwrap();
 
         assert!(started.elapsed() >= Duration::from_millis(30));
         assert_eq!(
-            service.terminal_outcome(&ownership.execution_id),
+            service.terminal_outcome(&ownership.execution_id).unwrap(),
             Some(AttemptOutcome::Cancelled)
         );
         let commands = channel.commands.lock().unwrap();

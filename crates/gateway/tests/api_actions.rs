@@ -1,9 +1,15 @@
 mod support;
 
 use axum::http::{Method, StatusCode};
-use ryvus_execution::{ExecutionState, ExecutionStateStore, MemoryExecutionStateStore};
+use ryvus_execution::{
+    action_revision, ExecutionAggregate, ExecutionState, ExecutionStateStore,
+    MemoryExecutionStateStore,
+};
+use ryvus_flow::{
+    FlowExecutionStatus, FlowService, FlowSpec, FlowStateStore, InMemoryFlowStateStore,
+};
 use ryvus_gateway::server;
-use ryvus_protocol::ExecutionId;
+use ryvus_protocol::{ActionDefinition, ExecutionId};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -37,6 +43,7 @@ async fn local_gateway_records_execution_in_its_injected_store() {
         r#"
 @api_action(method="GET", path="/identity")
 def identity(context):
+    print("hello log")
     return {"execution_id": context.execution_id}
 "#,
     );
@@ -59,8 +66,207 @@ def identity(context):
         .load(&execution_id)
         .expect("store read should succeed")
         .expect("execution should be recorded");
-    assert_eq!(aggregate.state, ExecutionState::Succeeded);
+    assert_durable_success(&aggregate, "hello log");
+}
+
+#[tokio::test]
+async fn schedule_flow_and_manual_invocations_share_the_execution_store() {
+    let project = TestProject::new("durable-trigger-composition");
+    project.add_action(
+        "triggers.py",
+        r#"
+@scheduled_action(every="10s")
+def scheduled(context):
+    print("schedule log")
+    return {"source": "schedule"}
+
+@api_action(method="POST", path="/flow")
+def flow_step(context):
+    print("flow log")
+    return {"source": "flow"}
+
+@api_action(method="POST", path="/manual")
+def manual(context):
+    print("manual log")
+    return {"source": "manual"}
+"#,
+    );
+    let scheduled = definition(schedule_action("src/triggers.py", "scheduled", "every 10s"));
+    let flow_action = definition(action("POST", "/flow", "src/triggers.py", "flow_step"));
+    let manual_action = definition(action("POST", "/manual", "src/triggers.py", "manual"));
+    project.write_manifest(&[
+        schedule_action("src/triggers.py", "scheduled", "every 10s"),
+        action("POST", "/flow", "src/triggers.py", "flow_step"),
+        action("POST", "/manual", "src/triggers.py", "manual"),
+    ]);
+
+    let store = Arc::new(MemoryExecutionStateStore::default());
+    let execution_service =
+        server::build_execution_service_with_store(project.config().project_root, store.clone());
+
+    let scheduled_result =
+        ryvus_scheduler::run_schedule_once([&scheduled], "scheduled", execution_service.clone())
+            .expect("schedule should execute");
+    let manual_record = execution_service
+        .execute_event(&manual_action, json!({ "source": "test" }))
+        .expect("manual action should execute");
+
+    let flow_store = Arc::new(InMemoryFlowStateStore::default());
+    let flow_service = FlowService::new(
+        serde_json::from_value::<FlowSpec>(json!({
+            "flows": [{
+                "key": "durable_flow",
+                "steps": [{ "key": "run", "action": "flow_step" }]
+            }]
+        }))
+        .expect("flow spec should parse"),
+        vec![flow_action],
+        flow_store,
+        execution_service,
+    )
+    .expect("flow service should build");
+    let flow_run = flow_service
+        .start_flow("durable_flow", json!({ "source": "test" }))
+        .expect("flow should start");
+    let flow_execution = wait_for_flow(&flow_service, &flow_run.id).await;
+    let flow_execution_id = flow_execution.steps[0]
+        .execution_id
+        .clone()
+        .expect("flow step should record execution id");
+
+    for (execution_id, expected_log) in [
+        (scheduled_result.execution_id, "schedule log"),
+        (
+            manual_record.result.invocation_result.execution_id,
+            "manual log",
+        ),
+        (flow_execution_id, "flow log"),
+    ] {
+        let aggregate = store
+            .load(&execution_id)
+            .expect("store read should succeed")
+            .expect("trigger execution should be durable");
+        assert_durable_success(&aggregate, expected_log);
+    }
+}
+
+#[tokio::test]
+async fn flow_cancellation_uses_the_shared_execution_service() {
+    let project = TestProject::new("durable-flow-cancellation");
+    project.add_action(
+        "slow.py",
+        r#"
+import time
+
+@api_action(method="POST", path="/slow")
+def slow(context):
+    time.sleep(5)
+    return {"finished": True}
+"#,
+    );
+    project.write_manifest(&[action("POST", "/slow", "src/slow.py", "slow")]);
+    let slow_action = definition(action("POST", "/slow", "src/slow.py", "slow"));
+    let store = Arc::new(MemoryExecutionStateStore::default());
+    let execution_service =
+        server::build_execution_service_with_store(project.config().project_root, store.clone());
+    let flow_store = Arc::new(InMemoryFlowStateStore::default());
+    let flow_service = FlowService::new(
+        serde_json::from_value::<FlowSpec>(json!({
+            "flows": [{
+                "key": "cancel_flow",
+                "steps": [{ "key": "slow", "action": "slow" }]
+            }]
+        }))
+        .expect("flow spec should parse"),
+        vec![slow_action],
+        flow_store.clone(),
+        execution_service,
+    )
+    .expect("flow service should build");
+    let run = flow_service
+        .start_flow("cancel_flow", json!({}))
+        .expect("flow should start");
+    let execution_id = wait_for_owned_execution(&flow_store, &store, &run.id).await;
+
+    let cancelled = flow_service
+        .cancel_run(&run.id)
+        .expect("flow should cancel");
+
+    assert_eq!(cancelled.status, FlowExecutionStatus::Cancelled);
+    let aggregate = store
+        .load(&execution_id)
+        .expect("store read should succeed")
+        .expect("cancelled execution should remain durable");
+    assert_eq!(aggregate.state, ExecutionState::Cancelled);
+    assert!(aggregate.cancellation_intent.is_some());
     assert_eq!(aggregate.attempts.len(), 1);
+}
+
+fn definition(value: serde_json::Value) -> ActionDefinition {
+    serde_json::from_value(value).expect("action should deserialize")
+}
+
+fn assert_durable_success(aggregate: &ExecutionAggregate, expected_log: &str) {
+    assert_eq!(aggregate.state, ExecutionState::Succeeded);
+    assert_eq!(
+        aggregate.action_revision,
+        action_revision(&aggregate.action).unwrap()
+    );
+    assert_eq!(aggregate.attempts.len(), 1);
+    let result = aggregate.attempts[0]
+        .result
+        .as_ref()
+        .expect("terminal attempt should persist its result");
+    assert!(result.events.iter().any(|event| {
+        matches!(event, ryvus_protocol::InvocationEvent::Log(log) if log.message == expected_log)
+    }));
+}
+
+async fn wait_for_flow(
+    service: &FlowService<InMemoryFlowStateStore, ryvus_gateway::state::GatewayExecutionService>,
+    run_id: &str,
+) -> ryvus_flow::FlowExecution {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let execution = service.get_run(run_id).expect("flow run should exist");
+        if execution.status == FlowExecutionStatus::Succeeded {
+            return execution;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "flow timed out");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_for_owned_execution(
+    flow_store: &InMemoryFlowStateStore,
+    execution_store: &MemoryExecutionStateStore,
+    run_id: &str,
+) -> ExecutionId {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(execution_id) = flow_store
+            .active_execution(run_id)
+            .expect("flow store read should succeed")
+        {
+            if execution_store
+                .load(&execution_id)
+                .expect("execution store read should succeed")
+                .is_some_and(|aggregate| {
+                    aggregate
+                        .attempts
+                        .iter()
+                        .any(|attempt| attempt.ownership.is_some())
+                })
+            {
+                return execution_id;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "flow attempt was not assigned"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 #[tokio::test]

@@ -292,7 +292,7 @@ where
         match self.runtime_control.cancel(execution_id)? {
             ControlCommandOutcome::Confirmed => Ok(true),
             ControlCommandOutcome::AlreadyTerminal => {
-                Ok(self.runtime_control.terminal_outcome(execution_id)
+                Ok(self.runtime_control.terminal_outcome(execution_id)?
                     == Some(AttemptOutcome::Cancelled))
             }
             ControlCommandOutcome::AttemptNotFound
@@ -303,12 +303,14 @@ where
         }
     }
 
-    pub fn execution_state(&self, execution_id: &ExecutionId) -> Option<ExecutionState> {
-        self.store
-            .load(execution_id)
-            .ok()
-            .flatten()
-            .map(|aggregate| aggregate.state)
+    pub fn execution_state(
+        &self,
+        execution_id: &ExecutionId,
+    ) -> ExecutionServiceResult<Option<ExecutionState>> {
+        Ok(self
+            .store
+            .load(execution_id)?
+            .map(|aggregate| aggregate.state))
     }
 
     pub fn shutdown(&self, grace: std::time::Duration) -> ExecutionServiceResult<()> {
@@ -571,6 +573,30 @@ mod tests {
     }
 
     #[test]
+    fn execution_state_propagates_store_failure() {
+        let mut store = crate::MockExecutionStateStore::new();
+        store
+            .expect_load()
+            .once()
+            .returning(|_| Err(StateStoreError::Backend("unavailable".into())));
+        let store: Arc<dyn ExecutionStateStore> = Arc::new(store);
+        let service = ExecutionService::new(
+            StaticResolver,
+            FailsThenSucceeds::default(),
+            NoopPersistence,
+            test_runtime_control(store.clone()),
+            store,
+        );
+
+        assert!(matches!(
+            service.execution_state(&ExecutionId::new()),
+            Err(ExecutionServiceError::StateStore(StateStoreError::Backend(
+                message
+            ))) if message == "unavailable"
+        ));
+    }
+
+    #[test]
     fn store_failure_while_recording_resolution_failure_is_propagated() {
         let request = InvocationRequest::new(json!({}));
         let policy = ExecutionPolicy {
@@ -753,7 +779,7 @@ mod tests {
             InvocationStatus::Success
         );
         assert_eq!(
-            service.execution_state(&request.execution_id),
+            service.execution_state(&request.execution_id).unwrap(),
             Some(ExecutionState::Succeeded)
         );
         let attempts = attempts.lock().unwrap();
@@ -829,7 +855,9 @@ mod tests {
             .execute(&action, &timeout_request, &policy)
             .is_err());
         assert_eq!(
-            timed_out.execution_state(&timeout_request.execution_id),
+            timed_out
+                .execution_state(&timeout_request.execution_id)
+                .unwrap(),
             Some(ExecutionState::TimedOut)
         );
     }
@@ -863,7 +891,7 @@ mod tests {
             ))
         ));
         assert_eq!(
-            service.execution_state(&request.execution_id),
+            service.execution_state(&request.execution_id).unwrap(),
             Some(ExecutionState::TimedOut)
         );
     }
