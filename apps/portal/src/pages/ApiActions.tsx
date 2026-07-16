@@ -89,6 +89,10 @@ export function ApiActions({ artifacts }: { artifacts: Artifacts }) {
   const routeGroups = useMemo(() => groupRoutes(operations), [operations]);
   const [selectedKey, setSelectedKey] = useState(operations[0]?.key ?? "");
   const selected = operations.find((operation) => operation.key === selectedKey) ?? operations[0];
+  const selectedAction = selected && artifacts.catalog.actions.find((action) => {
+    const api = (action.kind as { Api?: { method?: string; path?: string } }).Api;
+    return api?.method?.toLowerCase() === selected.method && api.path === selected.path;
+  });
 
   useEffect(() => {
     if (!selectedKey && operations[0]) {
@@ -112,14 +116,14 @@ export function ApiActions({ artifacts }: { artifacts: Artifacts }) {
       eyebrow="OpenAPI"
       title="Gateway"
       actions={
-        <a
+        <div className="flex gap-2"><a
           className="inline-flex min-h-9 items-center justify-center rounded-md border border-white/10 bg-white/[0.04] px-3 font-mono text-xs font-bold text-slate-300 transition hover:bg-white/[0.08] hover:text-white"
           href={gatewayUrl("/openapi.json")}
           target="_blank"
           rel="noreferrer"
         >
           openapi.json
-        </a>
+        </a>{selectedAction && <a className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-3 font-mono text-xs font-bold text-slate-300 hover:text-white" href={`#execution-preview?action_id=${encodeURIComponent(selectedAction.name ?? selectedAction.entrypoint)}&action_revision=${encodeURIComponent(actionRevision(selectedAction))}`}>History</a>}</div>
       }
     >
       <div className="grid min-w-0 gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
@@ -164,6 +168,13 @@ export function ApiActions({ artifacts }: { artifacts: Artifacts }) {
       </div>
     </Page>
   );
+}
+
+function actionRevision(action: Artifacts["catalog"]["actions"][number]) {
+  const bytes = new TextEncoder().encode(JSON.stringify(action));
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of bytes) hash = ((hash ^ BigInt(byte)) * 0x100000001b3n) & 0xffffffffffffffffn;
+  return `action-definition-v1:${hash.toString(16).padStart(16, "0")}`;
 }
 
 function groupRoutes(operations: Operation[]) {

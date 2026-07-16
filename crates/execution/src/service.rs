@@ -7,11 +7,30 @@ use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::SystemTime};
 
 use crate::{
-    action_revision, assign_attempt_deadline, AttemptRecord, ExecutionMutation, ExecutionOptions,
-    ExecutionPersistence, ExecutionRecord, ExecutionServiceError, ExecutionServiceResult,
-    ExecutionState, ExecutionStateStore, Executor, ExecutorError, NewExecution, RecordingExecutor,
+    action_revision, assign_attempt_deadline, execution_creation_fingerprint, AttemptRecord,
+    CreateExecutionResult, ExecutionAggregate, ExecutionDataReferences, ExecutionMutation,
+    ExecutionOptions, ExecutionPersistence, ExecutionRecord, ExecutionScopeId,
+    ExecutionServiceError, ExecutionServiceResult, ExecutionState, ExecutionStateStore,
+    ExecutionTrigger, Executor, ExecutorError, NewExecution, RecordingExecutor,
     RuntimeControlService, RuntimeResolver, StateStoreError, TerminalState, TransitionResult,
 };
+
+#[derive(Debug, Clone)]
+pub struct ExecutionSubmission {
+    pub scope: ExecutionScopeId,
+    pub action_id: String,
+    pub trigger: ExecutionTrigger,
+    pub request: InvocationRequest,
+    pub policy: ExecutionPolicy,
+    pub data_refs: ExecutionDataReferences,
+}
+
+#[derive(Debug, Clone)]
+pub enum ExecutionSubmissionResult {
+    Executed(ExecutionRecord),
+    Existing(ExecutionAggregate),
+    AlreadyActive(ExecutionAggregate),
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionPolicy {
@@ -90,6 +109,7 @@ pub struct ExecutionService<RR, E, EP> {
     persistence: EP,
     runtime_control: RuntimeControlService,
     store: Arc<dyn ExecutionStateStore>,
+    default_scope: ExecutionScopeId,
 }
 
 impl<RR, E, EP> ExecutionService<RR, E, EP>
@@ -105,12 +125,31 @@ where
         runtime_control: RuntimeControlService,
         store: Arc<dyn ExecutionStateStore>,
     ) -> Self {
+        Self::new_with_scope(
+            resolver,
+            executor,
+            persistence,
+            runtime_control,
+            store,
+            ExecutionScopeId::local_default(),
+        )
+    }
+
+    pub fn new_with_scope(
+        resolver: RR,
+        executor: E,
+        persistence: EP,
+        runtime_control: RuntimeControlService,
+        store: Arc<dyn ExecutionStateStore>,
+        default_scope: ExecutionScopeId,
+    ) -> Self {
         Self {
             resolver,
             executor: RecordingExecutor::new(executor),
             persistence,
             runtime_control,
             store,
+            default_scope,
         }
     }
 
@@ -120,6 +159,46 @@ where
         request: &InvocationRequest,
         policy: &ExecutionPolicy,
     ) -> ExecutionServiceResult<ExecutionRecord> {
+        self.execute_triggered(action, request, policy, ExecutionTrigger::Api)
+    }
+
+    pub fn execute_triggered(
+        &self,
+        action: &ActionDefinition,
+        request: &InvocationRequest,
+        policy: &ExecutionPolicy,
+        trigger: ExecutionTrigger,
+    ) -> ExecutionServiceResult<ExecutionRecord> {
+        let submission = ExecutionSubmission {
+            scope: self.default_scope.clone(),
+            action_id: action
+                .name
+                .clone()
+                .unwrap_or_else(|| action.entrypoint.clone()),
+            trigger,
+            request: request.clone(),
+            policy: policy.clone(),
+            data_refs: ExecutionDataReferences::default(),
+        };
+        match self.execute_submission(action, submission)? {
+            ExecutionSubmissionResult::Executed(record) => Ok(record),
+            ExecutionSubmissionResult::Existing(aggregate)
+            | ExecutionSubmissionResult::AlreadyActive(aggregate) => {
+                Err(StateStoreError::IdentityConflict {
+                    execution_id: aggregate.execution_id,
+                }
+                .into())
+            }
+        }
+    }
+
+    pub fn execute_submission(
+        &self,
+        action: &ActionDefinition,
+        submission: ExecutionSubmission,
+    ) -> ExecutionServiceResult<ExecutionSubmissionResult> {
+        let request = &submission.request;
+        let policy = &submission.policy;
         if request.attempt_number != 1 {
             return Err(ExecutionServiceError::InvalidInitialAttempt {
                 attempt_number: request.attempt_number,
@@ -127,14 +206,47 @@ where
         }
 
         let execution_id = request.execution_id.clone();
-        let mut aggregate = self.store.create(NewExecution {
+        let action_revision = action_revision(action)?;
+        let creation_fingerprint = execution_creation_fingerprint(
+            &submission.scope,
+            &submission.action_id,
+            &action_revision,
+            &submission.trigger,
+            request,
+            policy,
+            &submission.data_refs,
+        )?;
+        let created = self.store.create_idempotent(NewExecution {
             action: action.clone(),
-            action_revision: action_revision(action)?,
-            request: request.clone(),
-            policy: policy.clone(),
+            action_revision,
+            execution_scope_id: submission.scope,
+            action_id: submission.action_id,
+            trigger: submission.trigger,
+            creation_fingerprint,
+            data_refs: submission.data_refs,
+            request: submission.request,
+            policy: submission.policy,
             created_at: SystemTime::now(),
         })?;
-        let target = match self.resolver.resolve(action) {
+        let mut aggregate = match created {
+            CreateExecutionResult::Created(aggregate) => aggregate,
+            CreateExecutionResult::Existing(aggregate) if aggregate.terminal_state.is_some() => {
+                return Ok(ExecutionSubmissionResult::Existing(aggregate));
+            }
+            CreateExecutionResult::Existing(aggregate)
+                if matches!(
+                    aggregate.state,
+                    ExecutionState::Running | ExecutionState::CancellationRequested
+                ) =>
+            {
+                return Ok(ExecutionSubmissionResult::AlreadyActive(aggregate));
+            }
+            CreateExecutionResult::Existing(aggregate) => aggregate,
+        };
+        let action = aggregate.action.clone();
+        let policy = aggregate.policy.clone();
+        let request = aggregate.request.clone();
+        let target = match self.resolver.resolve(&action) {
             Ok(target) => target,
             Err(error) => {
                 self.finish_without_attempt(&mut aggregate, ExecutionState::Failed)?;
@@ -222,7 +334,7 @@ where
                 if winner == AttemptOutcome::TimedOut {
                     return Err(ExecutorError::RuntimeTimedOut { attempt }.into());
                 }
-                return Ok(record);
+                return Ok(ExecutionSubmissionResult::Executed(record));
             }
 
             let retryable = result.error.as_ref().is_some_and(|error| error.retryable);
@@ -240,7 +352,7 @@ where
                 if winner == AttemptOutcome::TimedOut {
                     return Err(ExecutorError::RuntimeTimedOut { attempt }.into());
                 }
-                return Ok(record);
+                return Ok(ExecutionSubmissionResult::Executed(record));
             }
 
             let mut retry_request = attempt_request.retry();
@@ -266,7 +378,7 @@ where
                 {
                     return Err(ExecutorError::RuntimeTimedOut { attempt }.into());
                 }
-                return Ok(record);
+                return Ok(ExecutionSubmissionResult::Executed(record));
             }
             std::thread::sleep(delay);
             delay = delay.mul_f64(policy.retry.backoff);
@@ -542,7 +654,7 @@ mod tests {
         let attempts = Arc::clone(&executor.attempts);
         let mut store = crate::MockExecutionStateStore::new();
         store
-            .expect_create()
+            .expect_create_idempotent()
             .once()
             .returning(|_| Err(StateStoreError::LockPoisoned));
         let store: Arc<dyn ExecutionStateStore> = Arc::new(store);
@@ -612,6 +724,11 @@ mod tests {
             .create(NewExecution {
                 action: test_action(),
                 action_revision: "test-action-revision".into(),
+                execution_scope_id: crate::ExecutionScopeId::new("test").unwrap(),
+                action_id: "test".into(),
+                trigger: crate::ExecutionTrigger::Unknown,
+                creation_fingerprint: "test-fingerprint".into(),
+                data_refs: crate::ExecutionDataReferences::default(),
                 request: request.clone(),
                 policy: policy.clone(),
                 created_at: SystemTime::now(),
@@ -619,9 +736,9 @@ mod tests {
             .unwrap();
         let mut store = crate::MockExecutionStateStore::new();
         store
-            .expect_create()
+            .expect_create_idempotent()
             .once()
-            .return_once(move |_| Ok(created));
+            .return_once(move |_| Ok(crate::CreateExecutionResult::Created(created)));
         store
             .expect_compare_and_set()
             .once()

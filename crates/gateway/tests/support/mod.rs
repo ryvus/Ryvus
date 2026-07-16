@@ -266,6 +266,7 @@ pub fn schedule_action(source: &str, entrypoint: &str, expression: &str) -> Valu
         "runtime": "Python",
         "kind": {
             "Schedule": {
+                "key": format!("{entrypoint}:default"),
                 "expression": expression
             }
         },

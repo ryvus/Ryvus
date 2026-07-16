@@ -75,6 +75,7 @@ for (const file of await sourceFiles(sourceRoot)) {
       runtime: "Node",
       kind: {
         Schedule: {
+          key: action.key ?? `${name}:default`,
           expression: action.expression,
         },
       },

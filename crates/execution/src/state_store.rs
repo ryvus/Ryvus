@@ -7,15 +7,24 @@ use std::{
 use ryvus_protocol::{
     ActionDefinition, AttemptId, AttemptOutcome, ExecutionAttempt, ExecutionId, InvocationRequest,
 };
+use serde::Serialize;
 use thiserror::Error;
 
-use crate::{AttemptOwnership, ExecutionPolicy, ExecutionResult, ExecutionState};
+use crate::{
+    AttemptOwnership, ExecutionDataReferences, ExecutionPolicy, ExecutionResult, ExecutionScopeId,
+    ExecutionState, ExecutionTrigger,
+};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub struct ExecutionAggregate {
     pub execution_id: ExecutionId,
     pub action: ActionDefinition,
     pub action_revision: String,
+    pub execution_scope_id: ExecutionScopeId,
+    pub action_id: String,
+    pub trigger: ExecutionTrigger,
+    pub creation_fingerprint: String,
+    pub data_refs: ExecutionDataReferences,
     pub request: InvocationRequest,
     pub policy: ExecutionPolicy,
     pub state: ExecutionState,
@@ -28,7 +37,7 @@ pub struct ExecutionAggregate {
     pub execution_version: u64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub struct AttemptRecord {
     pub attempt: ExecutionAttempt,
     pub deadline_unix_ms: i64,
@@ -36,6 +45,7 @@ pub struct AttemptRecord {
     pub ownership: Option<AttemptOwnership>,
     pub outcome: Option<AttemptOutcome>,
     pub result: Option<ExecutionResult>,
+    pub data_refs: ExecutionDataReferences,
     pub started_at: Option<SystemTime>,
     pub finished_at: Option<SystemTime>,
 }
@@ -49,19 +59,20 @@ impl AttemptRecord {
             ownership: None,
             outcome: None,
             result: None,
+            data_refs: ExecutionDataReferences::default(),
             started_at: None,
             finished_at: None,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct CancellationIntent {
     pub execution_id: ExecutionId,
     pub requested_at: SystemTime,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct TerminalState {
     pub state: ExecutionState,
     pub attempt_id: Option<AttemptId>,
@@ -82,6 +93,11 @@ impl TerminalState {
 pub struct NewExecution {
     pub action: ActionDefinition,
     pub action_revision: String,
+    pub execution_scope_id: ExecutionScopeId,
+    pub action_id: String,
+    pub trigger: ExecutionTrigger,
+    pub creation_fingerprint: String,
+    pub data_refs: ExecutionDataReferences,
     pub request: InvocationRequest,
     pub policy: ExecutionPolicy,
     pub created_at: SystemTime,
@@ -123,10 +139,26 @@ pub enum TransitionResult {
     Conflict { current_version: u64 },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum CreateExecutionResult {
+    Created(ExecutionAggregate),
+    Existing(ExecutionAggregate),
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecutionHistoryQuery {
+    pub execution_scope_id: ExecutionScopeId,
+    pub action_id: Option<String>,
+    pub action_revision: Option<String>,
+    pub limit: usize,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum StateStoreError {
     #[error("execution '{execution_id}' already exists")]
     AlreadyExists { execution_id: ExecutionId },
+    #[error("execution identity '{execution_id}' conflicts with immutable creation data")]
+    IdentityConflict { execution_id: ExecutionId },
     #[error("execution '{execution_id}' was not found")]
     NotFound { execution_id: ExecutionId },
     #[error("invalid execution mutation: {0}")]
@@ -144,6 +176,8 @@ pub type StateStoreResult<T> = Result<T, StateStoreError>;
 #[cfg_attr(test, mockall::automock)]
 pub trait ExecutionStateStore: Send + Sync {
     fn create(&self, execution: NewExecution) -> StateStoreResult<ExecutionAggregate>;
+    fn create_idempotent(&self, execution: NewExecution)
+        -> StateStoreResult<CreateExecutionResult>;
     fn load(&self, execution_id: &ExecutionId) -> StateStoreResult<Option<ExecutionAggregate>>;
     fn compare_and_set(
         &self,
@@ -153,6 +187,10 @@ pub trait ExecutionStateStore: Send + Sync {
     ) -> StateStoreResult<TransitionResult>;
     fn reconcilable_cancellations(&self) -> StateStoreResult<Vec<ExecutionAggregate>>;
     fn active_executions(&self) -> StateStoreResult<Vec<ExecutionAggregate>>;
+    fn list_history(
+        &self,
+        query: ExecutionHistoryQuery,
+    ) -> StateStoreResult<Vec<ExecutionAggregate>>;
 }
 
 #[derive(Default)]
@@ -162,33 +200,36 @@ pub struct MemoryExecutionStateStore {
 
 impl ExecutionStateStore for MemoryExecutionStateStore {
     fn create(&self, execution: NewExecution) -> StateStoreResult<ExecutionAggregate> {
+        let execution_id = execution.request.execution_id.clone();
+        match self.create_idempotent(execution)? {
+            CreateExecutionResult::Created(aggregate) => Ok(aggregate),
+            CreateExecutionResult::Existing(_) => {
+                Err(StateStoreError::AlreadyExists { execution_id })
+            }
+        }
+    }
+
+    fn create_idempotent(
+        &self,
+        execution: NewExecution,
+    ) -> StateStoreResult<CreateExecutionResult> {
         validate_new_execution(&execution)?;
         let mut executions = self
             .executions
             .lock()
             .map_err(|_| StateStoreError::LockPoisoned)?;
         let execution_id = execution.request.execution_id.clone();
-        if executions.contains_key(&execution_id) {
-            return Err(StateStoreError::AlreadyExists { execution_id });
+        if let Some(existing) = executions.get(&execution_id) {
+            return if existing.creation_fingerprint == execution.creation_fingerprint {
+                Ok(CreateExecutionResult::Existing(existing.clone()))
+            } else {
+                Err(StateStoreError::IdentityConflict { execution_id })
+            };
         }
 
-        let aggregate = ExecutionAggregate {
-            execution_id: execution_id.clone(),
-            action: execution.action,
-            action_revision: execution.action_revision,
-            request: execution.request,
-            policy: execution.policy,
-            state: ExecutionState::Pending,
-            active_attempt_id: None,
-            attempts: Vec::new(),
-            cancellation_intent: None,
-            terminal_state: None,
-            created_at: execution.created_at,
-            updated_at: execution.created_at,
-            execution_version: 0,
-        };
+        let aggregate = aggregate_from_new(execution);
         executions.insert(execution_id, aggregate.clone());
-        Ok(aggregate)
+        Ok(CreateExecutionResult::Created(aggregate))
     }
 
     fn load(&self, execution_id: &ExecutionId) -> StateStoreResult<Option<ExecutionAggregate>> {
@@ -251,6 +292,61 @@ impl ExecutionStateStore for MemoryExecutionStateStore {
             .cloned()
             .collect())
     }
+
+    fn list_history(
+        &self,
+        query: ExecutionHistoryQuery,
+    ) -> StateStoreResult<Vec<ExecutionAggregate>> {
+        let mut executions = self
+            .executions
+            .lock()
+            .map_err(|_| StateStoreError::LockPoisoned)?
+            .values()
+            .filter(|aggregate| {
+                aggregate.execution_scope_id == query.execution_scope_id
+                    && query
+                        .action_id
+                        .as_ref()
+                        .is_none_or(|action_id| action_id == &aggregate.action_id)
+                    && query
+                        .action_revision
+                        .as_ref()
+                        .is_none_or(|revision| revision == &aggregate.action_revision)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        executions.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.execution_id.as_ref().cmp(left.execution_id.as_ref()))
+        });
+        executions.truncate(query.limit.clamp(1, 100));
+        Ok(executions)
+    }
+}
+
+pub fn aggregate_from_new(execution: NewExecution) -> ExecutionAggregate {
+    ExecutionAggregate {
+        execution_id: execution.request.execution_id.clone(),
+        action: execution.action,
+        action_revision: execution.action_revision,
+        execution_scope_id: execution.execution_scope_id,
+        action_id: execution.action_id,
+        trigger: execution.trigger,
+        creation_fingerprint: execution.creation_fingerprint,
+        data_refs: execution.data_refs,
+        request: execution.request,
+        policy: execution.policy,
+        state: ExecutionState::Pending,
+        active_attempt_id: None,
+        attempts: Vec::new(),
+        cancellation_intent: None,
+        terminal_state: None,
+        created_at: execution.created_at,
+        updated_at: execution.created_at,
+        execution_version: 0,
+    }
 }
 
 pub fn apply_mutation(
@@ -276,6 +372,12 @@ pub fn apply_mutation(
 }
 
 pub fn validate_new_execution(execution: &NewExecution) -> StateStoreResult<()> {
+    if execution.action_id.trim().is_empty() {
+        return Err(invalid("action id must not be empty"));
+    }
+    if execution.creation_fingerprint.trim().is_empty() {
+        return Err(invalid("creation fingerprint must not be empty"));
+    }
     if execution.action_revision.trim().is_empty() {
         return Err(invalid("action revision must not be empty"));
     }
@@ -316,7 +418,53 @@ pub fn action_revision(action: &ActionDefinition) -> StateStoreResult<String> {
     Ok(format!("action-definition-v1:{hash:016x}"))
 }
 
+pub fn execution_creation_fingerprint(
+    execution_scope_id: &ExecutionScopeId,
+    action_id: &str,
+    action_revision: &str,
+    trigger: &ExecutionTrigger,
+    request: &InvocationRequest,
+    policy: &ExecutionPolicy,
+    data_refs: &ExecutionDataReferences,
+) -> StateStoreResult<String> {
+    #[derive(Serialize)]
+    struct ImmutableCreation<'a> {
+        execution_scope_id: &'a ExecutionScopeId,
+        execution_id: &'a ExecutionId,
+        action_id: &'a str,
+        action_revision: &'a str,
+        trigger: &'a ExecutionTrigger,
+        protocol_version: &'a str,
+        event: &'a serde_json::Value,
+        context: &'a ryvus_protocol::InvocationContext,
+        policy: &'a ExecutionPolicy,
+        input_ref: &'a Option<crate::ExecutionDataRef>,
+    }
+
+    let value = ImmutableCreation {
+        execution_scope_id,
+        execution_id: &request.execution_id,
+        action_id,
+        action_revision,
+        trigger,
+        protocol_version: &request.protocol_version,
+        event: &request.event,
+        context: &request.context,
+        policy,
+        input_ref: &data_refs.input_ref,
+    };
+    let bytes = serde_json::to_vec(&value)
+        .map_err(|error| invalid(format!("serialize execution creation fingerprint: {error}")))?;
+    let hash = bytes.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    Ok(format!("execution-creation-v1:{hash:016x}"))
+}
+
 pub fn validate_execution_aggregate(aggregate: &ExecutionAggregate) -> StateStoreResult<()> {
+    if aggregate.action_id.trim().is_empty() || aggregate.creation_fingerprint.trim().is_empty() {
+        return Err(invalid("execution identity metadata must not be empty"));
+    }
     if aggregate.request.execution_id != aggregate.execution_id {
         return Err(invalid("invocation request belongs to another execution"));
     }

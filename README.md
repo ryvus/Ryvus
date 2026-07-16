@@ -30,8 +30,9 @@ ryvus start
 - generated `.ryvus/action-manifest.json`
 - generated `.ryvus/flows.json`
 - public gateway routes for ApiActions
-- local scheduler for `every <number><s|m|h>`
-- internal scheduler list/manual-run routes
+- durable scheduler for `every <number><s|m|h>`
+- schedule discovery reconciliation, trigger history, and manual-run routes
+- execution and attempt history in the Portal
 - internal Flow start/get/cancel/retry-step routes
 - Portal pages for APIs, schedules, docs, and flows
 - request/query/body/schema validation
@@ -123,7 +124,7 @@ def hello(event, context):
 ```python
 from ryvus import scheduled_action
 
-@scheduled_action(every="10s")
+@scheduled_action(every="10s", key="restock-report")
 def restock_report(context):
     print("checking stock")
     return {"ok": True}
@@ -156,11 +157,17 @@ def restock_report(context):
 
 ## Internal Runtime Routes
 
-Scheduler routes are mounted on the control service:
+Scheduler and execution-history routes are mounted on the control service:
 
 ```text
 GET  /internal/scheduler/schedules
+GET  /internal/scheduler/schedules/{id}
+GET  /internal/scheduler/schedules/{id}/triggers
 POST /internal/scheduler/schedules/{id}/run
+POST /internal/scheduler/schedules/{id}/enable
+POST /internal/scheduler/schedules/{id}/disable
+GET  /internal/executions
+GET  /internal/executions/{id}
 ```
 
 Flow routes are mounted on the control service:
@@ -179,8 +186,8 @@ Schedules and Flows do not execute through the public gateway.
 
 Ryvus has two execution-state providers:
 
-- `MemoryExecutionStateStore` is the default used by `ryvus start`. It requires no database, but execution state is lost when Ryvus stops.
-- `PostgresExecutionStateStore` stores executions, attempts, retries, cancellation intent, Runtime Host ownership, structured results, and terminal outcomes durably.
+- The memory composition is the default used by `ryvus start`. It keeps execution, schedule, trigger, and Portal history for the lifetime of the Ryvus process and requires no database.
+- The PostgreSQL composition stores executions, attempts, retries, cancellation intent, Runtime Host ownership, schedule definitions, trigger history, structured results, and terminal outcomes durably across restarts.
 
 PostgreSQL support is explicit. Ryvus does not embed PostgreSQL, start it automatically, or run migrations during application startup.
 
@@ -267,7 +274,7 @@ ryvus database migrate
 ryvus start
 ```
 
-The PostgreSQL provider is shared by API actions, scheduled actions, Flow steps, and manual scheduled execution through the same `ExecutionService`. Setting only `DATABASE_URL` does not select PostgreSQL; `RYVUS_EXECUTION_STORE=postgres` is required. Invalid or unavailable explicit PostgreSQL configuration fails startup instead of silently falling back to memory.
+The PostgreSQL provider is shared by API actions, scheduled actions, Flow steps, and manual scheduled execution through the same `ExecutionService`. The Scheduler persists orchestration history separately and links each trigger to its canonical execution; it does not duplicate attempts, logs, results, or errors. Setting only `DATABASE_URL` does not select PostgreSQL; `RYVUS_EXECUTION_STORE=postgres` is required. Invalid or unavailable explicit PostgreSQL configuration fails startup instead of silently falling back to memory.
 
 ### Stop PostgreSQL
 

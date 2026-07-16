@@ -7,18 +7,22 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use postgres::{error::SqlState, Client, NoTls, Row, Transaction};
+use postgres::{Client, NoTls, Row, Transaction};
 use ryvus_execution::{
-    apply_mutation, validate_execution_aggregate, validate_new_execution, AttemptRecord,
-    CancellationIntent, ExecutionAggregate, ExecutionMutation, ExecutionState, ExecutionStateStore,
-    NewExecution, StateStoreError, StateStoreResult, TerminalState, TransitionResult,
+    aggregate_from_new, apply_mutation, validate_execution_aggregate, validate_new_execution,
+    AttemptRecord, CancellationIntent, CreateExecutionResult, ExecutionAggregate,
+    ExecutionHistoryQuery, ExecutionMutation, ExecutionState, ExecutionStateStore, NewExecution,
+    StateStoreError, StateStoreResult, TerminalState, TransitionResult,
 };
 use ryvus_protocol::{AttemptId, AttemptOutcome, ExecutionAttempt, ExecutionId};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 
 const MIGRATION_LOCK_ID: i64 = 7_823_981_045_710_001;
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../migrations/0001_execution_state.sql"))];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../migrations/0001_execution_state.sql")),
+    (2, include_str!("../migrations/0002_execution_history.sql")),
+];
 
 pub struct PostgresExecutionStateStore {
     commands: Option<Sender<ClientCommand>>,
@@ -117,36 +121,38 @@ fn transaction<T>(
 
 impl ExecutionStateStore for PostgresExecutionStateStore {
     fn create(&self, execution: NewExecution) -> StateStoreResult<ExecutionAggregate> {
+        let execution_id = execution.request.execution_id.clone();
+        match self.create_idempotent(execution)? {
+            CreateExecutionResult::Created(aggregate) => Ok(aggregate),
+            CreateExecutionResult::Existing(_) => {
+                Err(StateStoreError::AlreadyExists { execution_id })
+            }
+        }
+    }
+
+    fn create_idempotent(
+        &self,
+        execution: NewExecution,
+    ) -> StateStoreResult<CreateExecutionResult> {
         validate_new_execution(&execution)?;
         let execution_id = execution.request.execution_id.clone();
-        let aggregate = ExecutionAggregate {
-            execution_id: execution_id.clone(),
-            action: execution.action,
-            action_revision: execution.action_revision,
-            request: execution.request,
-            policy: execution.policy,
-            state: ExecutionState::Pending,
-            active_attempt_id: None,
-            attempts: Vec::new(),
-            cancellation_intent: None,
-            terminal_state: None,
-            created_at: execution.created_at,
-            updated_at: execution.created_at,
-            execution_version: 0,
-        };
+        let aggregate = aggregate_from_new(execution);
 
         self.run(move |client| {
             transaction(client, |transaction| {
-                match insert_execution(transaction, &aggregate) {
-                    Ok(()) => Ok(aggregate.clone()),
-                    Err(StateStoreError::BackendCode { code, .. })
-                        if code == SqlState::UNIQUE_VIOLATION.code() =>
-                    {
-                        Err(StateStoreError::AlreadyExists {
-                            execution_id: execution_id.clone(),
-                        })
-                    }
-                    Err(error) => Err(error),
+                if insert_execution(transaction, &aggregate)? == 1 {
+                    return Ok(CreateExecutionResult::Created(aggregate.clone()));
+                }
+                let existing = load_aggregate(transaction, &execution_id, "FOR SHARE")?
+                    .ok_or_else(|| StateStoreError::NotFound {
+                        execution_id: execution_id.clone(),
+                    })?;
+                if existing.creation_fingerprint == aggregate.creation_fingerprint {
+                    Ok(CreateExecutionResult::Existing(existing))
+                } else {
+                    Err(StateStoreError::IdentityConflict {
+                        execution_id: execution_id.clone(),
+                    })
                 }
             })
         })
@@ -229,6 +235,43 @@ impl ExecutionStateStore for PostgresExecutionStateStore {
         })?;
         aggregates.retain(|aggregate| aggregate.active_attempt_id.is_some());
         Ok(aggregates)
+    }
+
+    fn list_history(
+        &self,
+        query: ExecutionHistoryQuery,
+    ) -> StateStoreResult<Vec<ExecutionAggregate>> {
+        self.run(move |client| {
+            transaction(client, |transaction| {
+                let limit = i64::try_from(query.limit.clamp(1, 100)).map_err(|_| {
+                    StateStoreError::InvalidMutation("history limit overflow".into())
+                })?;
+                let rows = transaction
+                    .query(
+                        "SELECT execution_id FROM ryvus_executions \
+                         WHERE execution_scope_id = $1 \
+                           AND ($2::TEXT IS NULL OR action_id = $2) \
+                           AND ($3::TEXT IS NULL OR action_revision = $3) \
+                         ORDER BY created_at_unix_ns DESC, execution_id DESC LIMIT $4",
+                        &[
+                            &query.execution_scope_id.as_ref(),
+                            &query.action_id,
+                            &query.action_revision,
+                            &limit,
+                        ],
+                    )
+                    .map_err(|error| backend("query execution history", error))?;
+                let mut aggregates = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let execution_id = ExecutionId::from(row.get::<_, String>(0));
+                    aggregates.push(
+                        load_aggregate(transaction, &execution_id, "FOR SHARE")?
+                            .ok_or_else(|| corrupt("history execution disappeared"))?,
+                    );
+                }
+                Ok(aggregates)
+            })
+        })
     }
 }
 
@@ -314,23 +357,32 @@ fn apply_migrations(client: &mut Client) -> StateStoreResult<()> {
 fn insert_execution(
     transaction: &mut Transaction<'_>,
     aggregate: &ExecutionAggregate,
-) -> StateStoreResult<()> {
+) -> StateStoreResult<u64> {
     let action = json(&aggregate.action, "action")?;
     let request = json(&aggregate.request, "invocation request")?;
     let policy = json(&aggregate.policy, "execution policy")?;
+    let trigger = json(&aggregate.trigger, "execution trigger")?;
+    let data_refs = json(&aggregate.data_refs, "execution data references")?;
     let version = to_i64(aggregate.execution_version, "execution_version")?;
     let created_at = system_time_to_i64(aggregate.created_at)?;
     let updated_at = system_time_to_i64(aggregate.updated_at)?;
     transaction
         .execute(
             "INSERT INTO ryvus_executions (\
-                 execution_id, action, action_revision, invocation_request, policy, state, \
+                 execution_id, action, action_revision, execution_scope_id, action_id, trigger, \
+                 creation_fingerprint, data_refs, invocation_request, policy, state, \
                  active_attempt_id, created_at_unix_ns, updated_at_unix_ns, execution_version\
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
+             ON CONFLICT (execution_id) DO NOTHING",
             &[
                 &aggregate.execution_id.as_ref(),
                 &action,
                 &aggregate.action_revision,
+                &aggregate.execution_scope_id.as_ref(),
+                &aggregate.action_id,
+                &trigger,
+                &aggregate.creation_fingerprint,
+                &data_refs,
                 &request,
                 &policy,
                 &state_name(aggregate.state),
@@ -340,8 +392,7 @@ fn insert_execution(
                 &version,
             ],
         )
-        .map_err(|error| backend("insert execution", error))?;
-    Ok(())
+        .map_err(|error| backend("insert execution", error))
 }
 
 fn update_execution(
@@ -352,6 +403,7 @@ fn update_execution(
     let action = json(&aggregate.action, "action")?;
     let request = json(&aggregate.request, "invocation request")?;
     let policy = json(&aggregate.policy, "execution policy")?;
+    let data_refs = json(&aggregate.data_refs, "execution data references")?;
     let version = to_i64(aggregate.execution_version, "execution_version")?;
     let expected = to_i64(expected_version, "expected execution_version")?;
     let updated_at = system_time_to_i64(aggregate.updated_at)?;
@@ -360,7 +412,8 @@ fn update_execution(
             "UPDATE ryvus_executions SET \
                  action = $2, action_revision = $3, invocation_request = $4, policy = $5, \
                  state = $6, active_attempt_id = $7, updated_at_unix_ns = $8, \
-                 execution_version = $9 WHERE execution_id = $1 AND execution_version = $10",
+                 execution_version = $9, data_refs = $10 \
+                 WHERE execution_id = $1 AND execution_version = $11",
             &[
                 &aggregate.execution_id.as_ref(),
                 &action,
@@ -371,6 +424,7 @@ fn update_execution(
                 &aggregate.active_attempt_id.as_ref().map(AsRef::as_ref),
                 &updated_at,
                 &version,
+                &data_refs,
                 &expected,
             ],
         )
@@ -439,6 +493,7 @@ fn insert_attempt(
 ) -> StateStoreResult<()> {
     let ownership = optional_json(attempt.ownership.as_ref(), "attempt ownership")?;
     let result = optional_json(attempt.result.as_ref(), "execution result")?;
+    let data_refs = json(&attempt.data_refs, "attempt data references")?;
     let attempt_number = i64::from(attempt.attempt.attempt_number);
     let started_at = optional_system_time_to_i64(attempt.started_at)?;
     let finished_at = optional_system_time_to_i64(attempt.finished_at)?;
@@ -446,8 +501,8 @@ fn insert_attempt(
         .execute(
             "INSERT INTO ryvus_attempts (\
                  execution_id, attempt_id, attempt_number, deadline_unix_ms, state, ownership, \
-                 outcome, result, started_at_unix_ns, finished_at_unix_ns\
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                 outcome, result, data_refs, started_at_unix_ns, finished_at_unix_ns\
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             &[
                 &attempt.attempt.execution_id.as_ref(),
                 &attempt.attempt.attempt_id.as_ref(),
@@ -457,6 +512,7 @@ fn insert_attempt(
                 &ownership,
                 &attempt.outcome.map(outcome_name),
                 &result,
+                &data_refs,
                 &started_at,
                 &finished_at,
             ],
@@ -471,8 +527,9 @@ fn load_aggregate(
     lock: &str,
 ) -> StateStoreResult<Option<ExecutionAggregate>> {
     let sql = format!(
-        "SELECT execution_id, action, action_revision, invocation_request, policy, state, \
-             active_attempt_id, created_at_unix_ns, updated_at_unix_ns, execution_version \
+        "SELECT execution_id, action, action_revision, execution_scope_id, action_id, trigger, \
+             creation_fingerprint, data_refs, invocation_request, policy, state, active_attempt_id, \
+             created_at_unix_ns, updated_at_unix_ns, execution_version \
          FROM ryvus_executions WHERE execution_id = $1 {lock}"
     );
     let Some(row) = transaction
@@ -485,7 +542,7 @@ fn load_aggregate(
     let attempts = transaction
         .query(
             "SELECT execution_id, attempt_id, attempt_number, deadline_unix_ms, state, ownership, \
-                 outcome, result, started_at_unix_ns, finished_at_unix_ns \
+                 outcome, result, data_refs, started_at_unix_ns, finished_at_unix_ns \
              FROM ryvus_attempts WHERE execution_id = $1 ORDER BY attempt_number",
             &[&execution_id.as_ref()],
         )
@@ -520,6 +577,14 @@ fn load_aggregate(
         execution_id: ExecutionId::from(row.get::<_, String>("execution_id")),
         action: from_json(row.get("action"), "action")?,
         action_revision: row.get("action_revision"),
+        execution_scope_id: ryvus_execution::ExecutionScopeId::new(
+            row.get::<_, String>("execution_scope_id"),
+        )
+        .map_err(|error| corrupt(format!("invalid execution scope: {error}")))?,
+        action_id: row.get("action_id"),
+        trigger: from_json(row.get("trigger"), "execution trigger")?,
+        creation_fingerprint: row.get("creation_fingerprint"),
+        data_refs: from_json(row.get("data_refs"), "execution data references")?,
         request: from_json(row.get("invocation_request"), "invocation request")?,
         policy: from_json(row.get("policy"), "execution policy")?,
         state: parse_state(row.get("state"))?,
@@ -555,6 +620,7 @@ fn attempt_from_row(row: &Row) -> StateStoreResult<AttemptRecord> {
             .map(|value| parse_outcome(&value))
             .transpose()?,
         result: optional_from_json(row.get("result"), "execution result")?,
+        data_refs: from_json(row.get("data_refs"), "attempt data references")?,
         started_at: optional_system_time_from_i64(row.get("started_at_unix_ns"))?,
         finished_at: optional_system_time_from_i64(row.get("finished_at_unix_ns"))?,
     })

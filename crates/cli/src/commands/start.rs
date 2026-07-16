@@ -25,14 +25,27 @@ pub fn run(run_schedules: bool) -> Result<()> {
         .map_err(|err| CliError::Validation(err.to_string()))?;
     let action_catalog = FileActionCatalog::load(config.manifest_path())
         .map_err(|err| CliError::Validation(err.to_string()))?;
-    let scheduler = ryvus_scheduler::Scheduler::from_actions(action_catalog.all())
-        .map_err(|err| CliError::Validation(err.to_string()))?;
-    let execution_service = project::build_execution_service(&config)?;
-    let scheduler_service = Arc::new(ryvus_scheduler::http::SchedulerService::new(
-        action_catalog.all().cloned().collect(),
+    let composition = project::build_local_composition(&config)?;
+    let execution_service = Arc::clone(&composition.execution_service);
+    let scheduler_service = Arc::new(ryvus_scheduler::DurableSchedulerService::new(
+        Arc::clone(&composition.schedule_store),
         Arc::clone(&execution_service),
+        composition.execution_scope.clone(),
+        composition.actor,
+        "local-scheduler",
+        Duration::from_secs(30),
     ));
-    let scheduler_routes = ryvus_scheduler::http::scheduler_routes(scheduler_service);
+    scheduler_service
+        .reconcile(
+            &action_catalog.all().cloned().collect::<Vec<_>>(),
+            std::time::SystemTime::now(),
+        )
+        .map_err(|err| CliError::Validation(err.to_string()))?;
+    let scheduler_routes = ryvus_scheduler::http::scheduler_routes(Arc::clone(&scheduler_service));
+    let execution_history_routes = ryvus_execution::execution_history_routes(
+        composition.execution_store,
+        composition.execution_scope,
+    );
     let flow_store = Arc::new(ryvus_flow::InMemoryFlowStateStore::default());
     let flow_service = Arc::new(
         ryvus_flow::FlowService::new(
@@ -45,7 +58,9 @@ pub fn run(run_schedules: bool) -> Result<()> {
         )
         .map_err(|err| CliError::Validation(err.to_string()))?,
     );
-    let control_routes = scheduler_routes.merge(ryvus_flow::http::flow_routes(flow_service));
+    let control_routes = scheduler_routes
+        .merge(execution_history_routes)
+        .merge(ryvus_flow::http::flow_routes(flow_service));
 
     println!("Validated {} action(s)", validation.action_count);
     println!("Gateway: http://{}", config.addr);
@@ -67,7 +82,7 @@ pub fn run(run_schedules: bool) -> Result<()> {
                 result = ryvus_control::http::serve_with_routes(control_addr, control_service, control_routes) => {
                     result.map_err(|err| CliError::Gateway(err.to_string()))
                 },
-                result = scheduler.run(execution_service.clone()) => {
+                result = scheduler_service.run() => {
                     result.map_err(|err| CliError::Validation(err.to_string()))
                 },
                 result = tokio::signal::ctrl_c() => {

@@ -92,16 +92,29 @@ pub fn build_execution_service_with_store(
     project_root: PathBuf,
     store: Arc<dyn ExecutionStateStore>,
 ) -> Arc<GatewayExecutionService> {
+    build_execution_service_with_store_and_scope(
+        project_root,
+        store,
+        ryvus_execution::ExecutionScopeId::local_default(),
+    )
+}
+
+pub fn build_execution_service_with_store_and_scope(
+    project_root: PathBuf,
+    store: Arc<dyn ExecutionStateStore>,
+    scope: ryvus_execution::ExecutionScopeId,
+) -> Arc<GatewayExecutionService> {
     let channel = Arc::new(InMemoryRuntimeControlChannel::default());
     let runtime_control = RuntimeControlService::new(channel.clone(), store.clone());
     let runtime_manager = Arc::new(LocalRuntimeManager::new(runtime_control.clone(), channel))
         as Arc<dyn RuntimeManager>;
-    Arc::new(ExecutionService::new(
+    Arc::new(ExecutionService::new_with_scope(
         Arc::new(LocalRuntimeResolver::with_project_root(project_root)) as Arc<dyn RuntimeResolver>,
         Arc::new(HttpExecutor::new(runtime_manager)) as Arc<dyn Executor>,
         Arc::new(ConsoleExecutionPersistence) as Arc<dyn ExecutionPersistence>,
         runtime_control,
         store,
+        scope,
     ))
 }
 

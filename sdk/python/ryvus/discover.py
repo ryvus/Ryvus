@@ -86,6 +86,7 @@ def discover_actions(project_root: Path, source_root: Path) -> list[dict[str, An
             elif metadata.get("type") == "schedule":
                 kind = {
                     "Schedule": {
+                        "key": metadata["key"],
                         "expression": metadata["expression"],
                     },
                 }

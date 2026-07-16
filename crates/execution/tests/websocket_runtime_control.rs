@@ -532,6 +532,11 @@ fn seed_execution(store: &MemoryExecutionStateStore, request: &InvocationRequest
                 policy: Default::default(),
             },
             action_revision: "websocket-test-revision".into(),
+            execution_scope_id: ryvus_execution::ExecutionScopeId::new("test").unwrap(),
+            action_id: "test".into(),
+            trigger: ryvus_execution::ExecutionTrigger::Unknown,
+            creation_fingerprint: "websocket-test".into(),
+            data_refs: ryvus_execution::ExecutionDataReferences::default(),
             request: request.clone(),
             policy: ExecutionPolicy {
                 timeout: Duration::from_secs(10),

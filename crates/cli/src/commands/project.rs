@@ -3,8 +3,9 @@ use std::{
     sync::Arc,
 };
 
-use ryvus_execution::{ExecutionStateStore, MemoryExecutionStateStore};
-use ryvus_persistence::PostgresExecutionStateStore;
+use ryvus_execution::{ActorRef, ExecutionScopeId, ExecutionStateStore, MemoryExecutionStateStore};
+use ryvus_persistence::{PostgresExecutionStateStore, PostgresScheduleStore};
+use ryvus_scheduler::{MemoryScheduleStore, ScheduleStore};
 
 use crate::error::{CliError, Result};
 
@@ -46,33 +47,79 @@ fn execution_store_config(
     }
 }
 
-fn execution_state_store() -> Result<Arc<dyn ExecutionStateStore>> {
+pub struct LocalExecutionComposition {
+    pub execution_service: Arc<ryvus_gateway::state::GatewayExecutionService>,
+    pub execution_store: Arc<dyn ExecutionStateStore>,
+    pub schedule_store: Arc<dyn ScheduleStore>,
+    pub execution_scope: ExecutionScopeId,
+    pub actor: ActorRef,
+}
+
+fn state_stores() -> Result<(Arc<dyn ExecutionStateStore>, Arc<dyn ScheduleStore>)> {
     let config = execution_store_config(
         std::env::var("RYVUS_EXECUTION_STORE").ok(),
         std::env::var("DATABASE_URL").ok(),
     )?;
 
     match config {
-        ExecutionStoreConfig::Memory => Ok(Arc::new(MemoryExecutionStateStore::default())),
+        ExecutionStoreConfig::Memory => Ok((
+            Arc::new(MemoryExecutionStateStore::default()),
+            Arc::new(MemoryScheduleStore::default()),
+        )),
         ExecutionStoreConfig::Postgres { database_url } => {
-            let store = PostgresExecutionStateStore::connect(&database_url)
+            let execution_store = PostgresExecutionStateStore::connect(&database_url)
                 .map_err(CliError::ExecutionStore)?;
-            store
+            execution_store
                 .active_executions()
                 .map_err(CliError::ExecutionStore)?;
-            Ok(Arc::new(store))
+            let schedule_store = PostgresScheduleStore::connect(&database_url)
+                .map_err(|error| CliError::Validation(error.to_string()))?;
+            Ok((Arc::new(execution_store), Arc::new(schedule_store)))
         }
     }
+}
+
+pub fn build_local_composition(
+    config: &ryvus_gateway::server::GatewayServerConfig,
+) -> Result<LocalExecutionComposition> {
+    let (execution_store, schedule_store) = state_stores()?;
+    let project_name = config
+        .project_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| CliError::Validation("project directory has no valid name".into()))?;
+    let normalized = project_name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let execution_scope = ExecutionScopeId::new(format!("local-project:{normalized}"))
+        .map_err(|error| CliError::Validation(error.to_string()))?;
+    let execution_service = ryvus_gateway::server::build_execution_service_with_store_and_scope(
+        config.project_root.clone(),
+        execution_store.clone(),
+        execution_scope.clone(),
+    );
+    let actor =
+        ActorRef::new("local-user").map_err(|error| CliError::Validation(error.to_string()))?;
+    Ok(LocalExecutionComposition {
+        execution_service,
+        execution_store,
+        schedule_store,
+        execution_scope,
+        actor,
+    })
 }
 
 pub fn build_execution_service(
     config: &ryvus_gateway::server::GatewayServerConfig,
 ) -> Result<Arc<ryvus_gateway::state::GatewayExecutionService>> {
-    let store = execution_state_store()?;
-    Ok(ryvus_gateway::server::build_execution_service_with_store(
-        config.project_root.clone(),
-        store,
-    ))
+    Ok(build_local_composition(config)?.execution_service)
 }
 
 pub fn configure_python_path() {

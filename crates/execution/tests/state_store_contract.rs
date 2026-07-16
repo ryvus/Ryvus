@@ -1,9 +1,10 @@
 use std::time::{Duration, SystemTime};
 
 use ryvus_execution::{
-    AttemptOwnership, AttemptRecord, ExecutionMutation, ExecutionPolicy, ExecutionResult,
-    ExecutionState, ExecutionStateStore, MemoryExecutionStateStore, NewExecution, RetryPolicy,
-    TerminalState, TransitionResult,
+    execution_creation_fingerprint, AttemptOwnership, AttemptRecord, CreateExecutionResult,
+    ExecutionHistoryQuery, ExecutionMutation, ExecutionPolicy, ExecutionResult, ExecutionState,
+    ExecutionStateStore, MemoryExecutionStateStore, NewExecution, RetryPolicy, TerminalState,
+    TransitionResult,
 };
 use ryvus_protocol::{
     ActionDefinition, ActionExecutionPolicy, ActionKind, ApiAction, AttemptId, AttemptOutcome,
@@ -33,6 +34,11 @@ fn new_execution() -> NewExecution {
             policy: ActionExecutionPolicy::default(),
         },
         action_revision: "test-action-revision".into(),
+        execution_scope_id: ryvus_execution::ExecutionScopeId::new("test").unwrap(),
+        action_id: "hello".into(),
+        trigger: ryvus_execution::ExecutionTrigger::Api,
+        creation_fingerprint: "test-fingerprint".into(),
+        data_refs: ryvus_execution::ExecutionDataReferences::default(),
         request,
         policy: ExecutionPolicy {
             timeout: Duration::from_secs(3),
@@ -44,6 +50,49 @@ fn new_execution() -> NewExecution {
         },
         created_at: SystemTime::now(),
     }
+}
+
+#[test]
+fn memory_store_idempotently_creates_and_lists_execution_history() {
+    let store = MemoryExecutionStateStore::default();
+    let mut execution = new_execution();
+    execution.creation_fingerprint = execution_creation_fingerprint(
+        &execution.execution_scope_id,
+        &execution.action_id,
+        &execution.action_revision,
+        &execution.trigger,
+        &execution.request,
+        &execution.policy,
+        &execution.data_refs,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        store.create_idempotent(execution.clone()).unwrap(),
+        CreateExecutionResult::Created(_)
+    ));
+    assert!(matches!(
+        store.create_idempotent(execution.clone()).unwrap(),
+        CreateExecutionResult::Existing(_)
+    ));
+
+    let history = store
+        .list_history(ExecutionHistoryQuery {
+            execution_scope_id: execution.execution_scope_id.clone(),
+            action_id: Some(execution.action_id.clone()),
+            action_revision: Some(execution.action_revision.clone()),
+            limit: 10,
+        })
+        .unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].trigger, execution.trigger);
+
+    execution.action_id = "different-action".into();
+    execution.creation_fingerprint = "different-fingerprint".into();
+    assert!(matches!(
+        store.create_idempotent(execution),
+        Err(ryvus_execution::StateStoreError::IdentityConflict { .. })
+    ));
 }
 
 #[test]

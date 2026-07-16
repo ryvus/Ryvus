@@ -236,6 +236,7 @@ mod tests {
                         "runtime": "Python",
                         "kind": {
                             "Schedule": {
+                                "key": "restock-report",
                                 "expression": "every 10s"
                             }
                         },

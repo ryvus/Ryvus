@@ -44,12 +44,15 @@ pub fn run(selector: String) -> Result<()> {
             .map_err(|err| CliError::Validation(err.to_string()))?;
 
     println!("execution_id: {}", result.execution_id);
-    println!("attempt_id: {}", result.attempt_id);
-    println!("attempt_number: {}", result.attempt_number);
-    println!("status: {}", status_label(&result.status));
+    let invocation = result.result.ok_or_else(|| {
+        CliError::Validation("schedule execution already exists without a terminal result".into())
+    })?;
+    println!("attempt_id: {}", invocation.attempt_id);
+    println!("attempt_number: {}", invocation.attempt_number);
+    println!("status: {}", status_label(&invocation.status));
     println!(
         "output: {}",
-        result
+        invocation
             .output
             .map(|output| output.to_string())
             .unwrap_or_else(|| "null".to_string())

@@ -13,6 +13,27 @@ from ryvus.runtime import (
 )
 
 
+def test_discovers_stable_schedule_key(tmp_path):
+    source_root = tmp_path / "src"
+    source_root.mkdir()
+    (source_root / "schedule.py").write_text(
+        """
+from ryvus import scheduled_action
+
+@scheduled_action(every="10s", key="inventory-restock")
+def restock():
+    return {"ok": True}
+"""
+    )
+
+    actions = discover_actions(Path(tmp_path), source_root)
+
+    assert actions[0]["kind"]["Schedule"] == {
+        "key": "inventory-restock",
+        "expression": "every 10s",
+    }
+
+
 def build_request():
     return {
         "protocol_version": "ryvus.invoke.v3",

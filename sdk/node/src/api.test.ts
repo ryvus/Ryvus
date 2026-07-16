@@ -1,7 +1,25 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import test from "node:test";
+import { scheduledAction } from "./api.js";
 import type { InvocationRequest } from "./protocol.js";
+
+test("scheduled actions retain an explicit stable key", () => {
+  const previous = process.env.RYVUS_DISCOVER;
+  process.env.RYVUS_DISCOVER = "1";
+  const action = scheduledAction({
+    key: "inventory-restock",
+    every: "10s",
+    handler: () => ({ ok: true }),
+  });
+  if (previous === undefined) {
+    delete process.env.RYVUS_DISCOVER;
+  } else {
+    process.env.RYVUS_DISCOVER = previous;
+  }
+
+  assert.equal(action.key, "inventory-restock");
+});
 
 test("worker emits ready, structured logs, and a correlated result", async () => {
   const frames = await invokeWorker(`

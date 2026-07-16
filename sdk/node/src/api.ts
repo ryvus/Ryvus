@@ -124,6 +124,7 @@ export interface ScheduledActionDefinition {
   __ryvusAction: true;
   type: "schedule";
   name?: string;
+  key?: string;
   expression: string;
   policy?: ActionPolicyInput;
   handler: ScheduledActionHandler;
@@ -230,6 +231,7 @@ function normalizeMediaTypes(value: MediaTypeInput): string[] {
 
 export function scheduledAction(options: {
   name?: string;
+  key?: string;
   every: string;
   timeout?: string;
   retry?: RetryPolicyInput;
@@ -239,6 +241,7 @@ export function scheduledAction(options: {
     __ryvusAction: true,
     type: "schedule",
     ...(options.name ? { name: options.name } : {}),
+    ...(options.key ? { key: options.key } : {}),
     expression: options.every.startsWith("every ")
       ? options.every
       : `every ${options.every}`,

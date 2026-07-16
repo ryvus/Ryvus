@@ -177,6 +177,7 @@ fn is_default_media_types(value: &[String]) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduleAction {
+    pub key: String,
     pub expression: String,
 }
 

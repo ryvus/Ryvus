@@ -12,6 +12,7 @@ export type ApiActionKind = {
 
 export type ScheduleActionKind = {
   Schedule: {
+    key: string;
     expression: string;
   };
 };
@@ -22,6 +23,7 @@ export type ActionDefinition = {
   source: string;
   entrypoint: string;
   name?: string;
+  policy?: unknown;
 };
 
 export type Catalog = {

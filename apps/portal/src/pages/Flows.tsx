@@ -9,7 +9,7 @@ import {
   type NodeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Artifacts, FlowDefinition, FlowStep } from "../artifacts/types";
 import { Badge, Button, CodeBlock, EmptyState, Page, Panel, cn } from "../components/ui";
 
@@ -54,7 +54,22 @@ export function Flows({ artifacts }: { artifacts: Artifacts }) {
   const [executions, setExecutions] = useState<FlowExecution[]>([]);
   const [selectedExecutionId, setSelectedExecutionId] = useState("");
   const [selectedStepKey, setSelectedStepKey] = useState("");
+  const [historyError, setHistoryError] = useState("");
   const selectedFlow = flows.find((flow) => flow.key === selectedFlowKey);
+
+  useEffect(() => {
+    let active = true;
+    void listFlowExecutions()
+      .then((history) => {
+        if (active) setExecutions(history);
+      })
+      .catch((error) => {
+        if (active) setHistoryError(error instanceof Error ? error.message : "Flow history failed to load.");
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   return (
     <Page
@@ -68,7 +83,9 @@ export function Flows({ artifacts }: { artifacts: Artifacts }) {
         )
       }
     >
-      {flows.length === 0 ? (
+      {historyError ? (
+        <EmptyState title="Flow history unavailable" message={historyError} />
+      ) : flows.length === 0 ? (
         <EmptyState title="No flows" message="No flows were found in this artifact snapshot." />
       ) : selectedFlow ? (
         <FlowDetail
@@ -978,6 +995,11 @@ async function startFlowExecution(flowKey: string, input: unknown): Promise<Flow
     error: null,
     steps: [],
   });
+}
+
+async function listFlowExecutions(): Promise<FlowExecution[]> {
+  const executions = await requestJson<RawFlowExecution[]>("/internal/flows/runs");
+  return executions.map(toFlowExecution).reverse();
 }
 
 async function cancelFlowExecution(id: string): Promise<FlowExecution> {

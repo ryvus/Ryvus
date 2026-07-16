@@ -776,6 +776,13 @@ mod tests {
             self.inner.create(execution)
         }
 
+        fn create_idempotent(
+            &self,
+            execution: crate::NewExecution,
+        ) -> crate::StateStoreResult<crate::CreateExecutionResult> {
+            self.inner.create_idempotent(execution)
+        }
+
         fn load(
             &self,
             execution_id: &ExecutionId,
@@ -807,6 +814,13 @@ mod tests {
 
         fn active_executions(&self) -> crate::StateStoreResult<Vec<crate::ExecutionAggregate>> {
             self.inner.active_executions()
+        }
+
+        fn list_history(
+            &self,
+            query: crate::ExecutionHistoryQuery,
+        ) -> crate::StateStoreResult<Vec<crate::ExecutionAggregate>> {
+            self.inner.list_history(query)
         }
     }
 
@@ -1633,6 +1647,11 @@ mod tests {
                     policy: Default::default(),
                 },
                 action_revision: "runtime-control-test-revision".into(),
+                execution_scope_id: crate::ExecutionScopeId::new("test").unwrap(),
+                action_id: "test".into(),
+                trigger: crate::ExecutionTrigger::Unknown,
+                creation_fingerprint: "runtime-control-test".into(),
+                data_refs: crate::ExecutionDataReferences::default(),
                 request,
                 policy: crate::ExecutionPolicy {
                     timeout: Duration::from_secs(1),

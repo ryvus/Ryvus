@@ -29,6 +29,7 @@ where
 {
     Router::new()
         .route("/internal/flows", get(list_flows::<S, E>))
+        .route("/internal/flows/runs", get(list_runs::<S, E>))
         .route("/internal/flows/{key}/runs", post(start_flow::<S, E>))
         .route("/internal/flows/runs/{id}", get(get_run::<S, E>))
         .route("/internal/flows/runs/{id}/cancel", post(cancel_run::<S, E>))
@@ -37,6 +38,20 @@ where
             post(retry_failed_step::<S, E>),
         )
         .with_state(FlowHttpState { service })
+}
+
+async fn list_runs<S, E>(
+    State(state): State<FlowHttpState<S, E>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)>
+where
+    S: FlowStateStore,
+    E: FlowStepExecutor,
+{
+    state
+        .service
+        .list_runs()
+        .map(|executions| Json(json!(executions)))
+        .map_err(flow_error_response)
 }
 
 async fn list_flows<S, E>(State(state): State<FlowHttpState<S, E>>) -> Json<Value>
@@ -188,9 +203,13 @@ mod tests {
 
         assert_eq!(started["flow_key"], "restock");
         let id = started["id"].as_str().expect("id should be string");
-        let run = wait_for_run(app, id).await;
+        let run = wait_for_run(app.clone(), id).await;
         assert_eq!(run["status"], "succeeded");
         assert_eq!(run["steps"][0]["key"], "sync");
+
+        let runs = request_json(app, Method::GET, "/internal/flows/runs", Body::empty()).await;
+        assert_eq!(runs.as_array().map(Vec::len), Some(1));
+        assert_eq!(runs[0]["id"], id);
     }
 
     async fn wait_for_run(app: Router, id: &str) -> serde_json::Value {
@@ -262,6 +281,8 @@ mod tests {
             _action: &ActionDefinition,
             request: &InvocationRequest,
             _policy: &ryvus_execution::ExecutionPolicy,
+            _flow_run_id: &str,
+            _step_key: &str,
         ) -> FlowResult<ExecutionRecord> {
             self.requests
                 .lock()

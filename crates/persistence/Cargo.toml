@@ -12,6 +12,7 @@ postgres-integration = []
 [dependencies]
 ryvus-execution = { workspace = true }
 ryvus-protocol = { workspace = true }
+ryvus-scheduler = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }

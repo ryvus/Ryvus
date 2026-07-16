@@ -678,6 +678,7 @@ mod tests {
         let schedule_action = ActionDefinition {
             runtime: RuntimeKind::Python,
             kind: ActionKind::Schedule(ScheduleAction {
+                key: "restock_report:default".to_string(),
                 expression: "every 10s".to_string(),
             }),
             source: PathBuf::from("src/modules/petstore/schedules/restock.py"),

@@ -8,6 +8,7 @@ import { ApiActions } from "../pages/ApiActions";
 import { Docs } from "../pages/Docs";
 import { Dashboard } from "../pages/Dashboard";
 import { Schedules } from "../pages/Schedules";
+import { Executions } from "../pages/Executions";
 
 const Flows = lazy(() => import("../pages/Flows").then((module) => ({ default: module.Flows })));
 
@@ -112,7 +113,7 @@ export function App() {
 }
 
 function currentRoute(): RouteId {
-  const hash = window.location.hash.replace("#", "");
+  const hash = window.location.hash.replace("#", "").split("?")[0];
   if (hash === "overview") {
     return "dashboard";
   }
@@ -146,11 +147,6 @@ function renderRoute(route: RouteId, artifacts: Artifacts) {
         />
       );
     case "execution-preview":
-      return (
-        <EmptyState
-          title="Execution Preview"
-          message="Execution preview will call runtime APIs in a later slice."
-        />
-      );
+      return <Executions />;
   }
 }

@@ -1,281 +1,65 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import type { Artifacts, ScheduleArtifact } from "../artifacts/types";
-import { Badge, Button, CodeBlock, EmptyState, Page, Panel } from "../components/ui";
+import type { Artifacts } from "../artifacts/types";
+import { historyApi, type ScheduleRecord } from "../api/history";
+import { Badge, Button, EmptyState, Page, Panel } from "../components/ui";
 
-type RunResult = {
-  execution_id?: string;
-  attempt_id?: string;
-  attempt_number?: number;
-  status?: string;
-  output?: unknown;
-  error?: string;
-  message?: string;
-};
+export function Schedules({ artifacts: _artifacts }: { artifacts: Artifacts }) {
+  const client = useQueryClient();
+  const [selectedId, setSelectedId] = useState("");
+  const schedules = useQuery({ queryKey: ["schedules"], queryFn: historyApi.schedules });
+  const selected = schedules.data?.find((schedule) => schedule.schedule_id === selectedId);
+  const triggers = useQuery({
+    queryKey: ["schedule-triggers", selectedId],
+    queryFn: () => historyApi.triggers(selectedId),
+    enabled: Boolean(selectedId),
+  });
+  const refresh = async () => {
+    await client.invalidateQueries({ queryKey: ["schedules"] });
+    await client.invalidateQueries({ queryKey: ["schedule-triggers", selectedId] });
+    await client.invalidateQueries({ queryKey: ["executions"] });
+  };
+  const run = useMutation({ mutationFn: () => historyApi.run(selectedId), onSuccess: refresh });
+  const toggle = useMutation({
+    mutationFn: (schedule: ScheduleRecord) => schedule.enablement === "enabled" ? historyApi.disable(schedule.schedule_id) : historyApi.enable(schedule.schedule_id),
+    onSuccess: refresh,
+  });
 
-type RunHistoryItem = RunResult & {
-  id: string;
-  started_at: string;
-};
-
-export function Schedules({ artifacts }: { artifacts: Artifacts }) {
-  const [running, setRunning] = useState("");
-  const [results, setResults] = useState<Record<string, RunResult>>({});
-  const [history, setHistory] = useState<Record<string, RunHistoryItem[]>>({});
-  const [selectedScheduleId, setSelectedScheduleId] = useState("");
-  const schedules = artifacts.schedules.schedules;
-  const selectedSchedule = schedules.find((schedule) => scheduleId(schedule) === selectedScheduleId);
-
-  async function runSchedule(schedule: ScheduleArtifact) {
-    const id = scheduleId(schedule);
-    setRunning(id);
-    setResults((current) => ({ ...current, [id]: {} }));
-
-    try {
-      const response = await fetch(`/internal/scheduler/schedules/${encodeURIComponent(id)}/run`, {
-        method: "POST",
-      });
-      const body = (await response.json()) as RunResult;
-      const result = response.ok
-        ? body
-        : { error: body.error ?? "schedule_run_failed", message: body.message };
-      setResults((current) => ({
-        ...current,
-        [id]: result,
-      }));
-      recordRun(id, result);
-    } catch (error) {
-      const result = {
-        error: "request_failed",
-        message: error instanceof Error ? error.message : "request failed",
-      };
-      setResults((current) => ({ ...current, [id]: result }));
-      recordRun(id, result);
-    } finally {
-      setRunning("");
-    }
-  }
-
-  function recordRun(id: string, result: RunResult) {
-    setHistory((current) => ({
-      ...current,
-      [id]: [
-        {
-          ...result,
-          id: result.execution_id ?? `local_${Date.now().toString(36)}`,
-          started_at: new Date().toISOString(),
-        },
-        ...(current[id] ?? []),
-      ],
-    }));
-  }
+  if (schedules.isError) return <EmptyState title="Schedule history unavailable" message={errorMessage(schedules.error)} />;
+  if (!schedules.data) return <EmptyState title="Loading schedules" message="Reading durable Scheduler state." />;
 
   return (
-    <Page
-      eyebrow="Runtime Control"
-      title={selectedSchedule ? selectedSchedule.name : "Schedules"}
-      actions={
-        selectedSchedule && (
-          <Button type="button" className="bg-white/10 hover:bg-white/15" onClick={() => setSelectedScheduleId("")}>
-            Back to schedules
-          </Button>
-        )
-      }
-    >
-      {schedules.length === 0 ? (
-        <EmptyState title="No schedules" message="No scheduled actions were found in this artifact snapshot." />
-      ) : selectedSchedule ? (
-        <ScheduleDetail
-          schedule={selectedSchedule}
-          running={running === scheduleId(selectedSchedule)}
-          result={results[scheduleId(selectedSchedule)]}
-          history={history[scheduleId(selectedSchedule)] ?? []}
-          onRun={() => runSchedule(selectedSchedule)}
-        />
-      ) : (
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {schedules.map((schedule) => (
-            <ScheduleListItem
-              key={scheduleId(schedule)}
-              schedule={schedule}
-              result={results[scheduleId(schedule)]}
-              historyCount={(history[scheduleId(schedule)] ?? []).length}
-              running={running === scheduleId(schedule)}
-              onOpen={() => setSelectedScheduleId(scheduleId(schedule))}
-            />
-          ))}
+    <Page eyebrow="Runtime Control" title={selected?.display_name ?? "Schedules"} actions={selected && <Button type="button" onClick={() => setSelectedId("")}>Back</Button>}>
+      {schedules.data.length === 0 ? <EmptyState title="No schedules" message="No durable schedules were discovered." /> : selected ? (
+        <div className="grid gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
+          <Panel className="grid gap-3 p-4 self-start">
+            <div className="flex items-center justify-between"><h2 className="font-semibold">Trigger history</h2><Badge tone="slate">{triggers.data?.length ?? 0}</Badge></div>
+            {(triggers.data ?? []).map((trigger) => (
+              <a key={trigger.trigger_id} href={trigger.execution_id ? `#execution-preview?id=${encodeURIComponent(trigger.execution_id)}` : undefined} className="grid gap-1 rounded-lg border border-white/10 p-3 hover:bg-white/[0.04]">
+                <span className="flex justify-between gap-2"><Badge tone={trigger.kind === "manual" ? "blue" : "cyan"}>{trigger.kind}</Badge><Badge tone={trigger.status === "failed" ? "red" : trigger.status === "execution_created" ? "green" : "slate"}>{trigger.status}</Badge></span>
+                <code className="truncate text-xs text-slate-400">{trigger.execution_id ?? trigger.trigger_id}</code>
+                <span className="text-xs text-slate-500">revision {trigger.schedule_revision} · {trigger.action_revision}</span>
+              </a>
+            ))}
+            {!triggers.isLoading && triggers.data?.length === 0 && <p className="text-sm text-slate-400">No triggers yet.</p>}
+          </Panel>
+          <Panel className="grid gap-4 p-4 self-start">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div><h2 className="text-lg font-semibold">{selected.display_name}</h2><code className="text-xs text-slate-500">{selected.stable_schedule_key}</code></div>
+              <div className="flex gap-2"><Button type="button" onClick={() => toggle.mutate(selected)}>{selected.enablement === "enabled" ? "Disable" : "Enable"}</Button><Button type="button" onClick={() => run.mutate()} disabled={run.isPending || selected.availability === "unavailable"}>{run.isPending ? "Running..." : "Run now"}</Button></div>
+            </div>
+            <div className="flex flex-wrap gap-2"><Badge tone={selected.availability === "available" ? "green" : "red"}>{selected.availability}</Badge><Badge tone={selected.enablement === "enabled" ? "cyan" : "slate"}>{selected.enablement}</Badge><Badge tone="blue">revision {selected.current_revision}</Badge></div>
+            <dl className="grid gap-3 sm:grid-cols-2"><Metric label="Next trigger" value={timeLabel(selected.next_trigger_at)} /><Metric label="Last trigger" value={timeLabel(selected.last_scheduled_trigger_at)} /></dl>
+            {(run.error || toggle.error) && <p className="text-sm text-red-300">{errorMessage(run.error ?? toggle.error)}</p>}
+          </Panel>
         </div>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{schedules.data.map((schedule) => <button key={schedule.schedule_id} type="button" className="text-left" onClick={() => setSelectedId(schedule.schedule_id)}><Panel className="grid gap-3 p-4"><div className="flex justify-between gap-3"><h2 className="font-semibold">{schedule.display_name}</h2><Badge tone={schedule.availability === "available" ? "green" : "red"}>{schedule.availability}</Badge></div><code className="truncate text-xs text-slate-500">{schedule.stable_schedule_key}</code><div className="flex gap-2"><Badge tone={schedule.enablement === "enabled" ? "cyan" : "slate"}>{schedule.enablement}</Badge><Badge tone="blue">revision {schedule.current_revision}</Badge></div></Panel></button>)}</div>
       )}
     </Page>
   );
 }
 
-function ScheduleListItem({
-  schedule,
-  result,
-  historyCount,
-  running,
-  onOpen,
-}: {
-  schedule: ScheduleArtifact;
-  result?: RunResult;
-  historyCount: number;
-  running: boolean;
-  onOpen: () => void;
-}) {
-  return (
-    <Panel className="grid content-between gap-5 p-4">
-      <div className="grid gap-3">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h2 className="truncate text-base font-semibold text-white">{schedule.name}</h2>
-            <code className="mt-1 block truncate text-xs text-slate-500">{schedule.handler}</code>
-          </div>
-          <Badge tone={schedule.enabled ? "cyan" : "slate"}>{schedule.enabled ? "enabled" : "disabled"}</Badge>
-        </div>
-        <div className="grid grid-cols-3 gap-2">
-          <Metric label="Every" value={schedule.expression} />
-          <Metric label="Runtime" value={schedule.runtime} />
-          <Metric label="Runs" value={historyCount.toString()} />
-        </div>
-        <Badge tone={running ? "blue" : result?.error ? "red" : result?.execution_id ? "green" : "slate"}>
-          {running ? "running" : resultStatus(result)}
-        </Badge>
-      </div>
-      <Button type="button" onClick={onOpen}>Open schedule</Button>
-    </Panel>
-  );
-}
-
-function ScheduleDetail({
-  schedule,
-  running,
-  result,
-  history,
-  onRun,
-}: {
-  schedule: ScheduleArtifact;
-  running: boolean;
-  result?: RunResult;
-  history: RunHistoryItem[];
-  onRun: () => void;
-}) {
-  const id = scheduleId(schedule);
-
-  return (
-    <div className="grid min-w-0 items-start gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
-      <Panel className="grid gap-3 p-4">
-        <div className="flex items-center justify-between gap-3">
-          <h3 className="text-sm font-semibold text-white">Execution history</h3>
-          <Badge tone="slate">{history.length}</Badge>
-        </div>
-        {history.length === 0 ? (
-          <p className="text-sm text-slate-400">No manual schedule runs in this Portal session.</p>
-        ) : (
-          <div className="divide-y divide-white/10 rounded-lg border border-white/10 bg-black/20">
-            {history.map((run) => (
-              <div key={run.id} className="grid gap-2 px-3 py-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
-                <span className="min-w-0">
-                  <code className="block truncate text-xs text-slate-300">{run.id}</code>
-                  <span className="text-xs text-slate-500">{new Date(run.started_at).toLocaleString()}</span>
-                </span>
-                <Badge tone={run.error ? "red" : run.execution_id ? "green" : "slate"}>{resultStatus(run)}</Badge>
-              </div>
-            ))}
-          </div>
-        )}
-      </Panel>
-      <div className="grid min-w-0 gap-4">
-        <Panel className="grid gap-4 p-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div>
-              <h2 className="text-base font-semibold text-white">{schedule.name}</h2>
-              <div className="mt-2 flex flex-wrap gap-2">
-                <Badge tone="blue">{schedule.expression}</Badge>
-                <Badge tone={schedule.enabled ? "cyan" : "slate"}>
-                  {schedule.enabled ? "enabled" : "disabled"}
-                </Badge>
-              </div>
-            </div>
-            <Button type="button" onClick={onRun} disabled={running}>
-              {running ? "Running..." : "Run now"}
-            </Button>
-          </div>
-          <dl className="grid gap-3 sm:grid-cols-3">
-            <div>
-              <dt className="text-xs font-semibold uppercase text-slate-500">Runtime</dt>
-              <dd className="mt-1 text-sm text-slate-200">{schedule.runtime}</dd>
-            </div>
-            <div>
-              <dt className="text-xs font-semibold uppercase text-slate-500">Handler</dt>
-              <dd>
-                <code className="mt-1 block truncate text-sm text-slate-300">{schedule.handler}</code>
-              </dd>
-            </div>
-            <div>
-              <dt className="text-xs font-semibold uppercase text-slate-500">Run id</dt>
-              <dd>
-                <code className="mt-1 block truncate text-sm text-slate-300">{id}</code>
-              </dd>
-            </div>
-          </dl>
-        </Panel>
-
-        <Panel className="grid gap-3 p-4">
-          <div className="flex items-center justify-between gap-3">
-            <h3 className="text-sm font-semibold text-white">Last run result</h3>
-            <Badge tone={result?.error ? "red" : result?.execution_id ? "green" : "slate"}>
-              {running ? "running" : resultStatus(result)}
-            </Badge>
-          </div>
-          {result ? (
-            result.error ? (
-              <>
-                <strong className="text-sm text-red-200">{result.error}</strong>
-                <CodeBlock>{result.message ?? "Schedule run failed."}</CodeBlock>
-              </>
-            ) : result.execution_id ? (
-              <>
-                <div className="flex flex-wrap gap-3 text-sm font-medium text-emerald-300">
-                  <span>{result.status}</span>
-                  <span>{result.execution_id}</span>
-                  <span>attempt {result.attempt_number}: {result.attempt_id}</span>
-                </div>
-                <CodeBlock>{JSON.stringify(result.output ?? null, null, 2)}</CodeBlock>
-              </>
-            ) : (
-              <CodeBlock>Waiting for result...</CodeBlock>
-            )
-          ) : (
-            <p className="text-sm text-slate-400">Run this schedule manually to preview its execution result.</p>
-          )}
-        </Panel>
-      </div>
-    </div>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-      <div className="text-[11px] font-semibold uppercase text-slate-500">{label}</div>
-      <div className="mt-1 truncate text-sm font-semibold text-slate-100">{value}</div>
-    </div>
-  );
-}
-
-function scheduleId(schedule: ScheduleArtifact) {
-  return schedule.id ?? schedule.name;
-}
-
-function resultStatus(result?: RunResult) {
-  if (!result) {
-    return "none";
-  }
-  if (result.error) {
-    return "failed";
-  }
-  if (result.execution_id) {
-    return result.status ?? "done";
-  }
-  return "waiting";
-}
+function Metric({ label, value }: { label: string; value: string }) { return <div className="rounded-lg border border-white/10 bg-black/20 p-3"><dt className="text-xs uppercase text-slate-500">{label}</dt><dd className="mt-1 text-sm text-slate-200">{value}</dd></div>; }
+function timeLabel(value: unknown) { return value ? JSON.stringify(value) : "—"; }
+function errorMessage(error: unknown) { return error instanceof Error ? error.message : "Request failed"; }

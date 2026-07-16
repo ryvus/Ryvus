@@ -7,15 +7,20 @@ use std::{
 
 use postgres::{error::SqlState, Client, NoTls};
 use ryvus_execution::{
-    AttemptOwnership, AttemptRecord, ExecutionAggregate, ExecutionMutation, ExecutionPolicy,
-    ExecutionResult, ExecutionState, ExecutionStateStore, MemoryExecutionStateStore, NewExecution,
+    action_revision, ActorRef, AttemptOwnership, AttemptRecord, ExecutionAggregate,
+    ExecutionIdentityFactory, ExecutionMutation, ExecutionPolicy, ExecutionResult,
+    ExecutionScopeId, ExecutionState, ExecutionStateStore, MemoryExecutionStateStore, NewExecution,
     RetryPolicy, StateStoreError, TerminalState, TransitionResult,
 };
-use ryvus_persistence::{migrate, PostgresExecutionStateStore};
+use ryvus_persistence::{migrate, PostgresExecutionStateStore, PostgresScheduleStore};
 use ryvus_protocol::{
     ActionDefinition, ActionExecutionPolicy, ActionKind, ApiAction, AttemptId, AttemptOutcome,
     ExecutionAttempt, ExecutionId, InvocationContext, InvocationEvent, InvocationRequest,
     InvocationResult, LogEvent, LogLevel, RuntimeHostId, RuntimeKind, RuntimeSessionId, WorkerId,
+};
+use ryvus_scheduler::{
+    ClaimOccurrenceRequest, ClaimOccurrenceResult, DiscoveredSchedule, MemoryScheduleStore,
+    ScheduleAvailability, ScheduleEnablement, ScheduleQuery, ScheduleStore, TriggerQuery,
 };
 use serde_json::json;
 use url::Url;
@@ -124,6 +129,14 @@ fn postgres_integration_suite() {
         run_provider_contract(&store);
     }
 
+    eprintln!("phase: schedule provider contract (memory)");
+    run_schedule_provider_contract(&MemoryScheduleStore::default());
+    eprintln!("phase: schedule provider contract (PostgreSQL)");
+    {
+        let store = PostgresScheduleStore::connect(db.url()).unwrap();
+        run_schedule_provider_contract(&store);
+    }
+
     eprintln!("phase: Tokio runtime compatibility");
     validate_tokio_runtime_compatibility(db.url());
 
@@ -137,6 +150,153 @@ fn postgres_integration_suite() {
 
     eprintln!("phase: rollback validation");
     validate_transaction_rollback(db.url());
+}
+
+fn run_schedule_provider_contract(store: &dyn ScheduleStore) {
+    let factory = ExecutionIdentityFactory;
+    let scope = ExecutionScopeId::new(format!("scope-{}", Uuid::new_v4())).unwrap();
+    let observed_at = SystemTime::now();
+    let action = ActionDefinition {
+        runtime: RuntimeKind::Python,
+        kind: ActionKind::Schedule(ryvus_protocol::ScheduleAction {
+            key: "postgres-restock".into(),
+            expression: "every 10s".into(),
+        }),
+        source: "src/restock.py".into(),
+        entrypoint: "restock".into(),
+        name: Some("restock".into()),
+        policy: ActionExecutionPolicy::default(),
+    };
+    let schedule_id = factory.schedule_id(&scope, "postgres-restock");
+    let discovered = DiscoveredSchedule {
+        schedule_id: schedule_id.clone(),
+        stable_schedule_key: "postgres-restock".into(),
+        display_name: "restock".into(),
+        action_id: "restock".into(),
+        action_revision: action_revision(&action).unwrap(),
+        action,
+        expression: "every 10s".into(),
+        interval: Duration::from_secs(10),
+    };
+    assert_eq!(
+        store
+            .reconcile(&scope, std::slice::from_ref(&discovered), observed_at)
+            .unwrap()
+            .created,
+        1
+    );
+    assert_eq!(
+        store
+            .reconcile(&scope, std::slice::from_ref(&discovered), observed_at)
+            .unwrap()
+            .updated,
+        0
+    );
+    let actor = ActorRef::new("contract-actor").unwrap();
+    assert_eq!(
+        store
+            .disable(&schedule_id, &actor, observed_at)
+            .unwrap()
+            .enablement,
+        ScheduleEnablement::Disabled
+    );
+    store
+        .reconcile(&scope, std::slice::from_ref(&discovered), observed_at)
+        .unwrap();
+    assert_eq!(
+        store
+            .get_schedule(&schedule_id)
+            .unwrap()
+            .unwrap()
+            .enablement,
+        ScheduleEnablement::Disabled
+    );
+
+    let mut changed = discovered.clone();
+    changed.expression = "every 20s".into();
+    changed.interval = Duration::from_secs(20);
+    changed.action.kind = ActionKind::Schedule(ryvus_protocol::ScheduleAction {
+        key: "postgres-restock".into(),
+        expression: changed.expression.clone(),
+    });
+    changed.action_revision = action_revision(&changed.action).unwrap();
+    assert_eq!(
+        store
+            .reconcile(&scope, std::slice::from_ref(&changed), observed_at)
+            .unwrap()
+            .updated,
+        1
+    );
+    assert_eq!(store.list_revisions(&schedule_id).unwrap().len(), 2);
+    assert_eq!(
+        store
+            .reconcile(&scope, &[], observed_at)
+            .unwrap()
+            .unavailable,
+        1
+    );
+    let unavailable = store.get_schedule(&schedule_id).unwrap().unwrap();
+    assert_eq!(unavailable.availability, ScheduleAvailability::Unavailable);
+    assert_eq!(unavailable.enablement, ScheduleEnablement::Disabled);
+    assert!(store.list_due(&scope, observed_at, 10).unwrap().is_empty());
+    store
+        .reconcile(&scope, std::slice::from_ref(&changed), observed_at)
+        .unwrap();
+    let rediscovered = store.get_schedule(&schedule_id).unwrap().unwrap();
+    assert_eq!(rediscovered.availability, ScheduleAvailability::Available);
+    assert_eq!(rediscovered.enablement, ScheduleEnablement::Disabled);
+    assert_eq!(rediscovered.current_revision, 2);
+    store.enable(&schedule_id, &actor, observed_at).unwrap();
+
+    let due_at = observed_at + Duration::from_secs(20);
+    let due = store.list_due(&scope, due_at, 10).unwrap().remove(0);
+    let trigger_id = factory
+        .scheduled_trigger(&scope, &schedule_id, 2, due.scheduled_for)
+        .unwrap();
+    let execution_id = factory
+        .scheduled_execution(&scope, &schedule_id, 2, due.scheduled_for)
+        .unwrap();
+    let claim = ClaimOccurrenceRequest {
+        execution_scope_id: scope.clone(),
+        schedule_id: schedule_id.clone(),
+        schedule_version: due.schedule.version,
+        schedule_revision: 2,
+        trigger_id: trigger_id.clone(),
+        execution_id: Some(execution_id),
+        scheduled_for: due.scheduled_for,
+        observed_at: due_at,
+        owner: "contract".into(),
+        lease: Duration::from_secs(30),
+    };
+    assert!(matches!(
+        store.claim_occurrence(claim.clone()).unwrap(),
+        ClaimOccurrenceResult::Claimed(_)
+    ));
+    assert!(matches!(
+        store.claim_occurrence(claim).unwrap(),
+        ClaimOccurrenceResult::Busy
+    ));
+    assert_eq!(
+        store
+            .list_schedules(ScheduleQuery {
+                execution_scope_id: Some(scope),
+                limit: 10,
+            })
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_triggers(TriggerQuery {
+                schedule_id,
+                kind: None,
+                limit: 10,
+            })
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 fn validate_tokio_runtime_compatibility(url: &str) {
@@ -193,7 +353,7 @@ fn validate_migrations(url: &str) {
         .into_iter()
         .map(|row| row.get::<_, i64>(0))
         .collect::<Vec<_>>();
-    assert_eq!(versions, vec![1]);
+    assert_eq!(versions, vec![1, 2]);
 
     client
         .batch_execute(
@@ -800,6 +960,11 @@ fn new_execution() -> NewExecution {
             policy: ActionExecutionPolicy::default(),
         },
         action_revision: "postgres-test-revision".into(),
+        execution_scope_id: ryvus_execution::ExecutionScopeId::new("test").unwrap(),
+        action_id: "postgres".into(),
+        trigger: ryvus_execution::ExecutionTrigger::Api,
+        creation_fingerprint: "postgres-test-fingerprint".into(),
+        data_refs: ryvus_execution::ExecutionDataReferences::default(),
         request: InvocationRequest::new(json!({ "provider": "postgres" })),
         policy: ExecutionPolicy {
             timeout: Duration::from_secs(3),

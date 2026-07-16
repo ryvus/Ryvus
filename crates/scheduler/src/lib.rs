@@ -1,15 +1,26 @@
 pub mod http;
+pub mod model;
+pub mod service;
+pub mod store;
 
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use ryvus_execution::{ExecutionPersistence, ExecutionService, Executor, RuntimeResolver};
+use ryvus_execution::{
+    ActorRef, ExecutionDataReferences, ExecutionPersistence, ExecutionScopeId, ExecutionService,
+    ExecutionSubmission, ExecutionSubmissionResult, ExecutionTrigger, Executor,
+    ManualExecutionSource, RuntimeResolver, ScheduleId, ScheduleTriggerId,
+};
 use ryvus_protocol::{ActionDefinition, ActionKind, InvocationRequest, InvocationResult};
 use serde_json::json;
 use thiserror::Error;
+
+pub use model::*;
+pub use service::*;
+pub use store::*;
 
 #[derive(Debug, Error)]
 pub enum SchedulerError {
@@ -24,16 +35,37 @@ pub enum SchedulerError {
 
     #[error("schedule selector '{selector}' matched multiple schedules: {matches}")]
     AmbiguousScheduleSelector { selector: String, matches: String },
+
+    #[error("schedule store lock is poisoned")]
+    StoreLockPoisoned,
+
+    #[error("schedule '{schedule_id}' was not found")]
+    DurableScheduleNotFound { schedule_id: ScheduleId },
+
+    #[error("schedule trigger '{trigger_id}' was not found")]
+    TriggerNotFound { trigger_id: ScheduleTriggerId },
+
+    #[error("schedule state conflict: {0}")]
+    Conflict(String),
+
+    #[error("schedule store backend error: {0}")]
+    StoreBackend(String),
 }
 
 pub type SchedulerResult<T> = Result<T, SchedulerError>;
 
+#[derive(Debug, Clone)]
+pub struct ScheduleExecution {
+    pub execution_id: ryvus_protocol::ExecutionId,
+    pub result: Option<InvocationResult>,
+}
+
 pub trait ScheduleExecutor: Send + Sync + 'static {
-    fn execute_scheduled(
+    fn submit(
         &self,
         action: &ActionDefinition,
-        request: &InvocationRequest,
-    ) -> SchedulerResult<InvocationResult>;
+        submission: ExecutionSubmission,
+    ) -> SchedulerResult<ScheduleExecution>;
 }
 
 impl<RR, E, EP> ScheduleExecutor for ExecutionService<RR, E, EP>
@@ -42,20 +74,27 @@ where
     E: Executor + Send + Sync + 'static,
     EP: ExecutionPersistence + Send + Sync + 'static,
 {
-    fn execute_scheduled(
+    fn submit(
         &self,
         action: &ActionDefinition,
-        request: &InvocationRequest,
-    ) -> SchedulerResult<InvocationResult> {
-        let policy = ryvus_execution::ExecutionPolicy::from_action_policy(&action.policy).map_err(
-            |error| SchedulerError::ExecutionFailed {
-                action: action_key(action),
-                message: error.to_string(),
-            },
-        )?;
-
-        self.execute(action, request, &policy)
-            .map(|execution| execution.result.invocation_result)
+        submission: ExecutionSubmission,
+    ) -> SchedulerResult<ScheduleExecution> {
+        self.execute_submission(action, submission)
+            .map(|outcome| match outcome {
+                ExecutionSubmissionResult::Executed(record) => ScheduleExecution {
+                    execution_id: record.attempt.execution_id,
+                    result: Some(record.result.invocation_result),
+                },
+                ExecutionSubmissionResult::Existing(aggregate)
+                | ExecutionSubmissionResult::AlreadyActive(aggregate) => ScheduleExecution {
+                    execution_id: aggregate.execution_id,
+                    result: aggregate
+                        .attempts
+                        .last()
+                        .and_then(|attempt| attempt.result.as_ref())
+                        .map(|result| result.invocation_result.clone()),
+                },
+            })
             .map_err(|error| SchedulerError::ExecutionFailed {
                 action: action_key(action),
                 message: error.to_string(),
@@ -73,7 +112,7 @@ pub struct ScheduleInfo {
     pub action_key: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ScheduleInterval(Duration);
 
 impl ScheduleInterval {
@@ -117,96 +156,30 @@ impl ScheduleInterval {
 }
 
 #[derive(Debug, Clone)]
-struct ScheduledAction {
-    action: ActionDefinition,
-    expression: String,
-    interval: ScheduleInterval,
-    next_run: Instant,
-}
-
-#[derive(Debug, Clone)]
 pub struct Scheduler {
-    actions: Vec<ScheduledAction>,
+    action_count: usize,
 }
 
 impl Scheduler {
     pub fn from_actions<'a>(
         actions: impl IntoIterator<Item = &'a ActionDefinition>,
     ) -> SchedulerResult<Self> {
-        let mut scheduled = Vec::new();
-        let now = Instant::now();
+        let mut action_count = 0;
 
         for action in actions {
             let ActionKind::Schedule(schedule) = &action.kind else {
                 continue;
             };
 
-            let interval = ScheduleInterval::parse(&schedule.expression)?;
-
-            scheduled.push(ScheduledAction {
-                action: action.clone(),
-                expression: schedule.expression.clone(),
-                interval,
-                next_run: now + interval.duration(),
-            });
+            ScheduleInterval::parse(&schedule.expression)?;
+            action_count += 1;
         }
 
-        Ok(Self { actions: scheduled })
+        Ok(Self { action_count })
     }
 
     pub fn action_count(&self) -> usize {
-        self.actions.len()
-    }
-
-    pub async fn run<E>(mut self, executor: Arc<E>) -> SchedulerResult<()>
-    where
-        E: ScheduleExecutor,
-    {
-        if self.actions.is_empty() {
-            std::future::pending::<()>().await;
-            return Ok(());
-        }
-
-        loop {
-            let next_run = self
-                .actions
-                .iter()
-                .map(|action| action.next_run)
-                .min()
-                .expect("scheduler should have actions");
-
-            tokio::time::sleep_until(tokio::time::Instant::from_std(next_run)).await;
-
-            let now = Instant::now();
-            let due = self
-                .actions
-                .iter_mut()
-                .filter(|action| action.next_run <= now)
-                .map(|action| {
-                    action.next_run += action.interval.duration();
-                    (action.action.clone(), action.expression.clone())
-                })
-                .collect::<Vec<_>>();
-
-            for (action, expression) in due {
-                let executor = Arc::clone(&executor);
-                let request = schedule_request(&expression);
-                let action_name = action_key(&action);
-
-                let result = tokio::task::spawn_blocking(move || {
-                    executor.execute_scheduled(&action, &request)
-                })
-                .await;
-
-                match result {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(error)) => eprintln!("{error}"),
-                    Err(error) => {
-                        eprintln!("scheduled execution failed for {action_name}: {error}")
-                    }
-                }
-            }
-        }
+        self.action_count
     }
 }
 
@@ -270,7 +243,7 @@ pub fn run_schedule_once<'a, E>(
     actions: impl IntoIterator<Item = &'a ActionDefinition>,
     selector: &str,
     executor: Arc<E>,
-) -> SchedulerResult<InvocationResult>
+) -> SchedulerResult<ScheduleExecution>
 where
     E: ScheduleExecutor,
 {
@@ -280,7 +253,31 @@ where
     };
     let request = manual_schedule_request(&schedule.expression);
 
-    executor.execute_scheduled(&action, &request)
+    let policy =
+        ryvus_execution::ExecutionPolicy::from_action_policy(&action.policy).map_err(|error| {
+            SchedulerError::ExecutionFailed {
+                action: action_key(&action),
+                message: error.to_string(),
+            }
+        })?;
+    let scope = ExecutionScopeId::new("local")
+        .map_err(|error| SchedulerError::StoreBackend(error.to_string()))?;
+    let actor = ActorRef::new("local-user")
+        .map_err(|error| SchedulerError::StoreBackend(error.to_string()))?;
+    executor.submit(
+        &action,
+        ExecutionSubmission {
+            scope,
+            action_id: action_key(&action),
+            trigger: ExecutionTrigger::Manual {
+                actor,
+                source: ManualExecutionSource::Direct,
+            },
+            request,
+            policy,
+            data_refs: ExecutionDataReferences::default(),
+        },
+    )
 }
 
 pub fn validate_schedule_actions<'a>(
@@ -330,14 +327,6 @@ fn resolve_schedule<'a>(
     }
 }
 
-fn schedule_request(expression: &str) -> InvocationRequest {
-    InvocationRequest::new(json!({
-        "trigger": "schedule",
-        "scheduled_at": unix_timestamp_millis(),
-        "expression": expression,
-    }))
-}
-
 fn manual_schedule_request(expression: &str) -> InvocationRequest {
     InvocationRequest::new(json!({
         "trigger": "schedule",
@@ -383,8 +372,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        run_schedule_once, schedule_infos, validate_schedule_actions, ScheduleExecutor,
-        ScheduleInterval, Scheduler, SchedulerError, SchedulerResult,
+        run_schedule_once, schedule_infos, validate_schedule_actions, ExecutionSubmission,
+        ScheduleExecution, ScheduleExecutor, ScheduleInterval, Scheduler, SchedulerError,
+        SchedulerResult,
     };
 
     #[test]
@@ -509,7 +499,10 @@ mod tests {
         let result = run_schedule_once([&action], "restock", Arc::clone(&executor))
             .expect("schedule should run");
 
-        assert_eq!(result.output, Some(json!({ "ok": true })));
+        assert_eq!(
+            result.result.and_then(|result| result.output),
+            Some(json!({ "ok": true }))
+        );
 
         let requests = executor.requests.lock().expect("requests should lock");
         assert_eq!(requests[0].event["trigger"], json!("schedule"));
@@ -537,6 +530,7 @@ mod tests {
         ActionDefinition {
             runtime: RuntimeKind::Python,
             kind: ActionKind::Schedule(ScheduleAction {
+                key: "restock_report:default".to_string(),
                 expression: expression.to_string(),
             }),
             source: "src/schedule.py".into(),
@@ -555,6 +549,7 @@ mod tests {
         ActionDefinition {
             runtime: RuntimeKind::Python,
             kind: ActionKind::Schedule(ScheduleAction {
+                key: "restock_report:default".to_string(),
                 expression: expression.to_string(),
             }),
             source: source.into(),
@@ -590,17 +585,21 @@ mod tests {
     }
 
     impl ScheduleExecutor for RecordingScheduleExecutor {
-        fn execute_scheduled(
+        fn submit(
             &self,
             _action: &ActionDefinition,
-            request: &InvocationRequest,
-        ) -> SchedulerResult<InvocationResult> {
+            submission: ExecutionSubmission,
+        ) -> SchedulerResult<ScheduleExecution> {
+            let request = submission.request;
             self.requests
                 .lock()
                 .expect("requests should lock")
                 .push(request.clone());
 
-            Ok(InvocationResult::success(request, json!({ "ok": true })))
+            Ok(ScheduleExecution {
+                execution_id: request.execution_id.clone(),
+                result: Some(InvocationResult::success(&request, json!({ "ok": true }))),
+            })
         }
     }
 }

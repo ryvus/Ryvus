@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -8,7 +9,7 @@ use crate::{
     commands::{artifacts, project},
     error::{CliError, Result},
 };
-use ryvus_protocol::{ActionDefinition, ActionManifest};
+use ryvus_protocol::{ActionDefinition, ActionKind, ActionManifest};
 
 pub fn run() -> Result<()> {
     let manifest = discover_project(".")?;
@@ -40,8 +41,30 @@ pub fn discover_project(project_root: impl AsRef<Path>) -> Result<ActionManifest
 
     discover_python_actions(project_root, &src_dir, &mut actions)?;
     discover_node_actions(project_root, &src_dir, &mut actions)?;
+    validate_schedule_keys(&actions)?;
 
     Ok(ActionManifest { actions })
+}
+
+fn validate_schedule_keys(actions: &[ActionDefinition]) -> Result<()> {
+    let mut keys = HashSet::new();
+    for action in actions {
+        let ActionKind::Schedule(schedule) = &action.kind else {
+            continue;
+        };
+        if schedule.key.trim().is_empty() {
+            return Err(CliError::Validation(
+                "scheduled action key must not be empty".to_string(),
+            ));
+        }
+        if !keys.insert(schedule.key.as_str()) {
+            return Err(CliError::Validation(format!(
+                "duplicate scheduled action key '{}'",
+                schedule.key
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn discover_python_actions(

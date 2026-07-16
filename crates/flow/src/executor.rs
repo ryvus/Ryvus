@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use ryvus_execution::{
-    ExecutionPersistence, ExecutionPolicy, ExecutionRecord, ExecutionService, Executor,
-    RuntimeResolver,
+    ExecutionPersistence, ExecutionPolicy, ExecutionRecord, ExecutionService, ExecutionTrigger,
+    Executor, RuntimeResolver,
 };
 use ryvus_protocol::{
     ActionDefinition, ExecutionAttempt, ExecutionId, InvocationContext, InvocationEvent,
@@ -27,6 +27,8 @@ pub trait FlowStepExecutor: Send + Sync + 'static {
         action: &ActionDefinition,
         request: &InvocationRequest,
         policy: &ExecutionPolicy,
+        flow_run_id: &str,
+        step_key: &str,
     ) -> FlowResult<ExecutionRecord>;
 
     fn cancel_flow_step(&self, _execution_id: &ExecutionId) -> FlowResult<bool> {
@@ -45,12 +47,22 @@ where
         action: &ActionDefinition,
         request: &InvocationRequest,
         policy: &ExecutionPolicy,
+        flow_run_id: &str,
+        step_key: &str,
     ) -> FlowResult<ExecutionRecord> {
-        self.execute(action, request, policy)
-            .map_err(|error| FlowError::ExecutionFailed {
-                action: action_key(action),
-                message: error.to_string(),
-            })
+        self.execute_triggered(
+            action,
+            request,
+            policy,
+            ExecutionTrigger::Flow {
+                flow_run_id: flow_run_id.to_string(),
+                step_key: step_key.to_string(),
+            },
+        )
+        .map_err(|error| FlowError::ExecutionFailed {
+            action: action_key(action),
+            message: error.to_string(),
+        })
     }
 
     fn cancel_flow_step(&self, execution_id: &ExecutionId) -> FlowResult<bool> {
@@ -274,9 +286,7 @@ where
             step_key,
             failed_step.input.clone(),
             context,
-            &self.actions,
-            self.store.as_ref(),
-            self.executor.as_ref(),
+            (&self.actions, self.store.as_ref(), self.executor.as_ref()),
         )?;
 
         self.store.get(id)
@@ -312,9 +322,7 @@ where
         &start_step,
         input,
         context,
-        actions,
-        store,
-        executor,
+        (actions, store, executor),
     )
 }
 
@@ -324,14 +332,13 @@ fn run_flow_steps_from<S, E>(
     start_step: &str,
     input: Value,
     mut context: FlowContext,
-    actions: &[ActionDefinition],
-    store: &S,
-    executor: &E,
+    runtime: (&[ActionDefinition], &S, &E),
 ) -> FlowResult<()>
 where
     S: FlowStateStore,
     E: FlowStepExecutor,
 {
+    let (actions, store, executor) = runtime;
     store.update_status(run_id, FlowExecutionStatus::Running, Value::Null, None)?;
     let steps = flow
         .steps
@@ -372,30 +379,31 @@ where
             }
         })?;
         store.set_active_execution(run_id, Some(request.execution_id.clone()))?;
-        let record = match executor.execute_flow_step(action, &request, &policy) {
-            Ok(record) => record,
-            Err(_error) if store.is_cancelled(run_id)? => {
-                store.set_active_execution(run_id, None)?;
-                store.push_step(
-                    run_id,
-                    FlowStepExecution {
-                        key: current.key.clone(),
-                        action: current.action.clone(),
-                        status: FlowStepStatus::Cancelled,
-                        attempts: 1,
-                        execution_id: Some(request.execution_id),
-                        attempt_id: Some(request.attempt_id),
-                        attempt_number: Some(request.attempt_number),
-                        input: step_input,
-                        output: Value::Null,
-                        error: None,
-                        logs: Vec::new(),
-                    },
-                )?;
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        };
+        let record =
+            match executor.execute_flow_step(action, &request, &policy, run_id, &current.key) {
+                Ok(record) => record,
+                Err(_error) if store.is_cancelled(run_id)? => {
+                    store.set_active_execution(run_id, None)?;
+                    store.push_step(
+                        run_id,
+                        FlowStepExecution {
+                            key: current.key.clone(),
+                            action: current.action.clone(),
+                            status: FlowStepStatus::Cancelled,
+                            attempts: 1,
+                            execution_id: Some(request.execution_id),
+                            attempt_id: Some(request.attempt_id),
+                            attempt_number: Some(request.attempt_number),
+                            input: step_input,
+                            output: Value::Null,
+                            error: None,
+                            logs: Vec::new(),
+                        },
+                    )?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
         store.set_active_execution(run_id, None)?;
         if store.is_cancelled(run_id)? {
             store.push_step(
@@ -878,6 +886,8 @@ mod tests {
             action: &ActionDefinition,
             request: &InvocationRequest,
             _policy: &ryvus_execution::ExecutionPolicy,
+            _flow_run_id: &str,
+            _step_key: &str,
         ) -> FlowResult<ExecutionRecord> {
             self.requests
                 .lock()
@@ -958,6 +968,8 @@ mod tests {
             action: &ActionDefinition,
             request: &InvocationRequest,
             _policy: &ryvus_execution::ExecutionPolicy,
+            _flow_run_id: &str,
+            _step_key: &str,
         ) -> FlowResult<ExecutionRecord> {
             if action.entrypoint == "decline_charge" {
                 let mut attempts = self.charge_attempts.lock().unwrap();

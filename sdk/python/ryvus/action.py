@@ -156,6 +156,7 @@ def scheduled_action(func: F) -> F:
 def scheduled_action(
     *,
     every: str = "60s",
+    key: Optional[str] = None,
     name: Optional[str] = None,
     timeout: Optional[str] = None,
     retry: Optional[dict[str, Any]] = None,
@@ -167,6 +168,7 @@ def scheduled_action(
     func: Optional[F] = None,
     *,
     every: str = "60s",
+    key: Optional[str] = None,
     name: Optional[str] = None,
     timeout: Optional[str] = None,
     retry: Optional[dict[str, Any]] = None,
@@ -175,6 +177,7 @@ def scheduled_action(
         metadata = {
             "type": "schedule",
             "name": name or inner.__name__,
+            "key": key or f"{name or inner.__name__}:default",
             "expression": f"every {every}" if not every.startswith("every ") else every,
         }
         policy = optional_policy(timeout, retry)
