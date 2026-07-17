@@ -1657,6 +1657,7 @@ name = "ryvus-scheduler"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "mockall",
  "ryvus-execution",
  "ryvus-protocol",
  "serde",

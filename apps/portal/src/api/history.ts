@@ -9,6 +9,11 @@ export type ScheduleRecord = {
   last_scheduled_trigger_at?: { secs_since_epoch: number; nanos_since_epoch: number } | string | null;
 };
 
+export type Page<T> = {
+  items: T[];
+  next_cursor?: string | null;
+};
+
 export type ScheduleTrigger = {
   trigger_id: string;
   schedule_id: string;
@@ -29,7 +34,13 @@ export type ExecutionAggregate = {
   execution_id: string;
   action_id: string;
   action_revision: string;
-  trigger: { type: string; [key: string]: unknown };
+  trigger: {
+    type: string;
+    schedule_id?: string;
+    trigger_id?: string;
+    source?: { type: string; schedule_id?: string; trigger_id?: string };
+    [key: string]: unknown;
+  };
   state: string;
   created_at: unknown;
   updated_at: unknown;
@@ -39,7 +50,7 @@ export type ExecutionAggregate = {
     result?: {
       invocation_result: { output?: unknown; error?: unknown };
       events: Array<{ type?: string; message?: string; level?: string }>;
-      duration: { secs: number; nanos: number } | unknown;
+      duration: { secs: number; nanos: number };
     } | null;
   }>;
   terminal_state?: { state: string } | null;
@@ -55,21 +66,33 @@ export type RunScheduleResponse = {
 };
 
 export const historyApi = {
-  schedules: () => requestJson<ScheduleRecord[]>("/internal/scheduler/schedules"),
+  schedules: (cursor?: string, limit = 50) => {
+    const query = pageParams(cursor, limit);
+    return requestJson<Page<ScheduleRecord>>(`/internal/scheduler/schedules?${query}`);
+  },
   schedule: (id: string) => requestJson<ScheduleRecord>(`/internal/scheduler/schedules/${encodeURIComponent(id)}`),
-  triggers: (id: string) => requestJson<ScheduleTrigger[]>(`/internal/scheduler/schedules/${encodeURIComponent(id)}/triggers`),
+  triggers: (id: string, kind?: "scheduled" | "manual", cursor?: string, limit = 50) => {
+    const query = pageParams(cursor, limit);
+    if (kind) query.set("kind", kind);
+    return requestJson<Page<ScheduleTrigger>>(`/internal/scheduler/schedules/${encodeURIComponent(id)}/triggers?${query}`);
+  },
   run: (id: string) => requestJson<RunScheduleResponse>(`/internal/scheduler/schedules/${encodeURIComponent(id)}/run`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }),
   enable: (id: string) => requestJson<ScheduleRecord>(`/internal/scheduler/schedules/${encodeURIComponent(id)}/enable`, { method: "POST" }),
   disable: (id: string) => requestJson<ScheduleRecord>(`/internal/scheduler/schedules/${encodeURIComponent(id)}/disable`, { method: "POST" }),
-  executions: (actionId?: string, actionRevision?: string) => {
-    const query = new URLSearchParams();
+  executions: (actionId?: string, actionRevision?: string, cursor?: string, limit = 50) => {
+    const query = pageParams(cursor, limit);
     if (actionId) query.set("action_id", actionId);
     if (actionRevision) query.set("action_revision", actionRevision);
-    const suffix = query.size ? `?${query}` : "";
-    return requestJson<ExecutionAggregate[]>(`/internal/executions${suffix}`);
+    return requestJson<Page<ExecutionAggregate>>(`/internal/executions?${query}`);
   },
   execution: (id: string) => requestJson<ExecutionAggregate>(`/internal/executions/${encodeURIComponent(id)}`),
 };
+
+function pageParams(cursor: string | undefined, limit: number) {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (cursor) query.set("cursor", cursor);
+  return query;
+}
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);

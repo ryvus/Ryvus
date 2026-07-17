@@ -114,9 +114,7 @@ impl AuthorizationService {
             self.execute_authorizer(authorizer, &request.authorizer_name, authorizer_event)?;
 
         if let AuthorizationDecision::Allow { .. } = &decision {
-            if let Some((key, ttl)) =
-                cache_key.and_then(|key| authorizer_cache_ttl(authorizer).map(|ttl| (key, ttl)))
-            {
+            if let Some((key, ttl)) = cache_key.zip(authorizer_cache_ttl(authorizer)) {
                 self.cache.put(key, decision.clone(), ttl);
             }
         }

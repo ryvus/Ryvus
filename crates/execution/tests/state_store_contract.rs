@@ -3,8 +3,8 @@ use std::time::{Duration, SystemTime};
 use ryvus_execution::{
     execution_creation_fingerprint, AttemptOwnership, AttemptRecord, CreateExecutionResult,
     ExecutionHistoryQuery, ExecutionMutation, ExecutionPolicy, ExecutionResult, ExecutionState,
-    ExecutionStateStore, MemoryExecutionStateStore, NewExecution, RetryPolicy, TerminalState,
-    TransitionResult,
+    ExecutionStateStore, MemoryExecutionStateStore, NewExecution, RetryPolicy, StateStoreError,
+    TerminalState, TransitionResult,
 };
 use ryvus_protocol::{
     ActionDefinition, ActionExecutionPolicy, ActionKind, ApiAction, AttemptId, AttemptOutcome,
@@ -56,6 +56,7 @@ fn new_execution() -> NewExecution {
 fn memory_store_idempotently_creates_and_lists_execution_history() {
     let store = MemoryExecutionStateStore::default();
     let mut execution = new_execution();
+    execution.created_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
     execution.creation_fingerprint = execution_creation_fingerprint(
         &execution.execution_scope_id,
         &execution.action_id,
@@ -76,16 +77,74 @@ fn memory_store_idempotently_creates_and_lists_execution_history() {
         CreateExecutionResult::Existing(_)
     ));
 
-    let history = store
+    let mut second_execution = execution.clone();
+    second_execution.request = InvocationRequest::new(json!({ "message": "second" }));
+    second_execution.created_at = SystemTime::UNIX_EPOCH + Duration::from_secs(2);
+    second_execution.creation_fingerprint = execution_creation_fingerprint(
+        &second_execution.execution_scope_id,
+        &second_execution.action_id,
+        &second_execution.action_revision,
+        &second_execution.trigger,
+        &second_execution.request,
+        &second_execution.policy,
+        &second_execution.data_refs,
+    )
+    .unwrap();
+    store.create(second_execution.clone()).unwrap();
+
+    let mut third_execution = execution.clone();
+    third_execution.request = InvocationRequest::new(json!({ "message": "third" }));
+    third_execution.created_at = SystemTime::UNIX_EPOCH + Duration::from_secs(3);
+    third_execution.creation_fingerprint = execution_creation_fingerprint(
+        &third_execution.execution_scope_id,
+        &third_execution.action_id,
+        &third_execution.action_revision,
+        &third_execution.trigger,
+        &third_execution.request,
+        &third_execution.policy,
+        &third_execution.data_refs,
+    )
+    .unwrap();
+    store.create(third_execution.clone()).unwrap();
+
+    let first = store
         .list_history(ExecutionHistoryQuery {
             execution_scope_id: execution.execution_scope_id.clone(),
             action_id: Some(execution.action_id.clone()),
             action_revision: Some(execution.action_revision.clone()),
-            limit: 10,
+            cursor: None,
+            limit: 2,
         })
         .unwrap();
-    assert_eq!(history.len(), 1);
-    assert_eq!(history[0].trigger, execution.trigger);
+    assert_eq!(first.items.len(), 2);
+    assert!(first.next_cursor.is_some());
+
+    let second = store
+        .list_history(ExecutionHistoryQuery {
+            execution_scope_id: execution.execution_scope_id.clone(),
+            action_id: Some(execution.action_id.clone()),
+            action_revision: Some(execution.action_revision.clone()),
+            cursor: first.next_cursor,
+            limit: 2,
+        })
+        .unwrap();
+    assert_eq!(second.items.len(), 1);
+    assert!(second.next_cursor.is_none());
+
+    let ids = first
+        .items
+        .into_iter()
+        .chain(second.items)
+        .map(|aggregate| aggregate.execution_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec![
+            third_execution.request.execution_id,
+            second_execution.request.execution_id,
+            execution.request.execution_id.clone(),
+        ]
+    );
 
     execution.action_id = "different-action".into();
     execution.creation_fingerprint = "different-fingerprint".into();
@@ -93,6 +152,68 @@ fn memory_store_idempotently_creates_and_lists_execution_history() {
         store.create_idempotent(execution),
         Err(ryvus_execution::StateStoreError::IdentityConflict { .. })
     ));
+}
+
+#[test]
+fn memory_history_uses_id_tiebreaker_and_rejects_filtered_cursor() {
+    let store = MemoryExecutionStateStore::default();
+    let created_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+    let mut executions = ["first", "second"].map(|message| {
+        let mut execution = new_execution();
+        execution.request = InvocationRequest::new(json!({ "message": message }));
+        execution.created_at = created_at;
+        execution.creation_fingerprint = execution_creation_fingerprint(
+            &execution.execution_scope_id,
+            &execution.action_id,
+            &execution.action_revision,
+            &execution.trigger,
+            &execution.request,
+            &execution.policy,
+            &execution.data_refs,
+        )
+        .unwrap();
+        store.create(execution.clone()).unwrap();
+        execution
+    });
+    executions.sort_by(|left, right| {
+        right
+            .request
+            .execution_id
+            .as_ref()
+            .cmp(left.request.execution_id.as_ref())
+    });
+
+    let page = store
+        .list_history(ExecutionHistoryQuery {
+            execution_scope_id: executions[0].execution_scope_id.clone(),
+            action_id: Some(executions[0].action_id.clone()),
+            action_revision: Some(executions[0].action_revision.clone()),
+            cursor: None,
+            limit: 10,
+        })
+        .unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|execution| execution.execution_id.clone())
+            .collect::<Vec<_>>(),
+        executions
+            .iter()
+            .map(|execution| execution.request.execution_id.clone())
+            .collect::<Vec<_>>()
+    );
+
+    let cursor = executions[0].request.execution_id.clone();
+    assert_eq!(
+        store.list_history(ExecutionHistoryQuery {
+            execution_scope_id: executions[0].execution_scope_id.clone(),
+            action_id: Some("different-action".into()),
+            action_revision: None,
+            cursor: Some(cursor.clone()),
+            limit: 10,
+        }),
+        Err(StateStoreError::InvalidHistoryCursor { cursor })
+    );
 }
 
 #[test]

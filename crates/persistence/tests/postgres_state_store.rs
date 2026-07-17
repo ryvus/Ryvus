@@ -10,7 +10,7 @@ use ryvus_execution::{
     action_revision, ActorRef, AttemptOwnership, AttemptRecord, ExecutionAggregate,
     ExecutionIdentityFactory, ExecutionMutation, ExecutionPolicy, ExecutionResult,
     ExecutionScopeId, ExecutionState, ExecutionStateStore, MemoryExecutionStateStore, NewExecution,
-    RetryPolicy, StateStoreError, TerminalState, TransitionResult,
+    RetryPolicy, ScheduleId, StateStoreError, TerminalState, TransitionResult,
 };
 use ryvus_persistence::{migrate, PostgresExecutionStateStore, PostgresScheduleStore};
 use ryvus_protocol::{
@@ -19,8 +19,10 @@ use ryvus_protocol::{
     InvocationResult, LogEvent, LogLevel, RuntimeHostId, RuntimeKind, RuntimeSessionId, WorkerId,
 };
 use ryvus_scheduler::{
-    ClaimOccurrenceRequest, ClaimOccurrenceResult, DiscoveredSchedule, MemoryScheduleStore,
-    ScheduleAvailability, ScheduleEnablement, ScheduleQuery, ScheduleStore, TriggerQuery,
+    ClaimOccurrenceRequest, ClaimOccurrenceResult, DiscoveredSchedule, ManualTriggerRequest,
+    ManualTriggerResult, MemoryScheduleStore, ScheduleAvailability, ScheduleEnablement,
+    ScheduleOperationalEventKind, ScheduleQuery, ScheduleStore, ScheduleTriggerKind,
+    ScheduleTriggerStatus, SchedulerError, TriggerFailure, TriggerQuery,
 };
 use serde_json::json;
 use url::Url;
@@ -136,6 +138,15 @@ fn postgres_integration_suite() {
         let store = PostgresScheduleStore::connect(db.url()).unwrap();
         run_schedule_provider_contract(&store);
     }
+
+    eprintln!("phase: schedule concurrency");
+    validate_schedule_concurrency(db.url());
+
+    eprintln!("phase: schedule restart");
+    validate_schedule_restart(db.url());
+
+    eprintln!("phase: schedule rollback");
+    validate_schedule_rollback(db.url());
 
     eprintln!("phase: Tokio runtime compatibility");
     validate_tokio_runtime_compatibility(db.url());
@@ -280,9 +291,11 @@ fn run_schedule_provider_contract(store: &dyn ScheduleStore) {
         store
             .list_schedules(ScheduleQuery {
                 execution_scope_id: Some(scope),
+                cursor: None,
                 limit: 10,
             })
             .unwrap()
+            .items
             .len(),
         1
     );
@@ -291,12 +304,967 @@ fn run_schedule_provider_contract(store: &dyn ScheduleStore) {
             .list_triggers(TriggerQuery {
                 schedule_id,
                 kind: None,
+                cursor: None,
                 limit: 10,
             })
             .unwrap()
+            .items
             .len(),
         1
     );
+
+    validate_schedule_definition_contract(store);
+    validate_schedule_pagination_contract(store);
+}
+
+fn validate_schedule_definition_contract(store: &dyn ScheduleStore) {
+    let factory = ExecutionIdentityFactory;
+    let scope = unique_scope("schedule-definition-contract");
+    let observed_at = SystemTime::now();
+    let schedule = discovered_schedule(&factory, &scope, "definition", "every 10s", 10);
+    store
+        .reconcile(&scope, std::slice::from_ref(&schedule), observed_at)
+        .unwrap();
+
+    let mut renamed = schedule.clone();
+    renamed.display_name = "Renamed definition".into();
+    store
+        .reconcile(
+            &scope,
+            std::slice::from_ref(&renamed),
+            observed_at + Duration::from_secs(1),
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .get_schedule(&schedule.schedule_id)
+            .unwrap()
+            .unwrap()
+            .current_revision,
+        1
+    );
+
+    let changed = changed_schedule(renamed, "every 20s", 20);
+    assert_eq!(
+        store
+            .reconcile(
+                &scope,
+                std::slice::from_ref(&changed),
+                observed_at + Duration::from_secs(2),
+            )
+            .unwrap()
+            .updated,
+        1
+    );
+    assert_eq!(
+        store
+            .reconcile(
+                &scope,
+                std::slice::from_ref(&changed),
+                observed_at + Duration::from_secs(3),
+            )
+            .unwrap()
+            .updated,
+        0
+    );
+    assert_eq!(
+        store.list_revisions(&schedule.schedule_id).unwrap().len(),
+        2
+    );
+
+    let actor = ActorRef::new("contract-actor").unwrap();
+    store
+        .disable(
+            &schedule.schedule_id,
+            &actor,
+            observed_at + Duration::from_secs(4),
+        )
+        .unwrap();
+    store
+        .reconcile(&scope, &[], observed_at + Duration::from_secs(5))
+        .unwrap();
+    store
+        .reconcile(
+            &scope,
+            std::slice::from_ref(&changed),
+            observed_at + Duration::from_secs(6),
+        )
+        .unwrap();
+    let rediscovered = store.get_schedule(&schedule.schedule_id).unwrap().unwrap();
+    assert_eq!(rediscovered.availability, ScheduleAvailability::Available);
+    assert_eq!(rediscovered.enablement, ScheduleEnablement::Disabled);
+    assert!(store
+        .list_triggers(TriggerQuery {
+            schedule_id: schedule.schedule_id.clone(),
+            kind: None,
+            cursor: None,
+            limit: 10,
+        })
+        .unwrap()
+        .items
+        .is_empty());
+
+    let enabled_at = observed_at + Duration::from_secs(60);
+    let enabled = store
+        .enable(&schedule.schedule_id, &actor, enabled_at)
+        .unwrap();
+    assert_eq!(enabled.enablement, ScheduleEnablement::Enabled);
+    assert_eq!(
+        enabled.next_trigger_at,
+        Some(enabled_at + Duration::from_secs(20))
+    );
+    let events = store
+        .list_operational_events(&schedule.schedule_id, 10)
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].kind, ScheduleOperationalEventKind::Enabled);
+    assert_eq!(events[1].kind, ScheduleOperationalEventKind::Disabled);
+
+    let request = manual_request(
+        &factory,
+        &scope,
+        &schedule.schedule_id,
+        enabled_at,
+        Some("definition-key"),
+        "same-input",
+    );
+    assert!(matches!(
+        store.create_manual_trigger(request.clone()).unwrap(),
+        ManualTriggerResult::Created(_)
+    ));
+    let matching = ManualTriggerRequest {
+        trigger_id: factory.random_trigger(),
+        execution_id: factory.random_execution(),
+        ..request.clone()
+    };
+    assert!(matches!(
+        store.create_manual_trigger(matching).unwrap(),
+        ManualTriggerResult::Existing(_)
+    ));
+    let conflicting = ManualTriggerRequest {
+        trigger_id: factory.random_trigger(),
+        execution_id: factory.random_execution(),
+        immutable_request_fingerprint: "different-input".into(),
+        ..request
+    };
+    assert!(matches!(
+        store.create_manual_trigger(conflicting),
+        Err(SchedulerError::Conflict(_))
+    ));
+
+    let due_at = enabled.next_trigger_at.unwrap();
+    let due = store.list_due(&scope, due_at, 10).unwrap().remove(0);
+    let trigger_id = factory
+        .scheduled_trigger(
+            &scope,
+            &schedule.schedule_id,
+            due.schedule.current_revision,
+            due.scheduled_for,
+        )
+        .unwrap();
+    let execution_id = factory
+        .scheduled_execution(
+            &scope,
+            &schedule.schedule_id,
+            due.schedule.current_revision,
+            due.scheduled_for,
+        )
+        .unwrap();
+    let ClaimOccurrenceResult::Claimed(claimed) = store
+        .claim_occurrence(ClaimOccurrenceRequest {
+            execution_scope_id: scope,
+            schedule_id: schedule.schedule_id,
+            schedule_version: due.schedule.version,
+            schedule_revision: due.schedule.current_revision,
+            trigger_id: trigger_id.clone(),
+            execution_id: Some(execution_id.clone()),
+            scheduled_for: due.scheduled_for,
+            observed_at: due_at,
+            owner: "contract".into(),
+            lease: Duration::from_secs(30),
+        })
+        .unwrap()
+    else {
+        panic!("occurrence should be claimed")
+    };
+    let missed = store.miss_trigger(&trigger_id, claimed.version).unwrap();
+    assert!(matches!(
+        store.fail_trigger(
+            &trigger_id,
+            TriggerFailure {
+                code: "failed".into(),
+                summary: "failed".into(),
+            },
+            missed.version,
+        ),
+        Err(SchedulerError::Conflict(_))
+    ));
+    assert!(matches!(
+        store.link_execution(&trigger_id, &execution_id, missed.version),
+        Err(SchedulerError::Conflict(_))
+    ));
+    assert_eq!(
+        store.get_trigger(&trigger_id).unwrap().unwrap().status,
+        ScheduleTriggerStatus::Missed
+    );
+}
+
+fn validate_schedule_pagination_contract(store: &dyn ScheduleStore) {
+    let factory = ExecutionIdentityFactory;
+    let scope = unique_scope("schedule-pagination-contract");
+    let observed_at = SystemTime::now();
+    let schedules = ["charlie", "alpha", "bravo"]
+        .map(|key| discovered_schedule(&factory, &scope, key, "every 10s", 10));
+    store.reconcile(&scope, &schedules, observed_at).unwrap();
+
+    let other_scope = unique_scope("schedule-pagination-other");
+    let other = discovered_schedule(&factory, &other_scope, "alpha", "every 10s", 10);
+    store
+        .reconcile(&other_scope, std::slice::from_ref(&other), observed_at)
+        .unwrap();
+    assert!(matches!(
+        store.list_schedules(ScheduleQuery {
+            execution_scope_id: Some(scope.clone()),
+            cursor: Some(other.schedule_id),
+            limit: 10,
+        }),
+        Err(SchedulerError::InvalidCursor(_))
+    ));
+
+    let first = store
+        .list_schedules(ScheduleQuery {
+            execution_scope_id: Some(scope.clone()),
+            cursor: None,
+            limit: 2,
+        })
+        .unwrap();
+    assert_eq!(
+        first
+            .items
+            .iter()
+            .map(|schedule| schedule.stable_schedule_key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "bravo"]
+    );
+    let second = store
+        .list_schedules(ScheduleQuery {
+            execution_scope_id: Some(scope.clone()),
+            cursor: first.next_cursor,
+            limit: 2,
+        })
+        .unwrap();
+    assert_eq!(
+        second
+            .items
+            .iter()
+            .map(|schedule| schedule.stable_schedule_key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["charlie"]
+    );
+    assert!(second.next_cursor.is_none());
+
+    let schedule = &schedules[0];
+    let due_at = observed_at + Duration::from_secs(10);
+    let due = store
+        .list_due(&scope, due_at, 10)
+        .unwrap()
+        .into_iter()
+        .find(|due| due.schedule.schedule_id == schedule.schedule_id)
+        .unwrap();
+    let scheduled_trigger_id = factory
+        .scheduled_trigger(&scope, &schedule.schedule_id, 1, due.scheduled_for)
+        .unwrap();
+    store
+        .claim_occurrence(ClaimOccurrenceRequest {
+            execution_scope_id: scope.clone(),
+            schedule_id: schedule.schedule_id.clone(),
+            schedule_version: due.schedule.version,
+            schedule_revision: 1,
+            trigger_id: scheduled_trigger_id.clone(),
+            execution_id: None,
+            scheduled_for: due.scheduled_for,
+            observed_at: due_at,
+            owner: "contract".into(),
+            lease: Duration::from_secs(30),
+        })
+        .unwrap();
+    let manual_at = observed_at + Duration::from_secs(30);
+    let manual_ids = [0, 1].map(|index| {
+        let request = manual_request(
+            &factory,
+            &scope,
+            &schedule.schedule_id,
+            manual_at,
+            None,
+            &format!("pagination-{index}"),
+        );
+        let trigger_id = request.trigger_id.clone();
+        store.create_manual_trigger(request).unwrap();
+        trigger_id
+    });
+
+    let first = store
+        .list_triggers(TriggerQuery {
+            schedule_id: schedule.schedule_id.clone(),
+            kind: None,
+            cursor: None,
+            limit: 2,
+        })
+        .unwrap();
+    let second = store
+        .list_triggers(TriggerQuery {
+            schedule_id: schedule.schedule_id.clone(),
+            kind: None,
+            cursor: first.next_cursor.clone(),
+            limit: 2,
+        })
+        .unwrap();
+    assert_eq!(first.items.len(), 2);
+    assert_eq!(second.items.len(), 1);
+    assert!(second.next_cursor.is_none());
+    let mut expected_manual_ids = manual_ids.to_vec();
+    expected_manual_ids.sort_by(|left, right| right.as_ref().cmp(left.as_ref()));
+    assert_eq!(
+        first
+            .items
+            .iter()
+            .map(|trigger| trigger.trigger_id.clone())
+            .collect::<Vec<_>>(),
+        expected_manual_ids
+    );
+    assert_eq!(second.items[0].trigger_id, scheduled_trigger_id);
+
+    let manual_page = store
+        .list_triggers(TriggerQuery {
+            schedule_id: schedule.schedule_id.clone(),
+            kind: Some(ScheduleTriggerKind::Manual),
+            cursor: None,
+            limit: 1,
+        })
+        .unwrap();
+    let last_manual_page = store
+        .list_triggers(TriggerQuery {
+            schedule_id: schedule.schedule_id.clone(),
+            kind: Some(ScheduleTriggerKind::Manual),
+            cursor: manual_page.next_cursor,
+            limit: 1,
+        })
+        .unwrap();
+    assert_eq!(manual_page.items.len(), 1);
+    assert_eq!(last_manual_page.items.len(), 1);
+    assert!(last_manual_page.next_cursor.is_none());
+    assert!(matches!(
+        store.list_triggers(TriggerQuery {
+            schedule_id: schedule.schedule_id.clone(),
+            kind: Some(ScheduleTriggerKind::Manual),
+            cursor: Some(scheduled_trigger_id),
+            limit: 10,
+        }),
+        Err(SchedulerError::InvalidCursor(_))
+    ));
+}
+
+fn validate_schedule_concurrency(url: &str) {
+    let factory = ExecutionIdentityFactory;
+    let scope = unique_scope("schedule-concurrency");
+    let observed_at = SystemTime::now();
+    let schedule = discovered_schedule(&factory, &scope, "race", "every 10s", 10);
+
+    let created = run_race(
+        {
+            let url = url.to_owned();
+            let scope = scope.clone();
+            let schedule = schedule.clone();
+            move |barrier| {
+                let store = PostgresScheduleStore::connect(&url).unwrap();
+                barrier.wait();
+                store.reconcile(&scope, &[schedule], observed_at)
+            }
+        },
+        {
+            let url = url.to_owned();
+            let scope = scope.clone();
+            let schedule = schedule.clone();
+            move |barrier| {
+                let store = PostgresScheduleStore::connect(&url).unwrap();
+                barrier.wait();
+                store.reconcile(&scope, &[schedule], observed_at)
+            }
+        },
+    );
+    assert_eq!(
+        created
+            .into_iter()
+            .map(|result| result.unwrap().created)
+            .sum::<usize>(),
+        1
+    );
+    let store = PostgresScheduleStore::connect(url).unwrap();
+    assert_eq!(
+        store.list_revisions(&schedule.schedule_id).unwrap().len(),
+        1
+    );
+
+    let changed = changed_schedule(schedule.clone(), "every 20s", 20);
+    let changed_at = observed_at + Duration::from_secs(1);
+    let updated = run_race(
+        {
+            let url = url.to_owned();
+            let scope = scope.clone();
+            let changed = changed.clone();
+            move |barrier| {
+                let store = PostgresScheduleStore::connect(&url).unwrap();
+                barrier.wait();
+                store.reconcile(&scope, &[changed], changed_at)
+            }
+        },
+        {
+            let url = url.to_owned();
+            let scope = scope.clone();
+            let changed = changed.clone();
+            move |barrier| {
+                let store = PostgresScheduleStore::connect(&url).unwrap();
+                barrier.wait();
+                store.reconcile(&scope, &[changed], changed_at)
+            }
+        },
+    );
+    assert_eq!(
+        updated
+            .into_iter()
+            .map(|result| result.unwrap().updated)
+            .sum::<usize>(),
+        1
+    );
+    assert_eq!(
+        store.list_revisions(&schedule.schedule_id).unwrap().len(),
+        2
+    );
+
+    let actor = ActorRef::new("race-actor").unwrap();
+    let mut rediscovered = changed.clone();
+    rediscovered.display_name = "Concurrent discovery".into();
+    let raced = run_race(
+        {
+            let url = url.to_owned();
+            let schedule_id = schedule.schedule_id.clone();
+            let actor = actor.clone();
+            move |barrier| {
+                let store = PostgresScheduleStore::connect(&url).unwrap();
+                barrier.wait();
+                store
+                    .disable(&schedule_id, &actor, changed_at + Duration::from_secs(1))
+                    .map(|_| ())
+            }
+        },
+        {
+            let url = url.to_owned();
+            let scope = scope.clone();
+            move |barrier| {
+                let store = PostgresScheduleStore::connect(&url).unwrap();
+                barrier.wait();
+                store
+                    .reconcile(&scope, &[rediscovered], changed_at + Duration::from_secs(1))
+                    .map(|_| ())
+            }
+        },
+    );
+    for result in raced {
+        result.unwrap();
+    }
+    assert_eq!(
+        store
+            .get_schedule(&schedule.schedule_id)
+            .unwrap()
+            .unwrap()
+            .enablement,
+        ScheduleEnablement::Disabled
+    );
+
+    let enabled_at = changed_at + Duration::from_secs(2);
+    let enabled = store
+        .enable(&schedule.schedule_id, &actor, enabled_at)
+        .unwrap();
+    let due_at = enabled.next_trigger_at.unwrap();
+    let due = store.list_due(&scope, due_at, 10).unwrap().remove(0);
+    let trigger_id = factory
+        .scheduled_trigger(
+            &scope,
+            &schedule.schedule_id,
+            due.schedule.current_revision,
+            due.scheduled_for,
+        )
+        .unwrap();
+    let execution_id = factory
+        .scheduled_execution(
+            &scope,
+            &schedule.schedule_id,
+            due.schedule.current_revision,
+            due.scheduled_for,
+        )
+        .unwrap();
+    let claim = ClaimOccurrenceRequest {
+        execution_scope_id: scope.clone(),
+        schedule_id: schedule.schedule_id.clone(),
+        schedule_version: due.schedule.version,
+        schedule_revision: due.schedule.current_revision,
+        trigger_id,
+        execution_id: Some(execution_id),
+        scheduled_for: due.scheduled_for,
+        observed_at: due_at,
+        owner: "race-left".into(),
+        lease: Duration::from_secs(30),
+    };
+    let claims = run_race(
+        {
+            let url = url.to_owned();
+            let claim = claim.clone();
+            move |barrier| {
+                let store = PostgresScheduleStore::connect(&url).unwrap();
+                barrier.wait();
+                store.claim_occurrence(claim)
+            }
+        },
+        {
+            let url = url.to_owned();
+            let mut claim = claim;
+            claim.owner = "race-right".into();
+            move |barrier| {
+                let store = PostgresScheduleStore::connect(&url).unwrap();
+                barrier.wait();
+                store.claim_occurrence(claim)
+            }
+        },
+    );
+    let claims = claims.map(Result::unwrap);
+    assert_eq!(
+        claims
+            .iter()
+            .filter(|result| matches!(result, ClaimOccurrenceResult::Claimed(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        claims
+            .iter()
+            .filter(|result| matches!(result, ClaimOccurrenceResult::Busy))
+            .count(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_triggers(TriggerQuery {
+                schedule_id: schedule.schedule_id.clone(),
+                kind: Some(ScheduleTriggerKind::Scheduled),
+                cursor: None,
+                limit: 10,
+            })
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+
+    let matching_left = manual_request(
+        &factory,
+        &scope,
+        &schedule.schedule_id,
+        due_at,
+        Some("matching-race-key"),
+        "same-input",
+    );
+    let matching_right = ManualTriggerRequest {
+        trigger_id: factory.random_trigger(),
+        execution_id: factory.random_execution(),
+        ..matching_left.clone()
+    };
+    let matching = run_race(
+        {
+            let url = url.to_owned();
+            move |barrier| {
+                let store = PostgresScheduleStore::connect(&url).unwrap();
+                barrier.wait();
+                store.create_manual_trigger(matching_left)
+            }
+        },
+        {
+            let url = url.to_owned();
+            move |barrier| {
+                let store = PostgresScheduleStore::connect(&url).unwrap();
+                barrier.wait();
+                store.create_manual_trigger(matching_right)
+            }
+        },
+    )
+    .map(Result::unwrap);
+    assert_eq!(
+        matching
+            .iter()
+            .filter(|result| matches!(result, ManualTriggerResult::Created(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        matching
+            .iter()
+            .filter(|result| matches!(result, ManualTriggerResult::Existing(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_triggers(TriggerQuery {
+                schedule_id: schedule.schedule_id.clone(),
+                kind: Some(ScheduleTriggerKind::Manual),
+                cursor: None,
+                limit: 10,
+            })
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+
+    let conflicting_left = manual_request(
+        &factory,
+        &scope,
+        &schedule.schedule_id,
+        due_at,
+        Some("conflicting-race-key"),
+        "left-input",
+    );
+    let conflicting_right = ManualTriggerRequest {
+        trigger_id: factory.random_trigger(),
+        execution_id: factory.random_execution(),
+        immutable_request_fingerprint: "right-input".into(),
+        ..conflicting_left.clone()
+    };
+    let conflicting_trigger_ids = [
+        conflicting_left.trigger_id.clone(),
+        conflicting_right.trigger_id.clone(),
+    ];
+    let conflicting = run_race(
+        {
+            let url = url.to_owned();
+            move |barrier| {
+                let store = PostgresScheduleStore::connect(&url).unwrap();
+                barrier.wait();
+                store.create_manual_trigger(conflicting_left)
+            }
+        },
+        {
+            let url = url.to_owned();
+            move |barrier| {
+                let store = PostgresScheduleStore::connect(&url).unwrap();
+                barrier.wait();
+                store.create_manual_trigger(conflicting_right)
+            }
+        },
+    );
+    assert_eq!(
+        conflicting
+            .iter()
+            .filter(|result| matches!(result, Ok(ManualTriggerResult::Created(_))))
+            .count(),
+        1
+    );
+    assert_eq!(
+        conflicting
+            .iter()
+            .filter(|result| matches!(result, Err(SchedulerError::Conflict(_))))
+            .count(),
+        1
+    );
+    assert_eq!(
+        conflicting_trigger_ids
+            .iter()
+            .filter(|trigger_id| store.get_trigger(trigger_id).unwrap().is_some())
+            .count(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_triggers(TriggerQuery {
+                schedule_id: schedule.schedule_id.clone(),
+                kind: Some(ScheduleTriggerKind::Manual),
+                cursor: None,
+                limit: 10,
+            })
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+}
+
+fn validate_schedule_restart(url: &str) {
+    let factory = ExecutionIdentityFactory;
+    let scope = unique_scope("schedule-restart");
+    let observed_at = SystemTime::now();
+    let schedule = discovered_schedule(&factory, &scope, "restart", "every 10s", 10);
+    let actor = ActorRef::new("restart-actor").unwrap();
+    let (trigger_id, execution_id, schedule_before_restart) = {
+        let store = PostgresScheduleStore::connect(url).unwrap();
+        store
+            .reconcile(&scope, std::slice::from_ref(&schedule), observed_at)
+            .unwrap();
+        store
+            .disable(
+                &schedule.schedule_id,
+                &actor,
+                observed_at + Duration::from_secs(1),
+            )
+            .unwrap();
+        let enabled = store
+            .enable(
+                &schedule.schedule_id,
+                &actor,
+                observed_at + Duration::from_secs(2),
+            )
+            .unwrap();
+        let due_at = enabled.next_trigger_at.unwrap();
+        let due = store.list_due(&scope, due_at, 10).unwrap().remove(0);
+        let trigger_id = factory
+            .scheduled_trigger(&scope, &schedule.schedule_id, 1, due.scheduled_for)
+            .unwrap();
+        let execution_id = factory
+            .scheduled_execution(&scope, &schedule.schedule_id, 1, due.scheduled_for)
+            .unwrap();
+        assert!(matches!(
+            store
+                .claim_occurrence(ClaimOccurrenceRequest {
+                    execution_scope_id: scope.clone(),
+                    schedule_id: schedule.schedule_id.clone(),
+                    schedule_version: due.schedule.version,
+                    schedule_revision: 1,
+                    trigger_id: trigger_id.clone(),
+                    execution_id: Some(execution_id.clone()),
+                    scheduled_for: due.scheduled_for,
+                    observed_at: due_at,
+                    owner: "restart-first".into(),
+                    lease: Duration::from_secs(1),
+                })
+                .unwrap(),
+            ClaimOccurrenceResult::Claimed(_)
+        ));
+        (trigger_id, execution_id, enabled)
+    };
+
+    {
+        let store = PostgresScheduleStore::connect(url).unwrap();
+        let recovered = store
+            .recover_incomplete(
+                &scope,
+                "restart-second",
+                schedule_before_restart.next_trigger_at.unwrap() + Duration::from_secs(2),
+                Duration::from_secs(30),
+                10,
+            )
+            .unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].trigger.trigger_id, trigger_id);
+        assert_eq!(
+            recovered[0].trigger.execution_id,
+            Some(execution_id.clone())
+        );
+        store
+            .link_execution(&trigger_id, &execution_id, recovered[0].trigger.version)
+            .unwrap();
+    }
+
+    let store = PostgresScheduleStore::connect(url).unwrap();
+    assert_eq!(
+        store
+            .list_triggers(TriggerQuery {
+                schedule_id: schedule.schedule_id.clone(),
+                kind: None,
+                cursor: None,
+                limit: 10,
+            })
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    let persisted_trigger = store.get_trigger(&trigger_id).unwrap().unwrap();
+    assert_eq!(persisted_trigger.execution_id, Some(execution_id));
+    assert_eq!(
+        persisted_trigger.status,
+        ScheduleTriggerStatus::ExecutionCreated
+    );
+    let persisted_schedule = store.get_schedule(&schedule.schedule_id).unwrap().unwrap();
+    assert_eq!(persisted_schedule.current_revision, 1);
+    assert_eq!(persisted_schedule.enablement, ScheduleEnablement::Enabled);
+    assert_eq!(persisted_schedule, schedule_before_restart);
+    assert_eq!(
+        store.list_revisions(&schedule.schedule_id).unwrap().len(),
+        1
+    );
+    let events = store
+        .list_operational_events(&schedule.schedule_id, 10)
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].kind, ScheduleOperationalEventKind::Enabled);
+    assert_eq!(events[1].kind, ScheduleOperationalEventKind::Disabled);
+}
+
+fn validate_schedule_rollback(url: &str) {
+    let factory = ExecutionIdentityFactory;
+    let scope = unique_scope("schedule-rollback");
+    let observed_at = SystemTime::now();
+    let schedule = discovered_schedule(&factory, &scope, "rollback", "every 10s", 10);
+    let store = PostgresScheduleStore::connect(url).unwrap();
+    store
+        .reconcile(&scope, std::slice::from_ref(&schedule), observed_at)
+        .unwrap();
+    let due_at = observed_at + Duration::from_secs(10);
+    let due = store.list_due(&scope, due_at, 10).unwrap().remove(0);
+    let trigger_id = factory
+        .scheduled_trigger(&scope, &schedule.schedule_id, 1, due.scheduled_for)
+        .unwrap();
+    let execution_id = factory
+        .scheduled_execution(&scope, &schedule.schedule_id, 1, due.scheduled_for)
+        .unwrap();
+    let ClaimOccurrenceResult::Claimed(claimed) = store
+        .claim_occurrence(ClaimOccurrenceRequest {
+            execution_scope_id: scope,
+            schedule_id: schedule.schedule_id.clone(),
+            schedule_version: due.schedule.version,
+            schedule_revision: 1,
+            trigger_id: trigger_id.clone(),
+            execution_id: Some(execution_id.clone()),
+            scheduled_for: due.scheduled_for,
+            observed_at: due_at,
+            owner: "rollback".into(),
+            lease: Duration::from_secs(30),
+        })
+        .unwrap()
+    else {
+        panic!("occurrence should be claimed")
+    };
+    let schedule_before = store.get_schedule(&schedule.schedule_id).unwrap().unwrap();
+    let triggers_before = store
+        .list_triggers(TriggerQuery {
+            schedule_id: schedule.schedule_id.clone(),
+            kind: None,
+            cursor: None,
+            limit: 10,
+        })
+        .unwrap();
+    let events_before = store
+        .list_operational_events(&schedule.schedule_id, 10)
+        .unwrap();
+
+    assert!(matches!(
+        store.link_execution(&trigger_id, &execution_id, claimed.version + 1),
+        Err(SchedulerError::Conflict(_))
+    ));
+
+    assert_eq!(
+        store.get_schedule(&schedule.schedule_id).unwrap(),
+        Some(schedule_before)
+    );
+    assert_eq!(
+        store
+            .list_triggers(TriggerQuery {
+                schedule_id: schedule.schedule_id.clone(),
+                kind: None,
+                cursor: None,
+                limit: 10,
+            })
+            .unwrap(),
+        triggers_before
+    );
+    assert_eq!(
+        store
+            .list_operational_events(&schedule.schedule_id, 10)
+            .unwrap(),
+        events_before
+    );
+}
+
+fn run_race<T: Send + 'static>(
+    left: impl FnOnce(Arc<Barrier>) -> T + Send + 'static,
+    right: impl FnOnce(Arc<Barrier>) -> T + Send + 'static,
+) -> [T; 2] {
+    let barrier = Arc::new(Barrier::new(3));
+    let left_barrier = Arc::clone(&barrier);
+    let right_barrier = Arc::clone(&barrier);
+    let left = thread::spawn(move || left(left_barrier));
+    let right = thread::spawn(move || right(right_barrier));
+    barrier.wait();
+    [left.join().unwrap(), right.join().unwrap()]
+}
+
+fn unique_scope(prefix: &str) -> ExecutionScopeId {
+    ExecutionScopeId::new(format!("{prefix}-{}", Uuid::new_v4())).unwrap()
+}
+
+fn discovered_schedule(
+    factory: &ExecutionIdentityFactory,
+    scope: &ExecutionScopeId,
+    key: &str,
+    expression: &str,
+    interval_seconds: u64,
+) -> DiscoveredSchedule {
+    let action = ActionDefinition {
+        runtime: RuntimeKind::Python,
+        kind: ActionKind::Schedule(ryvus_protocol::ScheduleAction {
+            key: key.into(),
+            expression: expression.into(),
+        }),
+        source: format!("src/{key}.py").into(),
+        entrypoint: key.into(),
+        name: Some(key.into()),
+        policy: ActionExecutionPolicy::default(),
+    };
+    DiscoveredSchedule {
+        schedule_id: factory.schedule_id(scope, key),
+        stable_schedule_key: key.into(),
+        display_name: key.into(),
+        action_id: key.into(),
+        action_revision: action_revision(&action).unwrap(),
+        action,
+        expression: expression.into(),
+        interval: Duration::from_secs(interval_seconds),
+    }
+}
+
+fn changed_schedule(
+    mut schedule: DiscoveredSchedule,
+    expression: &str,
+    interval_seconds: u64,
+) -> DiscoveredSchedule {
+    schedule.expression = expression.into();
+    schedule.interval = Duration::from_secs(interval_seconds);
+    let ActionKind::Schedule(action) = &mut schedule.action.kind else {
+        panic!("schedule fixture must contain a schedule action")
+    };
+    action.expression = expression.into();
+    schedule.action_revision = action_revision(&schedule.action).unwrap();
+    schedule
+}
+
+fn manual_request(
+    factory: &ExecutionIdentityFactory,
+    scope: &ExecutionScopeId,
+    schedule_id: &ScheduleId,
+    requested_at: SystemTime,
+    idempotency_key_hash: Option<&str>,
+    fingerprint: &str,
+) -> ManualTriggerRequest {
+    ManualTriggerRequest {
+        execution_scope_id: scope.clone(),
+        schedule_id: schedule_id.clone(),
+        trigger_id: factory.random_trigger(),
+        execution_id: factory.random_execution(),
+        actor: ActorRef::new("contract-actor").unwrap(),
+        requested_at,
+        claim_owner: "contract".into(),
+        claim_expires_at: requested_at + Duration::from_secs(30),
+        idempotency_key_hash: idempotency_key_hash.map(str::to_owned),
+        immutable_request_fingerprint: fingerprint.into(),
+    }
 }
 
 fn validate_tokio_runtime_compatibility(url: &str) {

@@ -10,9 +10,9 @@ use ryvus_protocol::ExecutionId;
 use ryvus_scheduler::{
     ClaimOccurrenceRequest, ClaimOccurrenceResult, ClaimedTrigger, DiscoveredSchedule, DueSchedule,
     ManualTriggerRequest, ManualTriggerResult, MemoryScheduleStore, ReconcileResult,
-    ScheduleOperationalEvent, ScheduleQuery, ScheduleRecord, ScheduleRevisionRecord, ScheduleStore,
-    ScheduleStoreSnapshot, ScheduleTriggerRecord, SchedulerError, SchedulerResult, TriggerFailure,
-    TriggerQuery,
+    ScheduleOperationalEvent, SchedulePage, ScheduleQuery, ScheduleRecord, ScheduleRevisionRecord,
+    ScheduleStore, ScheduleStoreSnapshot, ScheduleTriggerRecord, SchedulerError, SchedulerResult,
+    TriggerFailure, TriggerPage, TriggerQuery,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -72,7 +72,7 @@ impl PostgresScheduleStore {
             let mut transaction = client
                 .transaction()
                 .map_err(|error| backend("begin schedule transaction", error))?;
-            // ponytail: one database-wide scheduler lock favors correctness; replace with row-level writes when scheduler throughput requires it.
+            // ponytail: SHARE/EXCLUSIVE locking on ryvus_schedules serializes this snapshot-backed store; use normalized row-level mutations when throughput requires it.
             transaction
                 .batch_execute(if write {
                     "LOCK TABLE ryvus_schedules IN EXCLUSIVE MODE"
@@ -265,7 +265,7 @@ impl ScheduleStore for PostgresScheduleStore {
         self.with_store(false, move |store| store.get_trigger(&trigger_id))
     }
 
-    fn list_schedules(&self, query: ScheduleQuery) -> SchedulerResult<Vec<ScheduleRecord>> {
+    fn list_schedules(&self, query: ScheduleQuery) -> SchedulerResult<SchedulePage> {
         self.with_store(false, move |store| store.list_schedules(query))
     }
 
@@ -277,7 +277,7 @@ impl ScheduleStore for PostgresScheduleStore {
         self.with_store(false, move |store| store.list_revisions(&schedule_id))
     }
 
-    fn list_triggers(&self, query: TriggerQuery) -> SchedulerResult<Vec<ScheduleTriggerRecord>> {
+    fn list_triggers(&self, query: TriggerQuery) -> SchedulerResult<TriggerPage> {
         self.with_store(false, move |store| store.list_triggers(query))
     }
 

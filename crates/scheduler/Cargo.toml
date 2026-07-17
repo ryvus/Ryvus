@@ -16,4 +16,5 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+mockall = { workspace = true }
 tower = { version = "0.5", features = ["util"] }

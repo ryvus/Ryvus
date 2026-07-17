@@ -45,6 +45,9 @@ pub enum SchedulerError {
     #[error("schedule trigger '{trigger_id}' was not found")]
     TriggerNotFound { trigger_id: ScheduleTriggerId },
 
+    #[error("invalid schedule cursor: {0}")]
+    InvalidCursor(String),
+
     #[error("schedule state conflict: {0}")]
     Conflict(String),
 

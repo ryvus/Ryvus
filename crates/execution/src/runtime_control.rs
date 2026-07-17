@@ -819,7 +819,7 @@ mod tests {
         fn list_history(
             &self,
             query: crate::ExecutionHistoryQuery,
-        ) -> crate::StateStoreResult<Vec<crate::ExecutionAggregate>> {
+        ) -> crate::StateStoreResult<crate::ExecutionHistoryPage> {
             self.inner.list_history(query)
         }
     }

@@ -15,8 +15,8 @@ use serde_json::{json, Value};
 use crate::{
     ClaimOccurrenceRequest, ClaimOccurrenceResult, ClaimedTrigger, DiscoveredSchedule,
     ManualTriggerRequest, ManualTriggerResult, ScheduleAvailability, ScheduleExecution,
-    ScheduleExecutor, ScheduleId, ScheduleInterval, ScheduleStore, ScheduleTriggerKind,
-    ScheduleTriggerRecord, ScheduleTriggerStatus, SchedulerError, SchedulerResult, TriggerFailure,
+    ScheduleExecutor, ScheduleId, ScheduleInterval, ScheduleStore, ScheduleTriggerRecord,
+    ScheduleTriggerStatus, SchedulerError, SchedulerResult, TriggerFailure,
 };
 
 pub struct DurableSchedulerService<E> {
@@ -183,11 +183,7 @@ where
         idempotency_key: Option<&str>,
         now: SystemTime,
     ) -> SchedulerResult<ScheduleExecution> {
-        let schedule = self.store.get_schedule(schedule_id)?.ok_or_else(|| {
-            SchedulerError::DurableScheduleNotFound {
-                schedule_id: schedule_id.clone(),
-            }
-        })?;
+        let schedule = self.scoped_schedule(schedule_id)?;
         if schedule.availability != ScheduleAvailability::Available {
             return Err(SchedulerError::Conflict(
                 "unavailable schedule cannot run now".into(),
@@ -242,6 +238,7 @@ where
         schedule_id: &ScheduleId,
         at: SystemTime,
     ) -> SchedulerResult<crate::ScheduleRecord> {
+        self.scoped_schedule(schedule_id)?;
         self.store.enable(schedule_id, &self.actor, at)
     }
 
@@ -250,6 +247,7 @@ where
         schedule_id: &ScheduleId,
         at: SystemTime,
     ) -> SchedulerResult<crate::ScheduleRecord> {
+        self.scoped_schedule(schedule_id)?;
         self.store.disable(schedule_id, &self.actor, at)
     }
 
@@ -257,13 +255,16 @@ where
         &self,
         schedule_id: &ScheduleId,
     ) -> SchedulerResult<Option<crate::ScheduleRecord>> {
-        self.store.get_schedule(schedule_id)
+        self.scoped_schedule(schedule_id).map(Some)
     }
 
-    pub fn list_schedules(&self, limit: usize) -> SchedulerResult<Vec<crate::ScheduleRecord>> {
+    pub fn list_schedules(
+        &self,
+        query: crate::ScheduleQuery,
+    ) -> SchedulerResult<crate::SchedulePage> {
         self.store.list_schedules(crate::ScheduleQuery {
             execution_scope_id: Some(self.scope.clone()),
-            limit,
+            ..query
         })
     }
 
@@ -271,20 +272,13 @@ where
         &self,
         schedule_id: &ScheduleId,
     ) -> SchedulerResult<Vec<crate::ScheduleRevisionRecord>> {
+        self.scoped_schedule(schedule_id)?;
         self.store.list_revisions(schedule_id)
     }
 
-    pub fn list_triggers(
-        &self,
-        schedule_id: &ScheduleId,
-        kind: Option<ScheduleTriggerKind>,
-        limit: usize,
-    ) -> SchedulerResult<Vec<ScheduleTriggerRecord>> {
-        self.store.list_triggers(crate::TriggerQuery {
-            schedule_id: schedule_id.clone(),
-            kind,
-            limit,
-        })
+    pub fn list_triggers(&self, query: crate::TriggerQuery) -> SchedulerResult<crate::TriggerPage> {
+        self.scoped_schedule(&query.schedule_id)?;
+        self.store.list_triggers(query)
     }
 
     pub fn list_operational_events(
@@ -292,7 +286,17 @@ where
         schedule_id: &ScheduleId,
         limit: usize,
     ) -> SchedulerResult<Vec<crate::ScheduleOperationalEvent>> {
+        self.scoped_schedule(schedule_id)?;
         self.store.list_operational_events(schedule_id, limit)
+    }
+
+    fn scoped_schedule(&self, schedule_id: &ScheduleId) -> SchedulerResult<crate::ScheduleRecord> {
+        self.store
+            .get_schedule(schedule_id)?
+            .filter(|schedule| schedule.execution_scope_id == self.scope)
+            .ok_or_else(|| SchedulerError::DurableScheduleNotFound {
+                schedule_id: schedule_id.clone(),
+            })
     }
 
     fn process_claimed(&self, claimed: ClaimedTrigger) -> SchedulerResult<()> {

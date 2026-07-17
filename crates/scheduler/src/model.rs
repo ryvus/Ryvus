@@ -201,6 +201,7 @@ pub enum ManualTriggerResult {
 #[derive(Debug, Clone, Default)]
 pub struct ScheduleQuery {
     pub execution_scope_id: Option<ExecutionScopeId>,
+    pub cursor: Option<ScheduleId>,
     pub limit: usize,
 }
 
@@ -208,7 +209,20 @@ pub struct ScheduleQuery {
 pub struct TriggerQuery {
     pub schedule_id: ScheduleId,
     pub kind: Option<ScheduleTriggerKind>,
+    pub cursor: Option<ScheduleTriggerId>,
     pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SchedulePage {
+    pub items: Vec<ScheduleRecord>,
+    pub next_cursor: Option<ScheduleId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriggerPage {
+    pub items: Vec<ScheduleTriggerRecord>,
+    pub next_cursor: Option<ScheduleTriggerId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

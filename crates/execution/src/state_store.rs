@@ -150,7 +150,14 @@ pub struct ExecutionHistoryQuery {
     pub execution_scope_id: ExecutionScopeId,
     pub action_id: Option<String>,
     pub action_revision: Option<String>,
+    pub cursor: Option<ExecutionId>,
     pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+pub struct ExecutionHistoryPage {
+    pub items: Vec<ExecutionAggregate>,
+    pub next_cursor: Option<ExecutionId>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -161,6 +168,8 @@ pub enum StateStoreError {
     IdentityConflict { execution_id: ExecutionId },
     #[error("execution '{execution_id}' was not found")]
     NotFound { execution_id: ExecutionId },
+    #[error("invalid execution history cursor '{cursor}'")]
+    InvalidHistoryCursor { cursor: ExecutionId },
     #[error("invalid execution mutation: {0}")]
     InvalidMutation(String),
     #[error("execution state store lock is poisoned")]
@@ -187,10 +196,7 @@ pub trait ExecutionStateStore: Send + Sync {
     ) -> StateStoreResult<TransitionResult>;
     fn reconcilable_cancellations(&self) -> StateStoreResult<Vec<ExecutionAggregate>>;
     fn active_executions(&self) -> StateStoreResult<Vec<ExecutionAggregate>>;
-    fn list_history(
-        &self,
-        query: ExecutionHistoryQuery,
-    ) -> StateStoreResult<Vec<ExecutionAggregate>>;
+    fn list_history(&self, query: ExecutionHistoryQuery) -> StateStoreResult<ExecutionHistoryPage>;
 }
 
 #[derive(Default)]
@@ -293,10 +299,7 @@ impl ExecutionStateStore for MemoryExecutionStateStore {
             .collect())
     }
 
-    fn list_history(
-        &self,
-        query: ExecutionHistoryQuery,
-    ) -> StateStoreResult<Vec<ExecutionAggregate>> {
+    fn list_history(&self, query: ExecutionHistoryQuery) -> StateStoreResult<ExecutionHistoryPage> {
         let mut executions = self
             .executions
             .lock()
@@ -321,8 +324,24 @@ impl ExecutionStateStore for MemoryExecutionStateStore {
                 .cmp(&left.created_at)
                 .then_with(|| right.execution_id.as_ref().cmp(left.execution_id.as_ref()))
         });
-        executions.truncate(query.limit.clamp(1, 100));
-        Ok(executions)
+        if let Some(cursor) = query.cursor {
+            let position = executions
+                .iter()
+                .position(|aggregate| aggregate.execution_id == cursor)
+                .ok_or(StateStoreError::InvalidHistoryCursor { cursor })?;
+            executions.drain(..=position);
+        }
+        let limit = query.limit.clamp(1, 100);
+        executions.truncate(limit + 1);
+        let has_more = executions.len() > limit;
+        executions.truncate(limit);
+        let next_cursor = has_more
+            .then(|| executions.last().map(|item| item.execution_id.clone()))
+            .flatten();
+        Ok(ExecutionHistoryPage {
+            items: executions,
+            next_cursor,
+        })
     }
 }
 

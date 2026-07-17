@@ -11,8 +11,9 @@ use postgres::{Client, NoTls, Row, Transaction};
 use ryvus_execution::{
     aggregate_from_new, apply_mutation, validate_execution_aggregate, validate_new_execution,
     AttemptRecord, CancellationIntent, CreateExecutionResult, ExecutionAggregate,
-    ExecutionHistoryQuery, ExecutionMutation, ExecutionState, ExecutionStateStore, NewExecution,
-    StateStoreError, StateStoreResult, TerminalState, TransitionResult,
+    ExecutionHistoryPage, ExecutionHistoryQuery, ExecutionMutation, ExecutionState,
+    ExecutionStateStore, NewExecution, StateStoreError, StateStoreResult, TerminalState,
+    TransitionResult,
 };
 use ryvus_protocol::{AttemptId, AttemptOutcome, ExecutionAttempt, ExecutionId};
 use serde::{de::DeserializeOwned, Serialize};
@@ -237,27 +238,49 @@ impl ExecutionStateStore for PostgresExecutionStateStore {
         Ok(aggregates)
     }
 
-    fn list_history(
-        &self,
-        query: ExecutionHistoryQuery,
-    ) -> StateStoreResult<Vec<ExecutionAggregate>> {
+    fn list_history(&self, query: ExecutionHistoryQuery) -> StateStoreResult<ExecutionHistoryPage> {
         self.run(move |client| {
             transaction(client, |transaction| {
-                let limit = i64::try_from(query.limit.clamp(1, 100)).map_err(|_| {
+                let limit = query.limit.clamp(1, 100);
+                let fetch_limit = i64::try_from(limit + 1).map_err(|_| {
                     StateStoreError::InvalidMutation("history limit overflow".into())
                 })?;
+                let (cursor_created_at, cursor_id) = if let Some(cursor) = query.cursor {
+                    let cursor_id = cursor.to_string();
+                    let row = transaction
+                        .query_opt(
+                            "SELECT created_at_unix_ns FROM ryvus_executions \
+                             WHERE execution_id = $1 AND execution_scope_id = $2 \
+                               AND ($3::TEXT IS NULL OR action_id = $3) \
+                               AND ($4::TEXT IS NULL OR action_revision = $4)",
+                            &[
+                                &cursor_id,
+                                &query.execution_scope_id.as_ref(),
+                                &query.action_id,
+                                &query.action_revision,
+                            ],
+                        )
+                        .map_err(|error| backend("validate execution history cursor", error))?
+                        .ok_or(StateStoreError::InvalidHistoryCursor { cursor })?;
+                    (Some(row.get::<_, i64>(0)), Some(cursor_id))
+                } else {
+                    (None, None)
+                };
                 let rows = transaction
                     .query(
                         "SELECT execution_id FROM ryvus_executions \
                          WHERE execution_scope_id = $1 \
                            AND ($2::TEXT IS NULL OR action_id = $2) \
                            AND ($3::TEXT IS NULL OR action_revision = $3) \
-                         ORDER BY created_at_unix_ns DESC, execution_id DESC LIMIT $4",
+                           AND ($4::BIGINT IS NULL OR (created_at_unix_ns, execution_id) < ($4, $5)) \
+                         ORDER BY created_at_unix_ns DESC, execution_id DESC LIMIT $6",
                         &[
                             &query.execution_scope_id.as_ref(),
                             &query.action_id,
                             &query.action_revision,
-                            &limit,
+                            &cursor_created_at,
+                            &cursor_id,
+                            &fetch_limit,
                         ],
                     )
                     .map_err(|error| backend("query execution history", error))?;
@@ -269,7 +292,15 @@ impl ExecutionStateStore for PostgresExecutionStateStore {
                             .ok_or_else(|| corrupt("history execution disappeared"))?,
                     );
                 }
-                Ok(aggregates)
+                let has_more = aggregates.len() > limit;
+                aggregates.truncate(limit);
+                let next_cursor = has_more
+                    .then(|| aggregates.last().map(|item| item.execution_id.clone()))
+                    .flatten();
+                Ok(ExecutionHistoryPage {
+                    items: aggregates,
+                    next_cursor,
+                })
             })
         })
     }

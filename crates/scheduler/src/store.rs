@@ -11,11 +11,13 @@ use crate::{
     ClaimOccurrenceRequest, ClaimOccurrenceResult, ClaimedTrigger, DiscoveredSchedule, DueSchedule,
     ManualIdempotencyRecord, ManualTriggerRequest, ManualTriggerResult, ReconcileResult,
     ScheduleAvailability, ScheduleEnablement, ScheduleOperationalEvent,
-    ScheduleOperationalEventKind, ScheduleQuery, ScheduleRecord, ScheduleRevisionRecord,
-    ScheduleStoreSnapshot, ScheduleTriggerKind, ScheduleTriggerRecord, ScheduleTriggerStatus,
-    SchedulerError, SchedulerResult, TriggerFailure, TriggerQuery,
+    ScheduleOperationalEventKind, SchedulePage, ScheduleQuery, ScheduleRecord,
+    ScheduleRevisionRecord, ScheduleStoreSnapshot, ScheduleTriggerKind, ScheduleTriggerRecord,
+    ScheduleTriggerStatus, SchedulerError, SchedulerResult, TriggerFailure, TriggerPage,
+    TriggerQuery,
 };
 
+#[cfg_attr(test, mockall::automock)]
 pub trait ScheduleStore: Send + Sync {
     fn reconcile(
         &self,
@@ -86,12 +88,12 @@ pub trait ScheduleStore: Send + Sync {
         &self,
         trigger_id: &ScheduleTriggerId,
     ) -> SchedulerResult<Option<ScheduleTriggerRecord>>;
-    fn list_schedules(&self, query: ScheduleQuery) -> SchedulerResult<Vec<ScheduleRecord>>;
+    fn list_schedules(&self, query: ScheduleQuery) -> SchedulerResult<SchedulePage>;
     fn list_revisions(
         &self,
         schedule_id: &ScheduleId,
     ) -> SchedulerResult<Vec<ScheduleRevisionRecord>>;
-    fn list_triggers(&self, query: TriggerQuery) -> SchedulerResult<Vec<ScheduleTriggerRecord>>;
+    fn list_triggers(&self, query: TriggerQuery) -> SchedulerResult<TriggerPage>;
     fn list_operational_events(
         &self,
         schedule_id: &ScheduleId,
@@ -603,7 +605,7 @@ impl ScheduleStore for MemoryScheduleStore {
         Ok(self.lock()?.triggers.get(trigger_id).cloned())
     }
 
-    fn list_schedules(&self, query: ScheduleQuery) -> SchedulerResult<Vec<ScheduleRecord>> {
+    fn list_schedules(&self, query: ScheduleQuery) -> SchedulerResult<SchedulePage> {
         let state = self.lock()?;
         let mut records = state
             .schedules
@@ -616,9 +618,29 @@ impl ScheduleStore for MemoryScheduleStore {
             })
             .cloned()
             .collect::<Vec<_>>();
-        records.sort_by(|left, right| left.stable_schedule_key.cmp(&right.stable_schedule_key));
-        records.truncate(query.limit.clamp(1, 100));
-        Ok(records)
+        records.sort_by(|left, right| {
+            left.stable_schedule_key
+                .cmp(&right.stable_schedule_key)
+                .then_with(|| left.schedule_id.as_ref().cmp(right.schedule_id.as_ref()))
+        });
+        if let Some(cursor) = query.cursor {
+            let position = records
+                .iter()
+                .position(|record| record.schedule_id == cursor)
+                .ok_or_else(|| SchedulerError::InvalidCursor(cursor.to_string()))?;
+            records.drain(..=position);
+        }
+        let limit = query.limit.clamp(1, 100);
+        records.truncate(limit + 1);
+        let has_more = records.len() > limit;
+        records.truncate(limit);
+        let next_cursor = has_more
+            .then(|| records.last().map(|item| item.schedule_id.clone()))
+            .flatten();
+        Ok(SchedulePage {
+            items: records,
+            next_cursor,
+        })
     }
 
     fn list_revisions(
@@ -636,7 +658,7 @@ impl ScheduleStore for MemoryScheduleStore {
         Ok(revisions)
     }
 
-    fn list_triggers(&self, query: TriggerQuery) -> SchedulerResult<Vec<ScheduleTriggerRecord>> {
+    fn list_triggers(&self, query: TriggerQuery) -> SchedulerResult<TriggerPage> {
         let state = self.lock()?;
         let mut triggers = state
             .triggers
@@ -647,9 +669,30 @@ impl ScheduleStore for MemoryScheduleStore {
             })
             .cloned()
             .collect::<Vec<_>>();
-        triggers.sort_by(|left, right| right.created_at.cmp(&left.created_at));
-        triggers.truncate(query.limit.clamp(1, 100));
-        Ok(triggers)
+        triggers.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.trigger_id.as_ref().cmp(left.trigger_id.as_ref()))
+        });
+        if let Some(cursor) = query.cursor {
+            let position = triggers
+                .iter()
+                .position(|trigger| trigger.trigger_id == cursor)
+                .ok_or_else(|| SchedulerError::InvalidCursor(cursor.to_string()))?;
+            triggers.drain(..=position);
+        }
+        let limit = query.limit.clamp(1, 100);
+        triggers.truncate(limit + 1);
+        let has_more = triggers.len() > limit;
+        triggers.truncate(limit);
+        let next_cursor = has_more
+            .then(|| triggers.last().map(|item| item.trigger_id.clone()))
+            .flatten();
+        Ok(TriggerPage {
+            items: triggers,
+            next_cursor,
+        })
     }
 
     fn list_operational_events(
@@ -830,15 +873,36 @@ fn set_enablement(
     enablement: ScheduleEnablement,
 ) -> SchedulerResult<ScheduleRecord> {
     let mut state = store.lock()?;
+    let current = state.schedules.get(schedule_id).cloned().ok_or_else(|| {
+        SchedulerError::DurableScheduleNotFound {
+            schedule_id: schedule_id.clone(),
+        }
+    })?;
+    if current.enablement == enablement {
+        return Ok(current);
+    }
+    let next_trigger_at = if enablement == ScheduleEnablement::Enabled
+        && current.availability == ScheduleAvailability::Available
+    {
+        let interval = state
+            .revisions
+            .get(&(schedule_id.clone(), current.current_revision))
+            .ok_or_else(|| SchedulerError::StoreBackend("missing schedule revision".into()))?
+            .interval;
+        Some(
+            at.checked_add(interval)
+                .ok_or_else(|| SchedulerError::StoreBackend("next trigger time overflow".into()))?,
+        )
+    } else {
+        current.next_trigger_at
+    };
     let schedule = state.schedules.get_mut(schedule_id).ok_or_else(|| {
         SchedulerError::DurableScheduleNotFound {
             schedule_id: schedule_id.clone(),
         }
     })?;
-    if schedule.enablement == enablement {
-        return Ok(schedule.clone());
-    }
     schedule.enablement = enablement;
+    schedule.next_trigger_at = next_trigger_at;
     schedule.updated_at = at;
     schedule.version = increment(schedule.version, "schedule version")?;
     let result = schedule.clone();

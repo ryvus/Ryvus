@@ -171,33 +171,9 @@ pub async fn handle_dynamic_route(
         }
     }
 
-    invoke_api_action(
-        &state,
-        action,
-        &route.action,
-        api,
-        attempt,
-        input,
-        route_match.path_params,
-        query_params,
-        context,
-    )
-}
-
-fn invoke_api_action(
-    state: &AppState,
-    action: &ryvus_protocol::ActionDefinition,
-    action_name: &str,
-    api: &ryvus_protocol::ApiAction,
-    attempt: ExecutionAttempt,
-    input: Value,
-    path_params: HashMap<String, String>,
-    query_params: HashMap<String, String>,
-    context: InvocationContext,
-) -> Response {
     let event = serde_json::json!({
         "body": input,
-        "path_params": path_params,
+        "path_params": route_match.path_params,
         "query_params": query_params,
     });
 
@@ -227,7 +203,7 @@ fn invoke_api_action(
                 status,
                 &failed_attempt,
                 "execution_failed",
-                format!("{}: {}", action_name, error),
+                format!("{}: {}", route.action, error),
                 None,
             );
         }
