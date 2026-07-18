@@ -85,11 +85,20 @@ pub enum ExecutorError {
     #[error("runtime manager is shutting down")]
     RuntimeUnavailable,
 
+    #[error("runtime host failed: {0}")]
+    RuntimeHost(#[source] Box<ryvus_runtime_host::RuntimeHostError>),
+
     #[error("runtime control failed: {0}")]
     RuntimeControl(#[from] crate::RuntimeControlError),
 
     #[error("cancellation is not supported for externally managed runtime {endpoint}")]
     UnsupportedCancellation { endpoint: String },
+}
+
+impl From<ryvus_runtime_host::RuntimeHostError> for ExecutorError {
+    fn from(error: ryvus_runtime_host::RuntimeHostError) -> Self {
+        Self::RuntimeHost(Box::new(error))
+    }
 }
 
 pub type ExecutorResult<T> = Result<T, ExecutorError>;

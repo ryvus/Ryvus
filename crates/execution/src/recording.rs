@@ -80,6 +80,13 @@ mod tests {
                 &request,
                 &crate::ExecutionOptions {
                     timeout: std::time::Duration::from_secs(3),
+                    log_context: ryvus_logging::RuntimeLogContext::new(
+                        ryvus_protocol::ExecutionScopeId::new("test").unwrap(),
+                        "action",
+                        "revision",
+                        ryvus_protocol::RuntimeKind::Python,
+                    )
+                    .unwrap(),
                 },
             )
             .expect("recorded invocation should succeed");

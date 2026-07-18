@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import sys
+import time
 import traceback
 from typing import Any, Callable
 
@@ -50,7 +51,15 @@ def run_framed_worker(handler: Handler, event_factory) -> None:
         root_logger.removeHandler(log_handler)
 
     for line in captured_stdout.getvalue().splitlines():
-        _write_frame(protocol_stdout, _log_frame(request, line, {"source": "stdout"}))
+        _write_frame(
+            protocol_stdout,
+            _log_frame(
+                request,
+                line,
+                {"source": "stdout"},
+                timestamp_unix_nanos=time.time_ns(),
+            ),
+        )
     for frame in log_handler.frames:
         _write_frame(protocol_stdout, frame)
     _write_frame(protocol_stdout, {"type": "result", "result": result})
@@ -69,6 +78,9 @@ class _InvocationLogHandler(logging.Handler):
                 record.getMessage(),
                 {"logger": record.name},
                 _log_level(record.levelno),
+                timestamp_unix_nanos=int(record.created * 1_000_000_000),
+                trace_id=getattr(record, "trace_id", None),
+                span_id=getattr(record, "span_id", None),
             )
         )
 
@@ -78,18 +90,28 @@ def _log_frame(
     message: str,
     fields: dict[str, Any],
     level: str = "info",
+    timestamp_unix_nanos: int | None = None,
+    trace_id: str | None = None,
+    span_id: str | None = None,
 ) -> dict[str, Any]:
+    event = {
+        "type": "log",
+        "execution_id": request["execution_id"],
+        "attempt_id": request["attempt_id"],
+        "attempt_number": request["attempt_number"],
+        "level": level,
+        "message": message,
+        "fields": fields,
+    }
+    if timestamp_unix_nanos is not None:
+        event["timestamp_unix_nanos"] = timestamp_unix_nanos
+    if trace_id is not None:
+        event["trace_id"] = trace_id
+    if span_id is not None:
+        event["span_id"] = span_id
     return {
         "type": "event",
-        "event": {
-            "type": "log",
-            "execution_id": request["execution_id"],
-            "attempt_id": request["attempt_id"],
-            "attempt_number": request["attempt_number"],
-            "level": level,
-            "message": message,
-            "fields": fields,
-        },
+        "event": event,
     }
 
 

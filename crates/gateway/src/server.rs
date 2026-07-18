@@ -1,4 +1,11 @@
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{
+        mpsc::{sync_channel, SyncSender},
+        Arc,
+    },
+};
 
 use axum::Router;
 use ryvus_control::{ControlService, LocalControlConfig};
@@ -7,8 +14,10 @@ use ryvus_execution::{
     InMemoryRuntimeControlChannel, LocalRuntimeManager, LocalRuntimeResolver,
     MemoryExecutionStateStore, RuntimeControlService, RuntimeManager, RuntimeResolver,
 };
+use ryvus_logging::ExecutionLogRecord;
 use ryvus_persistence::ConsoleExecutionPersistence;
 use ryvus_protocol::{ActionDefinition, ActionKind};
+use ryvus_runtime_host::RuntimeLogWriterConfig;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::{
@@ -16,6 +25,8 @@ use crate::{
     routes::{public::dynamic::handle_dynamic_route, system::system_routes},
     state::{AppState, GatewayExecutionService},
 };
+
+const LOG_CONSOLE_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone)]
 pub struct GatewayServerConfig {
@@ -104,10 +115,32 @@ pub fn build_execution_service_with_store_and_scope(
     store: Arc<dyn ExecutionStateStore>,
     scope: ryvus_execution::ExecutionScopeId,
 ) -> Arc<GatewayExecutionService> {
+    build_execution_service_with_stores_and_scope(
+        project_root,
+        store,
+        scope,
+        Arc::new(ryvus_logging::InMemoryExecutionLogStore::default()),
+        RuntimeLogWriterConfig::default(),
+    )
+}
+
+pub fn build_execution_service_with_stores_and_scope(
+    project_root: PathBuf,
+    store: Arc<dyn ExecutionStateStore>,
+    scope: ryvus_execution::ExecutionScopeId,
+    log_store: Arc<dyn ryvus_logging::ExecutionLogStore>,
+    log_writer_config: RuntimeLogWriterConfig,
+) -> Arc<GatewayExecutionService> {
     let channel = Arc::new(InMemoryRuntimeControlChannel::default());
     let runtime_control = RuntimeControlService::new(channel.clone(), store.clone());
-    let runtime_manager = Arc::new(LocalRuntimeManager::new(runtime_control.clone(), channel))
-        as Arc<dyn RuntimeManager>;
+    let log_console = local_console_projection();
+    let runtime_manager = Arc::new(LocalRuntimeManager::with_logging(
+        runtime_control.clone(),
+        channel,
+        log_store,
+        log_writer_config,
+        log_console,
+    )) as Arc<dyn RuntimeManager>;
     Arc::new(ExecutionService::new_with_scope(
         Arc::new(LocalRuntimeResolver::with_project_root(project_root)) as Arc<dyn RuntimeResolver>,
         Arc::new(HttpExecutor::new(runtime_manager)) as Arc<dyn Executor>,
@@ -116,6 +149,19 @@ pub fn build_execution_service_with_store_and_scope(
         store,
         scope,
     ))
+}
+
+fn local_console_projection() -> Option<SyncSender<ExecutionLogRecord>> {
+    let (sender, receiver) = sync_channel::<ExecutionLogRecord>(LOG_CONSOLE_CAPACITY);
+    std::thread::Builder::new()
+        .name("ryvus-log-console".into())
+        .spawn(move || {
+            while let Ok(record) = receiver.recv() {
+                println!("[{:?}] {}", record.severity, record.message);
+            }
+        })
+        .ok()
+        .map(|_| sender)
 }
 
 pub fn validate_config(
@@ -234,4 +280,14 @@ fn route_summaries<'a>(
     });
 
     routes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_console_projection;
+
+    #[test]
+    fn canonical_composition_installs_bounded_console_projection() {
+        assert!(local_console_projection().is_some());
+    }
 }

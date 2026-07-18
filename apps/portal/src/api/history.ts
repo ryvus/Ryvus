@@ -42,6 +42,7 @@ export type ExecutionAggregate = {
     [key: string]: unknown;
   };
   state: string;
+  active_attempt_id?: string | null;
   created_at: unknown;
   updated_at: unknown;
   attempts: Array<{
@@ -49,7 +50,6 @@ export type ExecutionAggregate = {
     state: string;
     result?: {
       invocation_result: { output?: unknown; error?: unknown };
-      events: Array<{ type?: string; message?: string; level?: string }>;
       duration: { secs: number; nanos: number };
     } | null;
   }>;

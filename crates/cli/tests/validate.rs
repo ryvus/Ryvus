@@ -52,6 +52,65 @@ export default apiAction({
 }
 
 #[test]
+fn validate_rejects_log_config_without_leaking_values() {
+    let project = TestProject::new("validate-log-config");
+    project.add_action(
+        "hello.py",
+        r#"
+@api_action(method="GET", path="/hello")
+def hello():
+    return {"ok": True}
+"#,
+    );
+    fs::write(
+        project.root.join(".env"),
+        "RYVUS_LOG_STORE=secret-provider-name\n",
+    )
+    .expect("environment file");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ryvus"))
+        .arg("validate")
+        .current_dir(&project.root)
+        .output()
+        .expect("validate command should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid log configuration: RYVUS_LOG_STORE"));
+    assert!(!stderr.contains("secret-provider-name"));
+}
+
+#[test]
+fn validate_rejects_unwritable_log_root_before_serving() {
+    let project = TestProject::new("validate-log-root");
+    project.add_action(
+        "hello.py",
+        r#"
+@api_action(method="GET", path="/hello")
+def hello():
+    return {"ok": True}
+"#,
+    );
+    let occupied = project.root.join("occupied");
+    fs::write(&occupied, "not a directory").expect("occupied path");
+    fs::write(
+        project.root.join(".env"),
+        "RYVUS_LOG_STORE=filesystem\nRYVUS_LOG_FILESYSTEM_ROOT=occupied\n",
+    )
+    .expect("environment file");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ryvus"))
+        .arg("validate")
+        .current_dir(&project.root)
+        .output()
+        .expect("validate command should run");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("invalid log configuration: RYVUS_LOG_FILESYSTEM_ROOT"));
+}
+
+#[test]
 fn validate_discovers_node_only_projects() {
     let project = TestProject::new("validate-node-only");
     project.add_node_action(

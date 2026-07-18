@@ -7,6 +7,7 @@ from pathlib import Path
 from ryvus.discover import discover_actions
 from ryvus.events import ApiEvent, FlowEvent
 from ryvus.runtime import (
+    _log_frame,
     event_from_flow_request,
     handle_api_request,
     handle_request,
@@ -92,9 +93,33 @@ def handler(context):
         "logged",
     ]
     assert all(frame["event"]["attempt_id"] == "attempt-id" for frame in frames[1:-1])
+    assert all(
+        isinstance(frame["event"]["timestamp_unix_nanos"], int)
+        for frame in frames[1:-1]
+    )
     assert frames[-1]["type"] == "result"
     assert frames[-1]["result"]["status"] == "success"
     assert frames[-1]["result"]["output"] == {"attempt_id": "attempt-id"}
+
+
+def test_log_frames_support_optional_trace_context_and_legacy_shape():
+    request = build_request()
+    traced = _log_frame(
+        request,
+        "traced",
+        {},
+        timestamp_unix_nanos=123,
+        trace_id="11" * 16,
+        span_id="22" * 8,
+    )["event"]
+    assert traced["timestamp_unix_nanos"] == 123
+    assert traced["trace_id"] == "11" * 16
+    assert traced["span_id"] == "22" * 8
+
+    legacy = _log_frame(request, "legacy", {})["event"]
+    assert "timestamp_unix_nanos" not in legacy
+    assert "trace_id" not in legacy
+    assert "span_id" not in legacy
 
 
 def test_handler_receives_api_event():

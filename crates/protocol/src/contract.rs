@@ -292,6 +292,12 @@ pub struct LogEvent {
     pub execution_id: ExecutionId,
     pub attempt_id: AttemptId,
     pub attempt_number: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_unix_nanos: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span_id: Option<String>,
     pub level: LogLevel,
     pub message: String,
     pub fields: Value,
@@ -394,6 +400,9 @@ mod tests {
             execution_id: request.execution_id.clone(),
             attempt_id: request.attempt_id.clone(),
             attempt_number: request.attempt_number,
+            timestamp_unix_nanos: None,
+            trace_id: None,
+            span_id: None,
             level: LogLevel::Info,
             message: "hello".to_string(),
             fields: json!({}),
@@ -415,5 +424,22 @@ mod tests {
             assert_eq!(value["attempt_id"], request.attempt_id.as_ref());
             assert_eq!(value["attempt_number"], 1);
         }
+    }
+
+    #[test]
+    fn old_log_frames_remain_compatible() {
+        let event: LogEvent = serde_json::from_value(json!({
+            "execution_id": "execution",
+            "attempt_id": "attempt",
+            "attempt_number": 1,
+            "level": "info",
+            "message": "hello",
+            "fields": {}
+        }))
+        .expect("old log frame should deserialize");
+
+        assert_eq!(event.timestamp_unix_nanos, None);
+        assert_eq!(event.trace_id, None);
+        assert_eq!(event.span_id, None);
     }
 }

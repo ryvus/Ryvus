@@ -9,6 +9,7 @@ import { Docs } from "../pages/Docs";
 import { Dashboard } from "../pages/Dashboard";
 import { Schedules } from "../pages/Schedules";
 import { Executions } from "../pages/Executions";
+import { Logs } from "../pages/Logs";
 
 const Flows = lazy(() => import("../pages/Flows").then((module) => ({ default: module.Flows })));
 
@@ -17,6 +18,7 @@ const routes = [
   ["gateway", "Gateway"],
   ["schedules", "Schedules"],
   ["flows", "Flows"],
+  ["logs", "Logs"],
   ["docs", "Docs"],
   ["sdk-docs", "SDK Docs"],
   ["execution-preview", "Execution Preview"],
@@ -139,6 +141,8 @@ function renderRoute(route: RouteId, artifacts: Artifacts) {
       );
     case "docs":
       return <Docs artifacts={artifacts} />;
+    case "logs":
+      return <Logs />;
     case "sdk-docs":
       return (
         <EmptyState

@@ -9,11 +9,11 @@ use std::{
 
 use postgres::{Client, NoTls, Row, Transaction};
 use ryvus_execution::{
-    aggregate_from_new, apply_mutation, validate_execution_aggregate, validate_new_execution,
-    AttemptRecord, CancellationIntent, CreateExecutionResult, ExecutionAggregate,
-    ExecutionHistoryPage, ExecutionHistoryQuery, ExecutionMutation, ExecutionState,
-    ExecutionStateStore, NewExecution, StateStoreError, StateStoreResult, TerminalState,
-    TransitionResult,
+    aggregate_from_new, apply_mutation, validate_execution_aggregate, validate_execution_result,
+    validate_new_execution, AttemptRecord, CancellationIntent, CreateExecutionResult,
+    ExecutionAggregate, ExecutionHistoryPage, ExecutionHistoryQuery, ExecutionMutation,
+    ExecutionState, ExecutionStateStore, NewExecution, StateStoreError, StateStoreResult,
+    TerminalState, TransitionResult,
 };
 use ryvus_protocol::{AttemptId, AttemptOutcome, ExecutionAttempt, ExecutionId};
 use serde::{de::DeserializeOwned, Serialize};
@@ -23,6 +23,10 @@ const MIGRATION_LOCK_ID: i64 = 7_823_981_045_710_001;
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_execution_state.sql")),
     (2, include_str!("../migrations/0002_execution_history.sql")),
+    (
+        3,
+        include_str!("../migrations/0003_remove_execution_logs.sql"),
+    ),
 ];
 
 pub struct PostgresExecutionStateStore {
@@ -522,6 +526,9 @@ fn insert_attempt(
     transaction: &mut Transaction<'_>,
     attempt: &AttemptRecord,
 ) -> StateStoreResult<()> {
+    if let Some(result) = &attempt.result {
+        validate_execution_result(result)?;
+    }
     let ownership = optional_json(attempt.ownership.as_ref(), "attempt ownership")?;
     let result = optional_json(attempt.result.as_ref(), "execution result")?;
     let data_refs = json(&attempt.data_refs, "attempt data references")?;

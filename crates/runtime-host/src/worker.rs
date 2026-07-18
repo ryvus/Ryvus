@@ -28,9 +28,8 @@ pub struct StartedWorker {
     pub worker: Arc<dyn InvocationWorker>,
 }
 
-pub struct WorkerInvocation {
-    pub result: InvocationResult,
-    pub events: Vec<InvocationEvent>,
+pub trait WorkerEventConsumer: Send + Sync {
+    fn record(&self, event: InvocationEvent);
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -52,7 +51,8 @@ pub trait InvocationWorker: Send + Sync {
         &self,
         request: InvocationRequest,
         deadline: Instant,
-    ) -> Result<WorkerInvocation, WorkerError>;
+        events: Arc<dyn WorkerEventConsumer>,
+    ) -> Result<InvocationResult, WorkerError>;
 
     async fn terminate(&self, reason: TerminationReason) -> Result<(), WorkerError>;
 }

@@ -1,5 +1,6 @@
 use ryvus_protocol::ActionDefinition;
 
+use ryvus_logging::RuntimeLogContext;
 use ryvus_protocol::{
     AttemptOutcome, ControlCommandOutcome, ExecutionAttempt, ExecutionId, InvocationRequest,
 };
@@ -246,6 +247,12 @@ where
         let action = aggregate.action.clone();
         let policy = aggregate.policy.clone();
         let request = aggregate.request.clone();
+        let log_context = RuntimeLogContext {
+            execution_scope: aggregate.execution_scope_id.clone(),
+            action_key_id: aggregate.action_id.clone(),
+            action_revision: aggregate.action_revision.clone(),
+            runtime_language: aggregate.action.runtime.clone(),
+        };
         let target = match self.resolver.resolve(&action) {
             Ok(target) => target,
             Err(error) => {
@@ -271,6 +278,7 @@ where
                 &attempt_request,
                 &ExecutionOptions {
                     timeout: policy.timeout,
+                    log_context: log_context.clone(),
                 },
             ) {
                 Ok(record) => record,
@@ -1207,12 +1215,16 @@ mod tests {
             &self,
             _target: &RuntimeTarget,
             request: &InvocationRequest,
-            _options: &ExecutionOptions,
+            options: &ExecutionOptions,
         ) -> crate::ExecutorResult<ExecutionResult> {
             let aggregate = self.store.load(&request.execution_id).unwrap().unwrap();
             *self.observed.lock().unwrap() = aggregate.state == ExecutionState::Running
                 && aggregate.active_attempt_id.as_ref() == Some(&request.attempt_id)
-                && aggregate.attempts.len() == 1;
+                && aggregate.attempts.len() == 1
+                && options.log_context.execution_scope == aggregate.execution_scope_id
+                && options.log_context.action_key_id == aggregate.action_id
+                && options.log_context.action_revision == aggregate.action_revision
+                && options.log_context.runtime_language == aggregate.action.runtime;
             Ok(ExecutionResult {
                 invocation_result: InvocationResult::success(request, json!({})),
                 events: vec![],

@@ -28,12 +28,50 @@ export function Executions() {
     if (execution.isError && !execution.data) return <EmptyState title="Execution unavailable" message={errorMessage(execution.error)} />;
     if (!execution.data) return <EmptyState title="Loading execution" message={id} />;
     const item = execution.data;
-    return <Page eyebrow="Execution History" title={item.execution_id}>{execution.error && <p className="text-sm text-red-300">{errorMessage(execution.error)}</p>}<div className="grid gap-4"><Panel className="grid gap-3 p-4"><div className="flex flex-wrap gap-2"><Badge tone={stateTone(item.state)}>{item.state}</Badge><Badge tone={triggerTone(item.trigger.type)}>{item.trigger.type}</Badge><Badge tone="slate">{item.action_revision}</Badge></div><ScheduleLineage item={item} /><CodeBlock>{JSON.stringify(item.trigger, null, 2)}</CodeBlock></Panel>{item.attempts.map((attempt) => <Panel key={attempt.attempt.attempt_id} className="grid gap-3 p-4"><div className="flex flex-wrap items-center justify-between gap-2"><h2 className="font-semibold">Attempt {attempt.attempt.attempt_number}</h2><span className="flex items-center gap-2"><span className="font-mono text-xs text-slate-500">{attempt.result ? formatDuration(attempt.result.duration) : "—"}</span><Badge tone={stateTone(attempt.state)}>{attempt.state}</Badge></span></div>{attempt.result?.events?.map((event, index) => <CodeBlock key={`${attempt.attempt.attempt_id}-${index}`}>{event.message ?? JSON.stringify(event)}</CodeBlock>)}{attempt.result && <CodeBlock>{JSON.stringify(attempt.result.invocation_result, null, 2)}</CodeBlock>}</Panel>)}</div></Page>;
+    return (
+      <Page
+        eyebrow="Execution History"
+        title={item.execution_id}
+        actions={<LogLink executionId={item.execution_id}>View execution logs</LogLink>}
+      >
+        {execution.error && <p className="text-sm text-red-300">{errorMessage(execution.error)}</p>}
+        <div className="grid gap-4">
+          <Panel className="grid gap-3 p-4">
+            <div className="flex flex-wrap gap-2">
+              <Badge tone={stateTone(item.state)}>{item.state}</Badge>
+              <Badge tone={triggerTone(item.trigger.type)}>{item.trigger.type}</Badge>
+              <Badge tone="slate">{item.action_revision}</Badge>
+            </div>
+            <ScheduleLineage item={item} />
+            <CodeBlock>{JSON.stringify(item.trigger, null, 2)}</CodeBlock>
+          </Panel>
+          {item.attempts.map((attempt) => (
+            <Panel key={attempt.attempt.attempt_id} className="grid gap-3 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="font-semibold">Attempt {attempt.attempt.attempt_number}</h2>
+                <span className="flex flex-wrap items-center justify-end gap-2">
+                  <LogLink executionId={item.execution_id} attemptId={attempt.attempt.attempt_id}>View logs</LogLink>
+                  <span className="font-mono text-xs text-slate-500">{attempt.result ? formatDuration(attempt.result.duration) : "—"}</span>
+                  <Badge tone={stateTone(attempt.state)}>{attempt.state}</Badge>
+                </span>
+              </div>
+              {attempt.result && <CodeBlock>{JSON.stringify(attempt.result.invocation_result, null, 2)}</CodeBlock>}
+            </Panel>
+          ))}
+        </div>
+      </Page>
+    );
   }
 
   if (executions.isError && !executions.data) return <EmptyState title="Execution history unavailable" message={errorMessage(executions.error)} />;
   if (!executions.data) return <EmptyState title="Loading executions" message="Reading durable execution state." />;
   return <Page eyebrow="Execution History" title={actionId ? `Executions for ${actionId}` : "Executions"}>{executions.error && <p className="text-sm text-red-300">{errorMessage(executions.error)}</p>}{executionItems.length ? <div className="grid gap-3">{executionItems.map((item) => <Panel key={item.execution_id} className="grid gap-3 p-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"><div className="grid min-w-0 gap-2"><a href={`#execution-preview?id=${encodeURIComponent(item.execution_id)}`} className="min-w-0 rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-300"><code className="block truncate text-sm text-slate-100">{item.execution_id}</code><span className="text-xs text-slate-500">{item.action_id} · {item.action_revision}</span></a><ScheduleLineage item={item} /></div><div className="flex flex-wrap items-center gap-2 sm:justify-end"><Badge tone={triggerTone(item.trigger.type)}>{item.trigger.type}</Badge><Badge tone={stateTone(item.state)}>{item.state}</Badge><span className="flex items-center gap-1 text-xs text-slate-500">Terminal <Badge tone={item.terminal_state ? stateTone(item.terminal_state.state) : "slate"}>{item.terminal_state?.state ?? "—"}</Badge></span><span className="font-mono text-xs text-slate-500">{item.attempts.length} attempt{item.attempts.length === 1 ? "" : "s"} · {latestDuration(item)}</span></div></Panel>)}{executions.hasNextPage && <Button type="button" className="justify-self-start" onClick={() => void executions.fetchNextPage()} disabled={executions.isFetchingNextPage}>Load more</Button>}</div> : <EmptyState title="No executions" message="No matching durable executions were found." />}</Page>;
+}
+
+function LogLink({ executionId, attemptId, children }: { executionId: string; attemptId?: string; children: string }) {
+  const query = new URLSearchParams({ execution_id: executionId });
+  if (attemptId) query.set("attempt_id", attemptId);
+  return <a href={`#logs?${query}`} className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-3 font-mono text-xs font-bold text-violet-200 hover:border-violet-300/30 hover:bg-violet-500/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-300">{children}</a>;
 }
 
 function ScheduleLineage({ item }: { item: ExecutionAggregate }) {

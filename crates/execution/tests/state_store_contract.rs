@@ -8,8 +8,8 @@ use ryvus_execution::{
 };
 use ryvus_protocol::{
     ActionDefinition, ActionExecutionPolicy, ActionKind, ApiAction, AttemptId, AttemptOutcome,
-    ExecutionAttempt, InvocationContext, InvocationRequest, InvocationResult, RuntimeHostId,
-    RuntimeKind, RuntimeSessionId, WorkerId,
+    ExecutionAttempt, InvocationContext, InvocationEvent, InvocationRequest, InvocationResult,
+    LogEvent, LogLevel, MetricEvent, RuntimeHostId, RuntimeKind, RuntimeSessionId, WorkerId,
 };
 use serde_json::json;
 
@@ -543,6 +543,104 @@ fn terminal_state_must_match_attempt_outcome() {
     let unchanged = store.load(&created.execution_id).unwrap().unwrap();
     assert_eq!(unchanged.execution_version, running.execution_version);
     assert!(unchanged.terminal_state.is_none());
+}
+
+#[test]
+fn memory_store_rejects_log_results_without_losing_metrics_or_mutating_state() {
+    let store = MemoryExecutionStateStore::default();
+    let created = store.create(new_execution()).unwrap();
+    let first = attempt(&created.execution_id, 1);
+    let running = applied(
+        store
+            .compare_and_set(
+                &created.execution_id,
+                created.execution_version,
+                ExecutionMutation::StartAttempt {
+                    attempt: first.clone(),
+                },
+            )
+            .unwrap(),
+    );
+    let request = InvocationRequest::with_attempt(
+        json!({}),
+        InvocationContext::default(),
+        first.attempt.clone(),
+    );
+    let log_result = ExecutionResult {
+        invocation_result: InvocationResult::success(&request, json!({})),
+        events: vec![InvocationEvent::Log(LogEvent {
+            execution_id: first.attempt.execution_id.clone(),
+            attempt_id: first.attempt.attempt_id.clone(),
+            attempt_number: 1,
+            timestamp_unix_nanos: None,
+            trace_id: None,
+            span_id: None,
+            level: LogLevel::Info,
+            message: "must not persist".into(),
+            fields: json!({}),
+        })],
+        stdout: String::new(),
+        stderr: String::new(),
+        duration: Duration::ZERO,
+        exit_code: Some(0),
+    };
+    assert!(matches!(
+        store.compare_and_set(
+            &created.execution_id,
+            running.execution_version,
+            ExecutionMutation::FinishAttempt {
+                attempt_id: first.attempt.attempt_id.clone(),
+                outcome: AttemptOutcome::Succeeded,
+                result: Some(log_result),
+                retry: None,
+                terminal: Some(TerminalState::new(
+                    ExecutionState::Succeeded,
+                    Some(first.attempt.attempt_id.clone()),
+                )),
+            },
+        ),
+        Err(StateStoreError::InvalidMutation(_))
+    ));
+    assert_eq!(store.load(&created.execution_id).unwrap().unwrap(), running);
+
+    let metric = InvocationEvent::Metric(MetricEvent {
+        execution_id: first.attempt.execution_id.clone(),
+        attempt_id: first.attempt.attempt_id.clone(),
+        attempt_number: 1,
+        name: "jobs".into(),
+        value: 1.0,
+        unit: "count".into(),
+    });
+    let metric_result = ExecutionResult {
+        invocation_result: InvocationResult::success(&request, json!({})),
+        events: vec![metric.clone()],
+        stdout: String::new(),
+        stderr: String::new(),
+        duration: Duration::ZERO,
+        exit_code: Some(0),
+    };
+    let finished = applied(
+        store
+            .compare_and_set(
+                &created.execution_id,
+                running.execution_version,
+                ExecutionMutation::FinishAttempt {
+                    attempt_id: first.attempt.attempt_id.clone(),
+                    outcome: AttemptOutcome::Succeeded,
+                    result: Some(metric_result),
+                    retry: None,
+                    terminal: Some(TerminalState::new(
+                        ExecutionState::Succeeded,
+                        Some(first.attempt.attempt_id),
+                    )),
+                },
+            )
+            .unwrap(),
+    );
+    assert_eq!(
+        finished.attempts[0].result.as_ref().unwrap().events,
+        vec![metric]
+    );
 }
 
 #[test]

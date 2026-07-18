@@ -513,6 +513,7 @@ function captureWorkerLogging(request: InvocationRequest): void {
         execution_id: request.execution_id,
         attempt_id: request.attempt_id,
         attempt_number: request.attempt_number,
+        timestamp_unix_nanos: Date.now() * 1_000_000,
         level,
         message: values.map((value) => typeof value === "string" ? value : inspect(value)).join(" "),
         fields: {},

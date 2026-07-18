@@ -44,8 +44,10 @@ pub fn run(run_schedules: bool) -> Result<()> {
     let scheduler_routes = ryvus_scheduler::http::scheduler_routes(Arc::clone(&scheduler_service));
     let execution_history_routes = ryvus_execution::execution_history_routes(
         composition.execution_store,
-        composition.execution_scope,
+        composition.execution_scope.clone(),
     );
+    let log_history_routes =
+        ryvus_logging::http::log_history_routes(composition.log_store, composition.execution_scope);
     let flow_store = Arc::new(ryvus_flow::InMemoryFlowStateStore::default());
     let flow_service = Arc::new(
         ryvus_flow::FlowService::new(
@@ -60,6 +62,7 @@ pub fn run(run_schedules: bool) -> Result<()> {
     );
     let control_routes = scheduler_routes
         .merge(execution_history_routes)
+        .merge(log_history_routes)
         .merge(ryvus_flow::http::flow_routes(flow_service));
 
     println!("Validated {} action(s)", validation.action_count);

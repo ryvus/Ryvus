@@ -9,7 +9,12 @@ use ryvus_flow::{
     FlowExecutionStatus, FlowService, FlowSpec, FlowStateStore, InMemoryFlowStateStore,
 };
 use ryvus_gateway::server;
-use ryvus_protocol::{ActionDefinition, ExecutionId};
+use ryvus_logging::{
+    http::log_history_routes, FilesystemExecutionLogStore, FilesystemLogStoreConfig,
+    InMemoryExecutionLogStore,
+};
+use ryvus_protocol::{ActionDefinition, ExecutionId, ExecutionScopeId};
+use ryvus_runtime_host::RuntimeLogWriterConfig;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -66,7 +71,190 @@ def identity(context):
         .load(&execution_id)
         .expect("store read should succeed")
         .expect("execution should be recorded");
-    assert_durable_success(&aggregate, "hello log");
+    assert_durable_success(&aggregate);
+}
+
+#[tokio::test]
+async fn runtime_host_and_log_routes_share_the_injected_store() {
+    let project = TestProject::new("shared-log-store");
+    project.add_action(
+        "log_probe.py",
+        r#"
+@api_action(method="GET", path="/logging")
+def logging():
+    print("shared runtime log")
+    return {"ok": True}
+"#,
+    );
+    project.write_manifest(&[action("GET", "/logging", "src/log_probe.py", "logging")]);
+
+    let execution_store = Arc::new(MemoryExecutionStateStore::default());
+    let log_store = Arc::new(InMemoryExecutionLogStore::default());
+    let scope = ExecutionScopeId::new("shared-log-scope").expect("scope");
+    let execution_service = server::build_execution_service_with_stores_and_scope(
+        project.config().project_root,
+        execution_store,
+        scope.clone(),
+        log_store.clone(),
+        RuntimeLogWriterConfig::default(),
+    );
+    let app = server::build_app_with_execution_service(&project.config(), execution_service)
+        .expect("gateway app should build")
+        .merge(log_history_routes(log_store, scope));
+
+    let invocation =
+        raw_request_with_headers_on_app(app.clone(), Method::GET, "/logging", "", &[]).await;
+    assert_eq!(invocation.status, StatusCode::OK, "{}", invocation.raw_body);
+
+    let streams = raw_request_with_headers_on_app(
+        app.clone(),
+        Method::GET,
+        "/internal/logs/streams",
+        "",
+        &[],
+    )
+    .await;
+    assert_eq!(streams.status, StatusCode::OK, "{}", streams.raw_body);
+    let host = streams.body["streams"][0]["runtime_host_id"]
+        .as_str()
+        .expect("runtime host id");
+    let records = raw_request_with_headers_on_app(
+        app,
+        Method::GET,
+        &format!("/internal/logs/streams/{host}/records"),
+        "",
+        &[],
+    )
+    .await;
+    assert_eq!(records.status, StatusCode::OK, "{}", records.raw_body);
+    assert!(records.body["records"]
+        .as_array()
+        .expect("records")
+        .iter()
+        .any(|record| record["message"] == "shared runtime log"));
+}
+
+#[tokio::test]
+async fn filesystem_logs_from_api_schedule_and_manual_invocations_survive_reopen() {
+    let project = TestProject::new("filesystem-log-composition");
+    project.add_action(
+        "logs.py",
+        r#"
+@api_action(method="GET", path="/logging")
+def api(context):
+    print("api log")
+    return {"execution_id": context.execution_id}
+
+@scheduled_action(every="10s")
+def scheduled():
+    print("schedule log")
+    return {"ok": True}
+
+@api_action(method="POST", path="/manual")
+def manual():
+    print("manual log")
+    return {"ok": True}
+"#,
+    );
+    let scheduled = definition(schedule_action("src/logs.py", "scheduled", "every 10s"));
+    let manual = definition(action("POST", "/manual", "src/logs.py", "manual"));
+    project.write_manifest(&[
+        action("GET", "/logging", "src/logs.py", "api"),
+        schedule_action("src/logs.py", "scheduled", "every 10s"),
+        action("POST", "/manual", "src/logs.py", "manual"),
+    ]);
+
+    let execution_store = Arc::new(MemoryExecutionStateStore::default());
+    let scope = ExecutionScopeId::new("local").expect("scope");
+    let log_root = project.config().project_root.join(".ryvus/log-test");
+    let log_store = Arc::new(
+        FilesystemExecutionLogStore::new(FilesystemLogStoreConfig {
+            root: log_root.clone(),
+            ..FilesystemLogStoreConfig::default()
+        })
+        .expect("filesystem log store"),
+    );
+    let execution_service = server::build_execution_service_with_stores_and_scope(
+        project.config().project_root,
+        execution_store,
+        scope.clone(),
+        log_store.clone(),
+        RuntimeLogWriterConfig::default(),
+    );
+    let app =
+        server::build_app_with_execution_service(&project.config(), execution_service.clone())
+            .expect("gateway app should build")
+            .merge(log_history_routes(log_store.clone(), scope.clone()));
+
+    let api_response =
+        raw_request_with_headers_on_app(app.clone(), Method::GET, "/logging", "", &[]).await;
+    assert_eq!(
+        api_response.status,
+        StatusCode::OK,
+        "{}",
+        api_response.raw_body
+    );
+    let api_execution = api_response.body["execution_id"]
+        .as_str()
+        .expect("API execution id")
+        .to_owned();
+    let scheduled_execution =
+        ryvus_scheduler::run_schedule_once([&scheduled], "scheduled", execution_service.clone())
+            .expect("schedule should execute")
+            .execution_id
+            .to_string();
+    let manual_execution = execution_service
+        .execute_event(&manual, json!({}))
+        .expect("manual action should execute")
+        .result
+        .invocation_result
+        .execution_id
+        .to_string();
+
+    drop(app);
+    drop(execution_service);
+    drop(log_store);
+
+    let recovered = Arc::new(
+        FilesystemExecutionLogStore::new(FilesystemLogStoreConfig {
+            root: log_root,
+            ..FilesystemLogStoreConfig::default()
+        })
+        .expect("reopened filesystem log store"),
+    );
+    let history = log_history_routes(recovered, scope);
+    for (execution_id, message) in [
+        (api_execution, "api log"),
+        (scheduled_execution, "schedule log"),
+        (manual_execution, "manual log"),
+    ] {
+        let streams = raw_request_with_headers_on_app(
+            history.clone(),
+            Method::GET,
+            &format!("/internal/logs/streams?execution_id={execution_id}"),
+            "",
+            &[],
+        )
+        .await;
+        assert_eq!(streams.status, StatusCode::OK, "{}", streams.raw_body);
+        let host = streams.body["streams"][0]["runtime_host_id"]
+            .as_str()
+            .expect("runtime host id");
+        let records = raw_request_with_headers_on_app(
+            history.clone(),
+            Method::GET,
+            &format!("/internal/logs/streams/{host}/records?execution_id={execution_id}"),
+            "",
+            &[],
+        )
+        .await;
+        assert_eq!(records.status, StatusCode::OK, "{}", records.raw_body);
+        assert!(records.body["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .any(|record| record["message"] == message));
+    }
 }
 
 #[tokio::test]
@@ -134,19 +322,16 @@ def manual(context):
         .clone()
         .expect("flow step should record execution id");
 
-    for (execution_id, expected_log) in [
-        (scheduled_result.execution_id, "schedule log"),
-        (
-            manual_record.result.invocation_result.execution_id,
-            "manual log",
-        ),
-        (flow_execution_id, "flow log"),
+    for execution_id in [
+        scheduled_result.execution_id,
+        manual_record.result.invocation_result.execution_id,
+        flow_execution_id,
     ] {
         let aggregate = store
             .load(&execution_id)
             .expect("store read should succeed")
             .expect("trigger execution should be durable");
-        assert_durable_success(&aggregate, expected_log);
+        assert_durable_success(&aggregate);
     }
 }
 
@@ -206,7 +391,7 @@ fn definition(value: serde_json::Value) -> ActionDefinition {
     serde_json::from_value(value).expect("action should deserialize")
 }
 
-fn assert_durable_success(aggregate: &ExecutionAggregate, expected_log: &str) {
+fn assert_durable_success(aggregate: &ExecutionAggregate) {
     assert_eq!(aggregate.state, ExecutionState::Succeeded);
     assert_eq!(
         aggregate.action_revision,
@@ -217,9 +402,10 @@ fn assert_durable_success(aggregate: &ExecutionAggregate, expected_log: &str) {
         .result
         .as_ref()
         .expect("terminal attempt should persist its result");
-    assert!(result.events.iter().any(|event| {
-        matches!(event, ryvus_protocol::InvocationEvent::Log(log) if log.message == expected_log)
-    }));
+    assert!(!result
+        .events
+        .iter()
+        .any(|event| matches!(event, ryvus_protocol::InvocationEvent::Log(_))));
 }
 
 async fn wait_for_flow(

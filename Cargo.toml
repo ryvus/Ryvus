@@ -13,6 +13,7 @@ members = [
   "crates/flow",
   "crates/cli",
   "crates/runtime-host",
+  "crates/logging",
 ]
 
 exclude = []
@@ -35,8 +36,10 @@ ryvus-action-catalog = { path = "crates/action-catalog" }
 ryvus-scheduler = { path = "crates/scheduler" }
 ryvus-flow = { path = "crates/flow" }
 ryvus-runtime-host = { path = "crates/runtime-host" }
+ryvus-logging = { path = "crates/logging" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 jsonpath-rust = "1.0.4"
 thiserror = "1"
 tokio = { version = "1", features = ["full"] }

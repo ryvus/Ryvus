@@ -3,7 +3,7 @@ use ryvus_protocol::ExecutionAttempt;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::WorkerError;
+use crate::{RuntimeLogWriterError, WorkerError};
 
 #[derive(Debug, Error)]
 pub enum RuntimeHostError {
@@ -36,6 +36,14 @@ pub enum RuntimeHostError {
     },
     #[error("runtime returned protocol version '{actual}'")]
     WorkerProtocolMismatch { actual: String },
+    #[error("runtime log writer error: {0}")]
+    Logging(#[from] RuntimeLogWriterError),
+    #[error("runtime log context is incompatible with the active host")]
+    IncompatibleLogContext,
+    #[error("runtime log producers did not close before shutdown")]
+    LoggingProducersActive,
+    #[error("runtime shutdown previously failed: {0}")]
+    ShutdownFailed(String),
 }
 
 #[derive(Serialize)]
@@ -59,6 +67,12 @@ impl IntoResponse for RuntimeHostError {
             Self::Cancelled => (StatusCode::CONFLICT, "RUNTIME_CANCELLED"),
             Self::Worker(_) | Self::Supervision(_) => {
                 (StatusCode::BAD_GATEWAY, "RUNTIME_WORKER_ERROR")
+            }
+            Self::Logging(_) | Self::LoggingProducersActive | Self::ShutdownFailed(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "RUNTIME_LOGGING_ERROR")
+            }
+            Self::IncompatibleLogContext => {
+                (StatusCode::CONFLICT, "RUNTIME_LOG_CONTEXT_INCOMPATIBLE")
             }
             Self::AttemptMismatch { .. } | Self::WorkerProtocolMismatch { .. } => {
                 (StatusCode::BAD_GATEWAY, "RUNTIME_PROTOCOL_ERROR")

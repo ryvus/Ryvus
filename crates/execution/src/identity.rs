@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ryvus_protocol::ExecutionId;
+use ryvus_protocol::{ExecutionId, ExecutionScopeId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -47,17 +47,10 @@ macro_rules! opaque_id {
     };
 }
 
-opaque_id!(ExecutionScopeId, "execution scope");
 opaque_id!(ActorRef, "actor reference");
 opaque_id!(ScheduleId, "schedule id");
 opaque_id!(ScheduleTriggerId, "schedule trigger id");
 opaque_id!(ExecutionDataRef, "execution data reference");
-
-impl ExecutionScopeId {
-    pub fn local_default() -> Self {
-        Self("local".to_string())
-    }
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionDataReferences {

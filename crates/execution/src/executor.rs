@@ -1,13 +1,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use ryvus_logging::RuntimeLogContext;
 use ryvus_protocol::InvocationRequest;
 
 use crate::{error::ExecutorResult, ExecutionResult, RuntimeTarget};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionOptions {
     pub timeout: Duration,
+    pub log_context: RuntimeLogContext,
 }
 
 pub trait Executor: Send + Sync {

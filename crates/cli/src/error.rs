@@ -1,6 +1,7 @@
 use std::{io, path::PathBuf};
 
 use ryvus_execution::StateStoreError;
+use ryvus_logging::LogStoreError;
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, CliError>;
@@ -68,4 +69,10 @@ pub enum CliError {
 
     #[error("PostgreSQL execution store initialization failed: {0}")]
     ExecutionStore(#[source] StateStoreError),
+
+    #[error("invalid log configuration: {key}")]
+    InvalidLogConfig { key: &'static str },
+
+    #[error("log store initialization failed")]
+    LogStore(#[source] LogStoreError),
 }

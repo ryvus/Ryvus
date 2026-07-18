@@ -36,9 +36,12 @@ where
             });
         }
 
-        let handle = self
-            .manager
-            .acquire(target, &request.attempt(), options.timeout)?;
+        let handle = self.manager.acquire(
+            target,
+            &request.attempt(),
+            options.timeout,
+            &options.log_context,
+        )?;
         let remaining = options.timeout.saturating_sub(started.elapsed());
         let invocation = self.invoke_acquired(&handle, request, remaining);
         let runtime_outcome = match &invocation {
@@ -66,7 +69,11 @@ where
             }
             (Ok(invocation_result), Ok(release)) => Ok(ExecutionResult {
                 invocation_result,
-                events: release.events,
+                events: release
+                    .events
+                    .into_iter()
+                    .filter(|event| !matches!(event, ryvus_protocol::InvocationEvent::Log(_)))
+                    .collect(),
                 stdout: release.exit.stdout,
                 stderr: release.exit.stderr,
                 duration: started.elapsed(),
@@ -205,6 +212,7 @@ mod tests {
                 &request,
                 &ExecutionOptions {
                     timeout: Duration::from_secs(1),
+                    log_context: log_context(),
                 },
             )
             .unwrap();
@@ -216,27 +224,42 @@ mod tests {
     }
 
     #[test]
-    fn preserves_released_runtime_events() {
+    fn removes_logs_and_preserves_metrics_from_runtime_release() {
         let request = request_with_deadline();
         let body = serde_json::to_string(&InvocationResult::success(&request, json!({}))).unwrap();
         let endpoint = one_response_server("200 OK", &body);
         let expected_attempt = request.attempt();
-        let event = ryvus_protocol::InvocationEvent::Log(ryvus_protocol::LogEvent {
+        let log = ryvus_protocol::InvocationEvent::Log(ryvus_protocol::LogEvent {
             execution_id: request.execution_id.clone(),
             attempt_id: request.attempt_id.clone(),
             attempt_number: request.attempt_number,
+            timestamp_unix_nanos: None,
+            trace_id: None,
+            span_id: None,
             level: ryvus_protocol::LogLevel::Info,
             message: "worker log".to_string(),
             fields: json!({}),
         });
-        let mut manager = MockRuntimeManager::new();
-        manager.expect_acquire().return_once(move |_, attempt, _| {
-            Ok(RuntimeHandle::existing(attempt.clone(), endpoint))
+        let metric = ryvus_protocol::InvocationEvent::Metric(ryvus_protocol::MetricEvent {
+            execution_id: request.execution_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            attempt_number: request.attempt_number,
+            name: "jobs".to_string(),
+            value: 1.0,
+            unit: "count".to_string(),
         });
+        let mut manager = MockRuntimeManager::new();
+        manager
+            .expect_acquire()
+            .return_once(move |_, attempt, _, _| {
+                Ok(RuntimeHandle::existing(attempt.clone(), endpoint))
+            });
         manager.expect_release().return_once(move |_, _| {
             Ok(RuntimeRelease {
                 exit: RuntimeExit::default(),
-                events: vec![event],
+                events: std::iter::repeat_n(log, 10_000)
+                    .chain(std::iter::once(metric.clone()))
+                    .collect(),
                 disposition: RuntimeDisposition::Unmanaged,
             })
         });
@@ -246,12 +269,17 @@ mod tests {
                 &request,
                 &ExecutionOptions {
                     timeout: Duration::from_secs(1),
+                    log_context: log_context(),
                 },
             )
             .unwrap();
 
         assert_eq!(result.events.len(), 1);
         assert_eq!(result.events[0].attempt(), expected_attempt);
+        assert!(matches!(
+            result.events[0],
+            ryvus_protocol::InvocationEvent::Metric(_)
+        ));
     }
 
     #[test]
@@ -267,6 +295,7 @@ mod tests {
                 &request,
                 &ExecutionOptions {
                     timeout: Duration::from_secs(1),
+                    log_context: log_context(),
                 },
             )
             .is_err());
@@ -287,6 +316,7 @@ mod tests {
                 &request,
                 &ExecutionOptions {
                     timeout: Duration::from_millis(100),
+                    log_context: log_context(),
                 },
             )
             .is_err());
@@ -301,9 +331,11 @@ mod tests {
             thread::sleep(Duration::from_millis(200));
         });
         let mut manager = MockRuntimeManager::new();
-        manager.expect_acquire().return_once(move |_, attempt, _| {
-            Ok(RuntimeHandle::existing(attempt.clone(), endpoint))
-        });
+        manager
+            .expect_acquire()
+            .return_once(move |_, attempt, _, _| {
+                Ok(RuntimeHandle::existing(attempt.clone(), endpoint))
+            });
         manager
             .expect_release()
             .withf(|_, outcome| *outcome == RuntimeOutcome::TimedOut)
@@ -323,6 +355,7 @@ mod tests {
                 &request,
                 &ExecutionOptions {
                     timeout: Duration::from_millis(30),
+                    log_context: log_context(),
                 },
             )
             .unwrap_err();
@@ -338,7 +371,7 @@ mod tests {
         manager
             .expect_acquire()
             .times(1)
-            .returning(move |_, attempt, _| {
+            .returning(move |_, attempt, _, _| {
                 Ok(RuntimeHandle::existing(attempt.clone(), endpoint.clone()))
             });
         manager
@@ -359,6 +392,16 @@ mod tests {
         let mut request = InvocationRequest::new(json!({}));
         crate::assign_attempt_deadline(&mut request, Duration::from_secs(10)).unwrap();
         request
+    }
+
+    fn log_context() -> ryvus_logging::RuntimeLogContext {
+        ryvus_logging::RuntimeLogContext::new(
+            ryvus_protocol::ExecutionScopeId::new("test").unwrap(),
+            "action",
+            "revision",
+            ryvus_protocol::RuntimeKind::Python,
+        )
+        .unwrap()
     }
 
     fn one_response_server(status: &str, body: &str) -> String {

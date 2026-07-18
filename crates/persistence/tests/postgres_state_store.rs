@@ -16,7 +16,8 @@ use ryvus_persistence::{migrate, PostgresExecutionStateStore, PostgresScheduleSt
 use ryvus_protocol::{
     ActionDefinition, ActionExecutionPolicy, ActionKind, ApiAction, AttemptId, AttemptOutcome,
     ExecutionAttempt, ExecutionId, InvocationContext, InvocationEvent, InvocationRequest,
-    InvocationResult, LogEvent, LogLevel, RuntimeHostId, RuntimeKind, RuntimeSessionId, WorkerId,
+    InvocationResult, LogEvent, LogLevel, MetricEvent, RuntimeHostId, RuntimeKind,
+    RuntimeSessionId, WorkerId,
 };
 use ryvus_scheduler::{
     ClaimOccurrenceRequest, ClaimOccurrenceResult, DiscoveredSchedule, ManualTriggerRequest,
@@ -1321,8 +1322,12 @@ fn validate_migrations(url: &str) {
         .into_iter()
         .map(|row| row.get::<_, i64>(0))
         .collect::<Vec<_>>();
-    assert_eq!(versions, vec![1, 2]);
+    assert_eq!(versions, vec![1, 2, 3]);
 
+    drop(client);
+    validate_log_removal_migration(url);
+
+    let mut client = Client::connect(url, NoTls).unwrap();
     client
         .batch_execute(
             "ALTER TABLE ryvus_schema_migrations \
@@ -1351,6 +1356,201 @@ fn validate_migrations(url: &str) {
     assert_eq!(execution_count, 0);
     drop(client);
     migrate(url).unwrap();
+}
+
+fn validate_log_removal_migration(url: &str) {
+    let store = PostgresExecutionStateStore::connect(url).unwrap();
+    let (mixed_execution, mixed_attempt, mixed_result) = completed_execution(&store);
+    let (absent_execution, absent_attempt, absent_result) = completed_execution(&store);
+    let (null_execution, null_attempt, null_result) = completed_execution(&store);
+    drop(store);
+
+    let log = serde_json::to_value(InvocationEvent::Log(LogEvent {
+        execution_id: mixed_attempt.execution_id.clone(),
+        attempt_id: mixed_attempt.attempt_id.clone(),
+        attempt_number: mixed_attempt.attempt_number,
+        timestamp_unix_nanos: None,
+        trace_id: None,
+        span_id: None,
+        level: LogLevel::Info,
+        message: "legacy durable log".into(),
+        fields: json!({ "legacy": true }),
+    }))
+    .unwrap();
+    let mut mixed_legacy = serde_json::to_value(&mixed_result).unwrap();
+    let metric = mixed_legacy["events"][0].clone();
+    mixed_legacy["events"] = json!([
+        log,
+        metric,
+        null,
+        { "message": "missing type" },
+        { "type": null },
+        log
+    ]);
+    let mut mixed_expected = mixed_legacy.clone();
+    mixed_expected["events"] = json!([
+        metric,
+        null,
+        { "message": "missing type" },
+        { "type": null }
+    ]);
+
+    let mut absent_legacy = serde_json::to_value(absent_result).unwrap();
+    absent_legacy.as_object_mut().unwrap().remove("events");
+    let mut null_legacy = serde_json::to_value(null_result).unwrap();
+    null_legacy["events"] = serde_json::Value::Null;
+
+    let fixtures = [
+        (&mixed_attempt.attempt_id, &mixed_legacy),
+        (&absent_attempt.attempt_id, &absent_legacy),
+        (&null_attempt.attempt_id, &null_legacy),
+    ];
+    let mut client = Client::connect(url, NoTls).unwrap();
+    client
+        .execute("DELETE FROM ryvus_schema_migrations WHERE version = 3", &[])
+        .unwrap();
+    for (attempt_id, result) in fixtures {
+        client
+            .execute(
+                "UPDATE ryvus_attempts SET result = $1 WHERE attempt_id = $2",
+                &[result, &attempt_id.as_ref()],
+            )
+            .unwrap();
+    }
+    let lifecycle_before = migration_lifecycle(
+        &mut client,
+        [
+            &mixed_attempt.attempt_id,
+            &absent_attempt.attempt_id,
+            &null_attempt.attempt_id,
+        ],
+    );
+    drop(client);
+
+    migrate(url).unwrap();
+    let mut client = Client::connect(url, NoTls).unwrap();
+    let first_results = migration_results(
+        &mut client,
+        [
+            &mixed_attempt.attempt_id,
+            &absent_attempt.attempt_id,
+            &null_attempt.attempt_id,
+        ],
+    );
+    assert_eq!(
+        first_results,
+        vec![mixed_expected, absent_legacy, null_legacy]
+    );
+    assert_eq!(
+        migration_lifecycle(
+            &mut client,
+            [
+                &mixed_attempt.attempt_id,
+                &absent_attempt.attempt_id,
+                &null_attempt.attempt_id,
+            ]
+        ),
+        lifecycle_before
+    );
+    drop(client);
+
+    migrate(url).unwrap();
+    let mut client = Client::connect(url, NoTls).unwrap();
+    assert_eq!(
+        migration_results(
+            &mut client,
+            [
+                &mixed_attempt.attempt_id,
+                &absent_attempt.attempt_id,
+                &null_attempt.attempt_id,
+            ]
+        ),
+        first_results
+    );
+    for execution_id in [
+        mixed_execution.execution_id,
+        absent_execution.execution_id,
+        null_execution.execution_id,
+    ] {
+        client
+            .execute(
+                "DELETE FROM ryvus_executions WHERE execution_id = $1",
+                &[&execution_id.as_ref()],
+            )
+            .unwrap();
+    }
+}
+
+fn completed_execution(
+    store: &dyn ExecutionStateStore,
+) -> (ExecutionAggregate, ExecutionAttempt, ExecutionResult) {
+    let created = store.create(new_execution()).unwrap();
+    let first = attempt(&created.execution_id, 1);
+    let running = applied(
+        store
+            .compare_and_set(
+                &created.execution_id,
+                created.execution_version,
+                ExecutionMutation::StartAttempt {
+                    attempt: first.clone(),
+                },
+            )
+            .unwrap(),
+    );
+    let result = structured_result(&first.attempt);
+    let finished = applied(
+        store
+            .compare_and_set(
+                &created.execution_id,
+                running.execution_version,
+                ExecutionMutation::FinishAttempt {
+                    attempt_id: first.attempt.attempt_id.clone(),
+                    outcome: AttemptOutcome::Succeeded,
+                    result: Some(result.clone()),
+                    retry: None,
+                    terminal: Some(TerminalState::new(
+                        ExecutionState::Succeeded,
+                        Some(first.attempt.attempt_id.clone()),
+                    )),
+                },
+            )
+            .unwrap(),
+    );
+    (finished, first.attempt, result)
+}
+
+fn migration_results(client: &mut Client, attempt_ids: [&AttemptId; 3]) -> Vec<serde_json::Value> {
+    attempt_ids
+        .into_iter()
+        .map(|attempt_id| {
+            client
+                .query_one(
+                    "SELECT result FROM ryvus_attempts WHERE attempt_id = $1",
+                    &[&attempt_id.as_ref()],
+                )
+                .unwrap()
+                .get(0)
+        })
+        .collect()
+}
+
+fn migration_lifecycle(
+    client: &mut Client,
+    attempt_ids: [&AttemptId; 3],
+) -> Vec<(String, Option<String>, Option<i64>, Option<i64>)> {
+    attempt_ids
+        .into_iter()
+        .map(|attempt_id| {
+            let row = client
+                .query_one(
+                    "SELECT state, outcome, started_at_unix_ns, finished_at_unix_ns \
+                     FROM ryvus_attempts WHERE attempt_id = $1",
+                    &[&attempt_id.as_ref()],
+                )
+                .unwrap();
+            (row.get(0), row.get(1), row.get(2), row.get(3))
+        })
+        .collect()
 }
 
 fn run_provider_contract(store: &dyn ExecutionStateStore) {
@@ -1508,6 +1708,7 @@ fn run_provider_contract(store: &dyn ExecutionStateStore) {
         .any(|aggregate| aggregate.execution_id == created.execution_id));
 
     validate_retry_contract(store);
+    validate_log_rejection_contract(store);
     validate_structured_result_contract(store);
 }
 
@@ -1584,6 +1785,63 @@ fn validate_structured_result_contract(store: &dyn ExecutionStateStore) {
     let reloaded = store.load(&created.execution_id).unwrap().unwrap();
     assert_eq!(reloaded, finished);
     assert_eq!(reloaded.attempts[0].result, Some(result));
+}
+
+fn validate_log_rejection_contract(store: &dyn ExecutionStateStore) {
+    let created = store.create(new_execution()).unwrap();
+    let first = attempt(&created.execution_id, 1);
+    let running = applied(
+        store
+            .compare_and_set(
+                &created.execution_id,
+                created.execution_version,
+                ExecutionMutation::StartAttempt {
+                    attempt: first.clone(),
+                },
+            )
+            .unwrap(),
+    );
+    let request = InvocationRequest::with_attempt(
+        json!({}),
+        InvocationContext::default(),
+        first.attempt.clone(),
+    );
+    let result = ExecutionResult {
+        invocation_result: InvocationResult::success(&request, json!({})),
+        events: vec![InvocationEvent::Log(LogEvent {
+            execution_id: first.attempt.execution_id.clone(),
+            attempt_id: first.attempt.attempt_id.clone(),
+            attempt_number: first.attempt.attempt_number,
+            timestamp_unix_nanos: None,
+            trace_id: None,
+            span_id: None,
+            level: LogLevel::Info,
+            message: "must not persist".into(),
+            fields: json!({}),
+        })],
+        stdout: String::new(),
+        stderr: String::new(),
+        duration: Duration::ZERO,
+        exit_code: Some(0),
+    };
+    assert!(matches!(
+        store.compare_and_set(
+            &created.execution_id,
+            running.execution_version,
+            ExecutionMutation::FinishAttempt {
+                attempt_id: first.attempt.attempt_id.clone(),
+                outcome: AttemptOutcome::Succeeded,
+                result: Some(result),
+                retry: None,
+                terminal: Some(TerminalState::new(
+                    ExecutionState::Succeeded,
+                    Some(first.attempt.attempt_id),
+                )),
+            },
+        ),
+        Err(StateStoreError::InvalidMutation(_))
+    ));
+    assert_eq!(store.load(&created.execution_id).unwrap(), Some(running));
 }
 
 fn validate_restart(url: &str) {
@@ -1991,13 +2249,13 @@ fn structured_result(attempt: &ExecutionAttempt) -> ExecutionResult {
     );
     ExecutionResult {
         invocation_result: InvocationResult::success(&request, json!({ "ok": true })),
-        events: vec![InvocationEvent::Log(LogEvent {
+        events: vec![InvocationEvent::Metric(MetricEvent {
             execution_id: attempt.execution_id.clone(),
             attempt_id: attempt.attempt_id.clone(),
             attempt_number: attempt.attempt_number,
-            level: LogLevel::Info,
-            message: "postgres structured log".into(),
-            fields: json!({ "provider": "postgres" }),
+            name: "jobs".into(),
+            value: 1.0,
+            unit: "count".into(),
         })],
         stdout: String::new(),
         stderr: String::new(),

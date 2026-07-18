@@ -13,7 +13,7 @@ use tokio::{
 };
 
 use crate::{
-    InvocationWorker, InvocationWorkerFactory, StartedWorker, WorkerError, WorkerInvocation,
+    InvocationWorker, InvocationWorkerFactory, StartedWorker, WorkerError, WorkerEventConsumer,
 };
 
 #[derive(Debug, Clone)]
@@ -129,7 +129,8 @@ impl InvocationWorker for ProcessInvocationWorker {
         &self,
         request: InvocationRequest,
         deadline: Instant,
-    ) -> Result<WorkerInvocation, WorkerError> {
+        events: Arc<dyn WorkerEventConsumer>,
+    ) -> Result<InvocationResult, WorkerError> {
         let payload = serde_json::to_vec(&request).map_err(WorkerError::Serialize)?;
         let mut stdin = self.stdin.lock().await.take().ok_or_else(|| {
             WorkerError::Protocol("worker stdin was already consumed".to_string())
@@ -143,7 +144,6 @@ impl InvocationWorker for ProcessInvocationWorker {
         drop(stdin);
 
         let mut terminal = None;
-        let mut events = Vec::new();
         while let Some(frame) = self.read_frame(deadline).await? {
             if terminal.is_some() {
                 return Err(match frame {
@@ -162,16 +162,14 @@ impl InvocationWorker for ProcessInvocationWorker {
                         "worker emitted an unexpected ready frame".to_string(),
                     ));
                 }
-                WorkerFrame::Event { event } => events.push(event),
+                WorkerFrame::Event { event } => events.record(event),
                 WorkerFrame::Result { result } => terminal = Some(result),
             }
         }
 
-        terminal
-            .map(|result| WorkerInvocation { result, events })
-            .ok_or_else(|| {
-                WorkerError::Protocol("worker stdout ended before a terminal result".to_string())
-            })
+        terminal.ok_or_else(|| {
+            WorkerError::Protocol("worker stdout ended before a terminal result".to_string())
+        })
     }
 
     async fn terminate(&self, _reason: TerminationReason) -> Result<(), WorkerError> {

@@ -13,6 +13,17 @@ use tokio_tungstenite::{
 
 use crate::RuntimeHost;
 
+struct ControlSessionGuard {
+    host: RuntimeHost,
+    session_id: ryvus_protocol::RuntimeSessionId,
+}
+
+impl Drop for ControlSessionGuard {
+    fn drop(&mut self) {
+        self.host.end_control_session(&self.session_id);
+    }
+}
+
 pub type WebSocketHeaderProvider = Arc<dyn Fn(&mut HeaderMap) -> Result<(), String> + Send + Sync>;
 
 #[derive(Clone)]
@@ -111,6 +122,10 @@ impl WebSocketRuntimeHostClient {
             .map_err(|error| WebSocketRuntimeHostError::Connection(error.to_string()))?;
 
         let session_id = host.begin_control_session();
+        let _session = ControlSessionGuard {
+            host: host.clone(),
+            session_id: session_id.clone(),
+        };
         let mut events = host.subscribe_control_events();
         let registration = host.registration(self.revision.clone()).await;
         send_json(&mut socket, &registration).await?;

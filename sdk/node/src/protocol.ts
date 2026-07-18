@@ -49,6 +49,9 @@ export interface LogEvent {
   execution_id: string;
   attempt_id: string;
   attempt_number: number;
+  timestamp_unix_nanos?: number;
+  trace_id?: string;
+  span_id?: string;
   level: "debug" | "info" | "warn" | "error" | "trace";
   message: string;
   fields: JsonValue;

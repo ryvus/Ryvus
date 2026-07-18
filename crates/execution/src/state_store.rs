@@ -5,7 +5,8 @@ use std::{
 };
 
 use ryvus_protocol::{
-    ActionDefinition, AttemptId, AttemptOutcome, ExecutionAttempt, ExecutionId, InvocationRequest,
+    ActionDefinition, AttemptId, AttemptOutcome, ExecutionAttempt, ExecutionId, InvocationEvent,
+    InvocationRequest,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -426,6 +427,17 @@ pub fn validate_new_execution(execution: &NewExecution) -> StateStoreResult<()> 
     Ok(())
 }
 
+pub fn validate_execution_result(result: &ExecutionResult) -> StateStoreResult<()> {
+    if result
+        .events
+        .iter()
+        .any(|event| matches!(event, InvocationEvent::Log(_)))
+    {
+        return Err(invalid("execution results must not contain log events"));
+    }
+    Ok(())
+}
+
 pub fn action_revision(action: &ActionDefinition) -> StateStoreResult<String> {
     let definition = serde_json::to_vec(action)
         .map_err(|error| invalid(format!("serialize action revision: {error}")))?;
@@ -517,6 +529,7 @@ pub fn validate_execution_aggregate(aggregate: &ExecutionAggregate) -> StateStor
             }
         }
         if let Some(result) = &record.result {
+            validate_execution_result(result)?;
             if result.invocation_result.attempt() != record.attempt
                 || result
                     .events
@@ -732,6 +745,9 @@ fn apply(
             terminal,
         } => {
             ensure_mutable(aggregate)?;
+            if let Some(result) = &result {
+                validate_execution_result(result)?;
+            }
             if retry.is_some() == terminal.is_some() {
                 return Err(invalid(
                     "finishing an attempt requires exactly one retry or terminal state",

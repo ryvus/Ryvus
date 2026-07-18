@@ -1,15 +1,20 @@
 use std::{
     collections::HashMap,
     net::TcpListener,
-    sync::{Arc, Mutex},
+    sync::{mpsc::SyncSender, Arc, Mutex},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
 
+use ryvus_logging::{
+    ExecutionLogRecord, ExecutionLogStore, InMemoryExecutionLogStore, RuntimeLogContext,
+};
 use ryvus_protocol::{
     ActiveAttemptOwnership, ExecutionAttempt, RuntimeHostId, RuntimeSessionId, WorkerId,
 };
-use ryvus_runtime_host::{ProcessInvocationWorkerFactory, ProcessWorkerConfig, RuntimeHost};
+use ryvus_runtime_host::{
+    ProcessInvocationWorkerFactory, ProcessWorkerConfig, RuntimeHost, RuntimeLogWriterConfig,
+};
 use tokio::sync::oneshot;
 
 use crate::{
@@ -96,6 +101,7 @@ pub trait RuntimeManager: Send + Sync {
         target: &RuntimeTarget,
         attempt: &ExecutionAttempt,
         timeout: Duration,
+        log_context: &RuntimeLogContext,
     ) -> ExecutorResult<RuntimeHandle>;
 
     fn release(
@@ -116,8 +122,9 @@ where
         target: &RuntimeTarget,
         attempt: &ExecutionAttempt,
         timeout: Duration,
+        log_context: &RuntimeLogContext,
     ) -> ExecutorResult<RuntimeHandle> {
-        self.as_ref().acquire(target, attempt, timeout)
+        self.as_ref().acquire(target, attempt, timeout, log_context)
     }
 
     fn release(
@@ -140,6 +147,13 @@ struct ManagedHost {
     thread: Option<JoinHandle<Result<(), String>>>,
 }
 
+struct RuntimeHostLogging {
+    context: RuntimeLogContext,
+    store: Arc<dyn ExecutionLogStore>,
+    config: RuntimeLogWriterConfig,
+    console: Option<SyncSender<ExecutionLogRecord>>,
+}
+
 #[derive(Default)]
 struct RuntimeState {
     hosts: HashMap<String, ManagedHost>,
@@ -150,6 +164,9 @@ pub struct LocalRuntimeManager {
     state: Mutex<RuntimeState>,
     control: RuntimeControlService,
     channel: Arc<InMemoryRuntimeControlChannel>,
+    log_store: Arc<dyn ExecutionLogStore>,
+    log_writer_config: RuntimeLogWriterConfig,
+    log_console: Option<SyncSender<ExecutionLogRecord>>,
 }
 
 impl std::fmt::Debug for LocalRuntimeManager {
@@ -164,10 +181,29 @@ impl LocalRuntimeManager {
         control: RuntimeControlService,
         channel: Arc<InMemoryRuntimeControlChannel>,
     ) -> Self {
+        Self::with_logging(
+            control,
+            channel,
+            Arc::new(InMemoryExecutionLogStore::default()),
+            RuntimeLogWriterConfig::default(),
+            None,
+        )
+    }
+
+    pub fn with_logging(
+        control: RuntimeControlService,
+        channel: Arc<InMemoryRuntimeControlChannel>,
+        log_store: Arc<dyn ExecutionLogStore>,
+        log_writer_config: RuntimeLogWriterConfig,
+        log_console: Option<SyncSender<ExecutionLogRecord>>,
+    ) -> Self {
         Self {
             state: Mutex::new(RuntimeState::default()),
             control,
             channel,
+            log_store,
+            log_writer_config,
+            log_console,
         }
     }
 }
@@ -178,6 +214,7 @@ impl RuntimeManager for LocalRuntimeManager {
         target: &RuntimeTarget,
         attempt: &ExecutionAttempt,
         timeout: Duration,
+        log_context: &RuntimeLogContext,
     ) -> ExecutorResult<RuntimeHandle> {
         if self
             .state
@@ -216,6 +253,12 @@ impl RuntimeManager for LocalRuntimeManager {
             runtime_host_id.clone(),
             runtime_session_id,
             worker_id,
+            RuntimeHostLogging {
+                context: log_context.clone(),
+                store: self.log_store.clone(),
+                config: self.log_writer_config.clone(),
+                console: self.log_console.clone(),
+            },
         )?;
         self.channel
             .register(runtime_host_id, host.runtime_host.control_sender());
@@ -304,6 +347,7 @@ fn start_runtime_host(
     runtime_host_id: RuntimeHostId,
     runtime_session_id: RuntimeSessionId,
     worker_id: WorkerId,
+    logging: RuntimeHostLogging,
 ) -> ExecutorResult<(String, ManagedHost)> {
     let config = ProcessWorkerConfig {
         command: target.command.clone(),
@@ -317,12 +361,16 @@ fn start_runtime_host(
         attempt_number: attempt.attempt_number,
         worker_id,
     };
-    let host = RuntimeHost::registered(
+    let host = RuntimeHost::logged(
         Arc::new(ProcessInvocationWorkerFactory::new(config)),
         runtime_host_id.clone(),
-        runtime_session_id,
+        Some(runtime_session_id),
         Some(expected_attempt),
-    );
+        logging.context,
+        logging.store,
+        logging.config,
+        logging.console,
+    )?;
     let router = host.router();
     let shutdown_host = host.clone();
     let control_host = host.clone();

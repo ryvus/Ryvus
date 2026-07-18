@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 ryvus-protocol = { workspace = true }
 ryvus-runtime-host = { workspace = true }
+ryvus-logging = { workspace = true }
 axum = { workspace = true }
 futures-util = { workspace = true }
 serde = { workspace = true }

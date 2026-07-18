@@ -1505,8 +1505,10 @@ dependencies = [
  "ryvus-execution",
  "ryvus-flow",
  "ryvus-gateway",
+ "ryvus-logging",
  "ryvus-persistence",
  "ryvus-protocol",
+ "ryvus-runtime-host",
  "ryvus-scheduler",
  "serde",
  "serde_json",
@@ -1553,6 +1555,7 @@ dependencies = [
  "futures-util",
  "mockall",
  "reqwest",
+ "ryvus-logging",
  "ryvus-protocol",
  "ryvus-runtime-host",
  "serde",
@@ -1592,8 +1595,10 @@ dependencies = [
  "ryvus-docs",
  "ryvus-execution",
  "ryvus-flow",
+ "ryvus-logging",
  "ryvus-persistence",
  "ryvus-protocol",
+ "ryvus-runtime-host",
  "ryvus-scheduler",
  "serde",
  "serde_json",
@@ -1605,6 +1610,20 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "utoipa",
+]
+
+[[package]]
+name = "ryvus-logging"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "ryvus-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
 ]
 
 [[package]]
@@ -1641,6 +1660,7 @@ dependencies = [
  "axum",
  "futures-util",
  "mockall",
+ "ryvus-logging",
  "ryvus-protocol",
  "serde",
  "serde_json",

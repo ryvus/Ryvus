@@ -88,6 +88,22 @@ async fn invokes_node_worker_and_preserves_structured_logs() {
 }
 
 #[tokio::test]
+async fn process_worker_streams_metrics_to_the_host_consumer() {
+    let _guard = PROCESS_TEST_LOCK.lock().await;
+    let host = script_host(METRIC_BEFORE_RESULT);
+    let request = invocation(json!({}), Duration::from_secs(5));
+
+    let response = call(&host, &request).await;
+
+    assert_eq!(response.0, StatusCode::OK, "{}", response_text(&response));
+    assert!(matches!(
+        host.take_events(&request.attempt()).as_slice(),
+        [InvocationEvent::Metric(metric)]
+            if metric.attempt_id == request.attempt_id && metric.name == "items"
+    ));
+}
+
+#[tokio::test]
 async fn handler_failure_is_a_valid_terminal_result() {
     let _guard = PROCESS_TEST_LOCK.lock().await;
     let fixture = PythonActionFixture::new();
@@ -224,6 +240,16 @@ r = json.loads(sys.stdin.readline())
 result = {"protocol_version":r["protocol_version"],"execution_id":r["execution_id"],"attempt_id":r["attempt_id"],"attempt_number":r["attempt_number"],"status":"success","output":{},"error":None}
 print(json.dumps({"type":"result","result":result}), flush=True)
 print(json.dumps({"type":"event","event":{"type":"log","execution_id":r["execution_id"],"attempt_id":r["attempt_id"],"attempt_number":r["attempt_number"],"level":"info","message":"late","fields":{}}}), flush=True)
+"#;
+
+const METRIC_BEFORE_RESULT: &str = r#"
+import json, sys
+print(json.dumps({"type":"ready"}), flush=True)
+r = json.loads(sys.stdin.readline())
+metric = {"type":"metric","execution_id":r["execution_id"],"attempt_id":r["attempt_id"],"attempt_number":r["attempt_number"],"name":"items","value":1.0,"unit":"count"}
+print(json.dumps({"type":"event","event":metric}), flush=True)
+result = {"protocol_version":r["protocol_version"],"execution_id":r["execution_id"],"attempt_id":r["attempt_id"],"attempt_number":r["attempt_number"],"status":"success","output":{},"error":None}
+print(json.dumps({"type":"result","result":result}), flush=True)
 "#;
 
 fn script_host(script: &str) -> RuntimeHost {

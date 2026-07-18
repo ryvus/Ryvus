@@ -1,5 +1,5 @@
 [package]
-name = "ryvus-runtime-host"
+name = "ryvus-logging"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -7,19 +7,13 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-async-trait = { workspace = true }
 axum = { workspace = true }
-futures-util = { workspace = true }
 ryvus-protocol = { workspace = true }
-ryvus-logging = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
-tokio-tungstenite = { workspace = true }
-tracing = { workspace = true }
-uuid = { workspace = true }
 
 [dev-dependencies]
-mockall = { workspace = true }
+tokio = { workspace = true }
 tower = { version = "0.5", features = ["util"] }

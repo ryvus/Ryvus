@@ -7,6 +7,7 @@ use ryvus_control::{ControlService, LocalControlConfig};
 pub fn run() -> Result<()> {
     project::configure_python_path();
     discover::run()?;
+    project::validate_log_configuration()?;
 
     let config = project::gateway_config()?;
     let control_service = ControlService::load_local(LocalControlConfig {

@@ -30,6 +30,7 @@ pub use recording::*;
 pub use resolver::*;
 pub use runtime_control::*;
 pub use runtime_manager::*;
+pub use ryvus_protocol::ExecutionScopeId;
 pub use service::*;
 pub use state_store::*;
 pub use target::*;
