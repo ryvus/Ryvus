@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { actionsApi, type ActionDetailDto, type ObservedRevision } from "../api/actions";
 import { historyApi, type ExecutionAggregate } from "../api/history";
+import { actionId } from "../artifacts/actions";
 import {
   type ActionDefinition,
   type Artifacts,
@@ -433,10 +434,6 @@ function stateTone(state: string): "green" | "red" | "amber" | "blue" | "slate" 
 
 function Meta({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return <div className="min-w-0"><dt className="font-mono text-[10px] font-bold uppercase text-slate-600">{label}</dt><dd className={cn("mt-1 truncate text-slate-300", mono && "max-w-52 font-mono text-xs")} title={value}>{value}</dd></div>;
-}
-
-function actionId(action: ActionDefinition) {
-  return action.name ?? action.entrypoint;
 }
 
 function actionKindLabel(action: ActionDefinition) {

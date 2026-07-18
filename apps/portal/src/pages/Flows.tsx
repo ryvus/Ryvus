@@ -10,7 +10,8 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useEffect, useMemo, useState } from "react";
-import type { Artifacts, FlowDefinition, FlowStep } from "../artifacts/types";
+import { actionHref, resolveActionReference } from "../artifacts/actions";
+import type { Artifacts, CatalogAction, FlowDefinition, FlowStep } from "../artifacts/types";
 import { Badge, Button, CodeBlock, EmptyState, Page, Panel, cn } from "../components/ui";
 
 type ExecutionStatus = "queued" | "running" | "succeeded" | "failed" | "skipped" | "cancelled";
@@ -90,6 +91,7 @@ export function Flows({ artifacts }: { artifacts: Artifacts }) {
       ) : selectedFlow ? (
         <FlowDetail
           flow={selectedFlow}
+          actions={artifacts.catalog.actions}
           executions={executions.filter((execution) => execution.flow_key === selectedFlow.key)}
           selectedExecutionId={selectedExecutionId}
           selectedStepKey={selectedStepKey}
@@ -195,6 +197,7 @@ function Metric({ label, value }: { label: string; value: string }) {
 
 function FlowDetail({
   flow,
+  actions,
   executions,
   selectedExecutionId,
   selectedStepKey,
@@ -205,6 +208,7 @@ function FlowDetail({
   onRetryStep,
 }: {
   flow: FlowDefinition;
+  actions: CatalogAction[];
   executions: FlowExecution[];
   selectedExecutionId: string;
   selectedStepKey: string;
@@ -226,6 +230,11 @@ function FlowDetail({
   const selectedStep =
     [...(selectedExecution?.steps ?? [])].reverse().find((step) => step.key === selectedStepKey) ??
     selectedExecution?.steps[0];
+  const selectedDefinitionStep =
+    flow.steps.find((step) => step.key === selectedStepKey) ?? flow.steps[0];
+  const selectedAction = selectedDefinitionStep
+    ? resolveActionReference(actions, selectedDefinitionStep.action)
+    : undefined;
   const graph = useMemo(
     () => flowToGraph(flow, selectedExecution, selectedStep?.key ?? selectedStepKey, onSelectStep),
     [flow, selectedExecution, selectedStep?.key, selectedStepKey, onSelectStep],
@@ -356,6 +365,25 @@ function FlowDetail({
               </CodeBlock>
             )}
           </div>
+          {selectedDefinitionStep && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-white/10 bg-[#111214] px-4 py-3">
+              <div className="min-w-0">
+                <span className="font-mono text-[10px] font-bold uppercase text-slate-600">Selected step</span>
+                <div className="mt-1 flex min-w-0 flex-wrap items-baseline gap-x-2">
+                  <strong className="text-sm text-white">{selectedDefinitionStep.key}</strong>
+                  <code className="truncate text-xs text-slate-500">{selectedDefinitionStep.action}</code>
+                </div>
+              </div>
+              {selectedAction && (
+                <a
+                  className="font-mono text-xs font-bold text-cyan-300 hover:text-cyan-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-300"
+                  href={actionHref(selectedAction)}
+                >
+                  View action
+                </a>
+              )}
+            </div>
+          )}
           {selectedExecution ? (
             <div className="grid min-w-0 items-start gap-4 2xl:grid-cols-[minmax(0,1fr)_minmax(460px,0.85fr)]">
               <div className="grid min-w-0 gap-4">

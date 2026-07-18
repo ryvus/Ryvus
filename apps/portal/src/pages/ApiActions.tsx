@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { defaultGatewayUrl, gatewayUrl } from "../api/runtime";
-import type { Artifacts } from "../artifacts/types";
+import { actionHref, resolveActionReference } from "../artifacts/actions";
+import type { Artifacts, CatalogAction } from "../artifacts/types";
 import { Badge, Button, CodeBlock, EmptyState, Page, Panel, cn } from "../components/ui";
 
 type OpenApiParameter = {
@@ -91,8 +92,12 @@ export function ApiActions({ artifacts }: { artifacts: Artifacts }) {
   const selected = operations.find((operation) => operation.key === selectedKey) ?? operations[0];
   const selectedAction = selected && artifacts.catalog.actions.find((action) => {
     const api = (action.kind as { Api?: { method?: string; path?: string } }).Api;
-    return api?.method?.toLowerCase() === selected.method && api.path === selected.path;
+    return api?.method?.toUpperCase() === selected.method && api.path === selected.path;
   });
+  const selectedAuthorizerReference = selected?.operation["x-ryvus-authorizer"];
+  const selectedAuthorizer = selectedAuthorizerReference
+    ? resolveActionReference(artifacts.catalog.actions, selectedAuthorizerReference)
+    : undefined;
 
   useEffect(() => {
     if (!selectedKey && operations[0]) {
@@ -123,7 +128,7 @@ export function ApiActions({ artifacts }: { artifacts: Artifacts }) {
           rel="noreferrer"
         >
           openapi.json
-        </a>{selectedAction && <a className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-3 font-mono text-xs font-bold text-slate-300 hover:text-white" href={`#actions?action_id=${encodeURIComponent(selectedAction.name ?? selectedAction.entrypoint)}&tab=executions&revision=${encodeURIComponent(selectedAction.action_revision)}`}>History</a>}</div>
+        </a></div>
       }
     >
       <div className="grid min-w-0 gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
@@ -164,7 +169,12 @@ export function ApiActions({ artifacts }: { artifacts: Artifacts }) {
             ))}
           </div>
         </Panel>
-        <TryIt operation={selected} openapi={artifacts.openapi} />
+        <TryIt
+          operation={selected}
+          openapi={artifacts.openapi}
+          action={selectedAction}
+          authorizerAction={selectedAuthorizer}
+        />
       </div>
     </Page>
   );
@@ -188,7 +198,7 @@ function routeTail(path: string) {
   return segments.length > 1 ? `/${segments.slice(1).join("/")}` : "/";
 }
 
-function TryIt({ operation, openapi }: { operation: Operation; openapi: Artifacts["openapi"] }) {
+function TryIt({ operation, openapi, action, authorizerAction }: { operation: Operation; openapi: Artifacts["openapi"]; action?: CatalogAction; authorizerAction?: CatalogAction }) {
   const baseUrl = defaultGatewayUrl();
   const [pathValues, setPathValues] = useState<Record<string, string>>({});
   const [queryValues, setQueryValues] = useState<Record<string, string>>({});
@@ -334,9 +344,19 @@ function TryIt({ operation, openapi }: { operation: Operation; openapi: Artifact
                 <ContentTypeBadges label="Consumes" values={requestContentOptions.map((content) => content.mediaType)} />
                 <ContentTypeBadges label="Produces" values={responseContentTypes} />
               </div>
-              <Button type="button" onClick={sendRequest} disabled={isRunning || Boolean(requestValidationError)}>
-                {isRunning ? "Sending..." : "Run endpoint"}
-              </Button>
+              <div className="flex gap-2">
+                {action && (
+                  <a
+                    className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-3 font-mono text-xs font-bold text-slate-300 transition hover:bg-white/[0.04] hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-300"
+                    href={actionHref(action)}
+                  >
+                    View action
+                  </a>
+                )}
+                <Button type="button" onClick={sendRequest} disabled={isRunning || Boolean(requestValidationError)}>
+                  {isRunning ? "Sending..." : "Run endpoint"}
+                </Button>
+              </div>
             </div>
           </div>
         </div>
@@ -346,9 +366,10 @@ function TryIt({ operation, openapi }: { operation: Operation; openapi: Artifact
             <div className="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(320px,0.7fr)]">
               <div className="grid gap-4">
                 <div className="grid gap-4">
-                  {(authControls.length > 0 || parameterControls.length > 0) && (
+                  {(operation.operation["x-ryvus-authorizer"] || authControls.length > 0 || parameterControls.length > 0) && (
                     <AuthorizationEditor
                       authorizer={operation.operation["x-ryvus-authorizer"]}
+                      authorizerAction={authorizerAction}
                       securityControls={authControls}
                       parameterControls={parameterControls}
                       values={authValues}
@@ -557,12 +578,14 @@ function HeaderEditor({
 
 function AuthorizationEditor({
   authorizer,
+  authorizerAction,
   securityControls,
   parameterControls,
   values,
   onChange,
 }: {
   authorizer?: string;
+  authorizerAction?: CatalogAction;
   securityControls: AuthControl[];
   parameterControls: AuthControl[];
   values: Record<string, string>;
@@ -575,7 +598,17 @@ function AuthorizationEditor({
           <h4 className="font-mono text-[11px] font-bold uppercase text-violet-200">Authorizer</h4>
           {authorizer && <code className="truncate text-xs text-violet-100/80">{authorizer}</code>}
         </div>
-        <Badge tone="violet">{securityControls.length} scheme{securityControls.length === 1 ? "" : "s"}</Badge>
+        <div className="flex items-center gap-2">
+          {authorizerAction && (
+            <a
+              className="font-mono text-xs font-bold text-cyan-300 hover:text-cyan-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-300"
+              href={actionHref(authorizerAction)}
+            >
+              View authorizer
+            </a>
+          )}
+          <Badge tone="violet">{securityControls.length} scheme{securityControls.length === 1 ? "" : "s"}</Badge>
+        </div>
       </div>
 
       {securityControls.length > 0 && (

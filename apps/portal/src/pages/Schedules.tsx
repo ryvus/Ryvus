@@ -2,11 +2,12 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import { useEffect, useState } from "react";
 import type { Artifacts } from "../artifacts/types";
 import { historyApi, type ScheduleRecord, type ScheduleTrigger } from "../api/history";
+import { actionHref } from "../artifacts/actions";
 import { Badge, Button, EmptyState, Page, Panel, cn } from "../components/ui";
 
 type TriggerKind = "all" | "scheduled" | "manual";
 
-export function Schedules({ artifacts: _artifacts }: { artifacts: Artifacts }) {
+export function Schedules({ artifacts }: { artifacts: Artifacts }) {
   const client = useQueryClient();
   const [hash, setHash] = useState(window.location.hash);
   const [triggerKind, setTriggerKind] = useState<TriggerKind>("all");
@@ -32,6 +33,10 @@ export function Schedules({ artifacts: _artifacts }: { artifacts: Artifacts }) {
     enabled: Boolean(selectedId && !listedSelection),
   });
   const selected = listedSelection ?? selectedSchedule.data;
+  const selectedAction = selected && artifacts.catalog.actions.find((action) => {
+    const schedule = (action.kind as { Schedule?: { key?: string } }).Schedule;
+    return schedule?.key === selected.stable_schedule_key;
+  });
   const triggers = useInfiniteQuery({
     queryKey: ["schedule-triggers", selectedId, triggerKind],
     queryFn: ({ pageParam }) => historyApi.triggers(selectedId, triggerKind === "all" ? undefined : triggerKind, pageParam),
@@ -81,7 +86,11 @@ export function Schedules({ artifacts: _artifacts }: { artifacts: Artifacts }) {
           <Panel className="grid gap-4 p-4 self-start">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div><h2 className="text-lg font-semibold">{selected.display_name}</h2><code className="text-xs text-slate-500">{selected.stable_schedule_key}</code></div>
-              <div className="flex gap-2"><Button type="button" onClick={() => toggle.mutate(selected)}>{selected.enablement === "enabled" ? "Disable" : "Enable"}</Button><Button type="button" onClick={() => run.mutate()} disabled={run.isPending || selected.availability === "unavailable"}>{run.isPending ? "Running..." : "Run now"}</Button></div>
+              <div className="flex flex-wrap gap-2">
+                {selectedAction && <a className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-3 font-mono text-xs font-bold text-slate-300 hover:bg-white/[0.04] hover:text-white" href={actionHref(selectedAction)}>View action</a>}
+                <Button type="button" onClick={() => toggle.mutate(selected)}>{selected.enablement === "enabled" ? "Disable" : "Enable"}</Button>
+                <Button type="button" onClick={() => run.mutate()} disabled={run.isPending || selected.availability === "unavailable"}>{run.isPending ? "Running..." : "Run now"}</Button>
+              </div>
             </div>
             <div className="flex flex-wrap gap-2"><Badge tone={selected.availability === "available" ? "green" : "red"}>{selected.availability}</Badge><Badge tone={selected.enablement === "enabled" ? "cyan" : "slate"}>{selected.enablement}</Badge><Badge tone="blue">revision {selected.current_revision}</Badge></div>
             <dl className="grid min-w-0 gap-3 sm:grid-cols-2"><Metric label="Next trigger" value={selected.next_trigger_at} /><Metric label="Last trigger" value={selected.last_scheduled_trigger_at} /></dl>
