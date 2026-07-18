@@ -3,9 +3,11 @@ use std::collections::{BTreeMap, HashMap};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    AttributeValue, ExecutionLogRecord, LogBatch, LogLossCause, LogLossRange, LogRecordPage,
-    LogRecordQuery, LogStoreError, LogStreamCompleteness, LogStreamCursor, LogStreamId,
-    LogStreamMetadata, LogStreamPage, LogStreamQuery, LogStreamSummary, LogStreamTransition,
+    AttributeValue, ExecutionLogRecord, LogBatch, LogLossCause, LogLossRange,
+    LogProjectedRecordCursor, LogProjectedRecordPage, LogProjectedRecordQuery,
+    LogProjectionDirection, LogRecordPage, LogRecordPosition, LogRecordQuery, LogStoreError,
+    LogStreamCompleteness, LogStreamCursor, LogStreamId, LogStreamMetadata, LogStreamPage,
+    LogStreamQuery, LogStreamSummary, LogStreamTransition,
 };
 use ryvus_protocol::{LogLevel, RuntimeKind};
 
@@ -190,6 +192,160 @@ impl StoreProjection {
             next_cursor: next_cursor.flatten(),
         })
     }
+
+    pub(crate) fn list_projected_records(
+        &self,
+        query: LogProjectedRecordQuery,
+    ) -> Result<LogProjectedRecordPage, LogStoreError> {
+        crate::store::validate_query_limit(query.limit)?;
+        if query.action_key_id.trim().is_empty() || query.action_revision.trim().is_empty() {
+            return Err(LogStoreError::InvalidQuery(
+                "action identity and revision are required".to_string(),
+            ));
+        }
+        if query
+            .cursor
+            .as_ref()
+            .is_some_and(|cursor| !projected_cursor_matches(cursor, &query))
+        {
+            return Err(LogStoreError::InvalidQuery(
+                "projected record cursor does not match query".to_string(),
+            ));
+        }
+
+        let mut matching = self
+            .streams
+            .values()
+            .filter(|stream| {
+                stream.metadata.stream_id.execution_scope == query.execution_scope
+                    && stream.metadata.action_key_id == query.action_key_id
+                    && stream.metadata.action_revision == query.action_revision
+                    && query
+                        .runtime_host_id
+                        .as_ref()
+                        .is_none_or(|host| &stream.metadata.stream_id.runtime_host_id == host)
+            })
+            .flat_map(|stream| stream.records.values())
+            .filter(|record| projected_record_matches(record, &query))
+            .collect::<Vec<_>>();
+        matching.sort_by(|left, right| compare_projected_records(left, right));
+
+        let (start, end) = match &query.cursor {
+            None => (matching.len().saturating_sub(query.limit), matching.len()),
+            Some(cursor) if cursor.direction == LogProjectionDirection::Older => {
+                let end = matching.partition_point(|record| {
+                    compare_record_position(record, &cursor.position).is_lt()
+                });
+                (end.saturating_sub(query.limit), end)
+            }
+            Some(cursor) => {
+                let start = matching.partition_point(|record| {
+                    !compare_record_position(record, &cursor.position).is_gt()
+                });
+                (start, start.saturating_add(query.limit).min(matching.len()))
+            }
+        };
+        let records = matching[start..end]
+            .iter()
+            .map(|record| (*record).clone())
+            .collect::<Vec<_>>();
+        let older_cursor = records
+            .first()
+            .map(|record| projected_cursor(&query, LogProjectionDirection::Older, record));
+        let newer_cursor = records
+            .last()
+            .map(|record| projected_cursor(&query, LogProjectionDirection::Newer, record));
+
+        Ok(LogProjectedRecordPage {
+            records,
+            older_cursor,
+            newer_cursor,
+            has_older: start > 0,
+            has_newer: end < matching.len(),
+        })
+    }
+}
+
+fn projected_record_matches(record: &ExecutionLogRecord, query: &LogProjectedRecordQuery) -> bool {
+    let record_query = LogRecordQuery {
+        stream_id: record.stream_id.clone(),
+        execution_id: query.execution_id.clone(),
+        attempt_id: query.attempt_id.clone(),
+        severity: query.severity.clone(),
+        message_contains: query.message_contains.clone(),
+        cursor: None,
+        limit: 1,
+    };
+    crate::store::record_matches_query(record, &record_query)
+}
+
+fn projected_cursor_matches(
+    cursor: &LogProjectedRecordCursor,
+    query: &LogProjectedRecordQuery,
+) -> bool {
+    cursor.execution_scope == query.execution_scope
+        && cursor.action_key_id == query.action_key_id
+        && cursor.action_revision == query.action_revision
+        && cursor.runtime_host_id == query.runtime_host_id
+        && cursor.execution_id == query.execution_id
+        && cursor.attempt_id == query.attempt_id
+        && cursor.severity == query.severity
+        && cursor.message_contains == query.message_contains
+}
+
+fn projected_cursor(
+    query: &LogProjectedRecordQuery,
+    direction: LogProjectionDirection,
+    record: &ExecutionLogRecord,
+) -> LogProjectedRecordCursor {
+    LogProjectedRecordCursor {
+        execution_scope: query.execution_scope.clone(),
+        action_key_id: query.action_key_id.clone(),
+        action_revision: query.action_revision.clone(),
+        runtime_host_id: query.runtime_host_id.clone(),
+        execution_id: query.execution_id.clone(),
+        attempt_id: query.attempt_id.clone(),
+        severity: query.severity.clone(),
+        message_contains: query.message_contains.clone(),
+        direction,
+        position: LogRecordPosition {
+            observed_timestamp_unix_nanos: record.observed_timestamp_unix_nanos,
+            runtime_host_id: record.stream_id.runtime_host_id.clone(),
+            stream_sequence: record.stream_sequence,
+        },
+    }
+}
+
+fn compare_projected_records(
+    left: &ExecutionLogRecord,
+    right: &ExecutionLogRecord,
+) -> std::cmp::Ordering {
+    left.observed_timestamp_unix_nanos
+        .cmp(&right.observed_timestamp_unix_nanos)
+        .then_with(|| {
+            left.stream_id
+                .runtime_host_id
+                .as_ref()
+                .cmp(right.stream_id.runtime_host_id.as_ref())
+        })
+        .then_with(|| left.stream_sequence.cmp(&right.stream_sequence))
+}
+
+fn compare_record_position(
+    record: &ExecutionLogRecord,
+    position: &LogRecordPosition,
+) -> std::cmp::Ordering {
+    record
+        .observed_timestamp_unix_nanos
+        .cmp(&position.observed_timestamp_unix_nanos)
+        .then_with(|| {
+            record
+                .stream_id
+                .runtime_host_id
+                .as_ref()
+                .cmp(position.runtime_host_id.as_ref())
+        })
+        .then_with(|| record.stream_sequence.cmp(&position.stream_sequence))
 }
 
 fn stream_matches_query(stream: &StreamProjection, query: &LogStreamQuery) -> bool {

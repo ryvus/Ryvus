@@ -9,9 +9,9 @@ use std::{
 
 use mockall::mock;
 use ryvus_logging::{
-    AttributeValue, ExecutionLogStore, LogBatch, LogLossCause, LogRecordPage, LogRecordQuery,
-    LogStoreError, LogStreamMetadata, LogStreamPage, LogStreamQuery, LogStreamTransition,
-    RuntimeLogContext,
+    AttributeValue, ExecutionLogStore, LogBatch, LogLossCause, LogProjectedRecordPage,
+    LogProjectedRecordQuery, LogRecordPage, LogRecordQuery, LogStoreError, LogStreamMetadata,
+    LogStreamPage, LogStreamQuery, LogStreamTransition, RuntimeLogContext,
 };
 use ryvus_protocol::{
     AttemptId, ExecutionId, ExecutionScopeId, LogEvent, LogLevel, RuntimeHostId, RuntimeKind,
@@ -29,6 +29,7 @@ mock! {
         fn append_batch(&self, batch: LogBatch) -> Result<(), LogStoreError>;
         fn list_streams(&self, query: LogStreamQuery) -> Result<LogStreamPage, LogStoreError>;
         fn list_records(&self, query: LogRecordQuery) -> Result<LogRecordPage, LogStoreError>;
+        fn list_projected_records(&self, query: LogProjectedRecordQuery) -> Result<LogProjectedRecordPage, LogStoreError>;
     }
 }
 
@@ -58,6 +59,7 @@ fn event(message: &str) -> LogEvent {
 
 fn config(capacity: usize, batch_size: usize, policy: LogOverflowPolicy) -> RuntimeLogWriterConfig {
     RuntimeLogWriterConfig {
+        minimum_level: LogLevel::Info,
         capacity,
         batch_size,
         flush_interval: Duration::from_secs(30),
@@ -130,6 +132,66 @@ fn normalization_is_typed_deterministic_and_preserves_invalid_trace_as_diagnosti
     assert!(record
         .attributes
         .contains_key("ryvus.log.stringified_attributes"));
+}
+
+#[test]
+fn default_info_threshold_filters_before_sequence_assignment() {
+    let batches = Arc::new(Mutex::new(Vec::new()));
+    let mut store = MockStore::new();
+    store.expect_append_batch().returning({
+        let batches = Arc::clone(&batches);
+        move |batch| {
+            batches.lock().expect("batches").push(batch);
+            Ok(())
+        }
+    });
+    let writer = writer(store, RuntimeLogWriterConfig::default());
+
+    let mut trace = event("trace");
+    trace.level = LogLevel::Trace;
+    let mut debug = event("debug");
+    debug.level = LogLevel::Debug;
+    let info = event("info");
+    let mut warn = event("warn");
+    warn.level = LogLevel::Warn;
+    let mut error = event("error");
+    error.level = LogLevel::Error;
+
+    assert_eq!(writer.enqueue(trace, 1, None).expect("trace"), None);
+    assert_eq!(writer.enqueue(debug, 2, None).expect("debug"), None);
+    assert_eq!(writer.enqueue(info, 3, None).expect("info"), Some(1));
+    assert_eq!(writer.enqueue(warn, 4, None).expect("warn"), Some(2));
+    assert_eq!(writer.enqueue(error, 5, None).expect("error"), Some(3));
+    assert_eq!(
+        writer
+            .enqueue_lifecycle(LogLevel::Trace, "runtime.trace", json!({}), 6, None)
+            .expect("lifecycle trace"),
+        None
+    );
+    writer
+        .shutdown(Instant::now() + Duration::from_secs(2))
+        .expect("shutdown");
+
+    let batches = batches.lock().expect("batches");
+    let records: Vec<_> = batches
+        .iter()
+        .flat_map(|batch| batch.records.iter())
+        .collect();
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.message.as_str())
+            .collect::<Vec<_>>(),
+        ["info", "warn", "error"]
+    );
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.stream_sequence)
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    assert!(batches.iter().all(|batch| batch.loss_ranges.is_empty()));
 }
 
 #[test]
@@ -711,7 +773,10 @@ fn oversized_identity_is_rejected_before_sequence_assignment() {
         writer.enqueue(oversized, 1, None),
         Err(RuntimeLogWriterError::InvalidIdentity(_))
     ));
-    assert_eq!(writer.enqueue(event("valid"), 2, None).expect("valid"), 1);
+    assert_eq!(
+        writer.enqueue(event("valid"), 2, None).expect("valid"),
+        Some(1)
+    );
     writer
         .shutdown(Instant::now() + Duration::from_secs(1))
         .expect("shutdown");

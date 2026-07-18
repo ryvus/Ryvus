@@ -189,7 +189,7 @@ function ActionDetailPage({ actionId: selectedActionId, params, catalogAction }:
         {activeTab === "executions" && <Executions context={{ actionId: action.action_id, actionRevision: params.get("revision") ?? undefined, executionId: params.get("execution_id") ?? undefined, withinAction: true }} />}
         {activeTab === "configuration" && <ConfigurationTab detail={action} effectivePolicy={catalogAction?.effective_policy} />}
         {activeTab === "revisions" && <RevisionsTab detail={action} selectedRevision={params.get("revision")} />}
-        {activeTab === "logs" && <Logs context={{ actionId: action.action_id, actionRevision: params.get("revision") ?? undefined, executionId: params.get("execution_id") ?? undefined, attemptId: params.get("attempt_id") ?? undefined, runtimeHostId: params.get("runtime_host_id") ?? undefined, withinAction: true }} />}
+        {activeTab === "logs" && <Logs context={{ actionId: action.action_id, actionRevision: params.get("revision") ?? action.current_revision, executionId: params.get("execution_id") ?? undefined, attemptId: params.get("attempt_id") ?? undefined, runtimeHostId: params.get("runtime_host_id") ?? undefined, withinAction: true }} />}
       </div>
     </Page>
   );

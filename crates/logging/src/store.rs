@@ -11,6 +11,10 @@ pub trait ExecutionLogStore: Send + Sync {
     fn append_batch(&self, batch: LogBatch) -> Result<(), LogStoreError>;
     fn list_streams(&self, query: LogStreamQuery) -> Result<LogStreamPage, LogStoreError>;
     fn list_records(&self, query: LogRecordQuery) -> Result<LogRecordPage, LogStoreError>;
+    fn list_projected_records(
+        &self,
+        query: LogProjectedRecordQuery,
+    ) -> Result<LogProjectedRecordPage, LogStoreError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +45,48 @@ pub struct LogRecordQuery {
     pub severity: Option<LogLevel>,
     pub message_contains: Option<String>,
     pub cursor: Option<u64>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogProjectionDirection {
+    Older,
+    Newer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogRecordPosition {
+    pub observed_timestamp_unix_nanos: i64,
+    pub runtime_host_id: RuntimeHostId,
+    pub stream_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogProjectedRecordCursor {
+    pub execution_scope: ExecutionScopeId,
+    pub action_key_id: String,
+    pub action_revision: String,
+    pub runtime_host_id: Option<RuntimeHostId>,
+    pub execution_id: Option<ExecutionId>,
+    pub attempt_id: Option<AttemptId>,
+    pub severity: Option<LogLevel>,
+    pub message_contains: Option<String>,
+    pub direction: LogProjectionDirection,
+    pub position: LogRecordPosition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogProjectedRecordQuery {
+    pub execution_scope: ExecutionScopeId,
+    pub action_key_id: String,
+    pub action_revision: String,
+    pub runtime_host_id: Option<RuntimeHostId>,
+    pub execution_id: Option<ExecutionId>,
+    pub attempt_id: Option<AttemptId>,
+    pub severity: Option<LogLevel>,
+    pub message_contains: Option<String>,
+    pub cursor: Option<LogProjectedRecordCursor>,
     pub limit: usize,
 }
 
@@ -79,6 +125,15 @@ pub struct LogStreamPage {
 pub struct LogRecordPage {
     pub records: Vec<ExecutionLogRecord>,
     pub next_cursor: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LogProjectedRecordPage {
+    pub records: Vec<ExecutionLogRecord>,
+    pub older_cursor: Option<LogProjectedRecordCursor>,
+    pub newer_cursor: Option<LogProjectedRecordCursor>,
+    pub has_older: bool,
+    pub has_newer: bool,
 }
 
 pub(crate) fn validate_query_limit(limit: usize) -> Result<(), LogStoreError> {

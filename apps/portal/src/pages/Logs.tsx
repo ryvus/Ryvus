@@ -12,6 +12,7 @@ import {
   type LogStreamSummary,
 } from "../api/logs";
 import { Badge, Button, EmptyState, Page, Panel, cn } from "../components/ui";
+import { ActionRevisionLogs } from "./ActionRevisionLogs";
 
 export type LogViewContext = {
   actionId?: string;
@@ -25,6 +26,11 @@ export type LogViewContext = {
 type LogGroupMode = "runtime_host" | "execution" | "time";
 
 export function Logs({ context }: { context?: LogViewContext }) {
+  if (context?.withinAction && context.actionId) return <ActionRevisionLogs context={context} />;
+  return <StreamLogs context={context} />;
+}
+
+function StreamLogs({ context }: { context?: LogViewContext }) {
   const [hash, setHash] = useState(window.location.hash);
   useEffect(() => {
     const update = () => setHash(window.location.hash);

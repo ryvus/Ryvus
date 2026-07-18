@@ -15,8 +15,9 @@ use serde_json::json;
 
 use crate::{
     AttributeValue, ExecutionLogCorrelation, ExecutionLogRecord, ExecutionLogStore, LogLossCause,
-    LogRecordQuery, LogStoreError, LogStreamCompleteness, LogStreamCursor, LogStreamId,
-    LogStreamQuery, LogStreamSummary, MAX_QUERY_LIMIT,
+    LogProjectedRecordCursor, LogProjectedRecordQuery, LogProjectionDirection, LogRecordQuery,
+    LogStoreError, LogStreamCompleteness, LogStreamCursor, LogStreamId, LogStreamQuery,
+    LogStreamSummary, MAX_QUERY_LIMIT,
 };
 
 const DEFAULT_LIMIT: usize = 100;
@@ -52,6 +53,20 @@ struct RecordQueryParams {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ProjectedRecordQueryParams {
+    action_key_id: Option<String>,
+    action_revision: Option<String>,
+    execution_id: Option<String>,
+    attempt_id: Option<String>,
+    runtime_host_id: Option<String>,
+    severity: Option<LogLevel>,
+    search: Option<String>,
+    older_cursor: Option<String>,
+    newer_cursor: Option<String>,
+    limit: Option<usize>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct VersionedCursor<T> {
     version: u8,
@@ -80,6 +95,15 @@ struct StreamPage {
 struct RecordPage {
     records: Vec<LogRecordDto>,
     next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProjectedRecordPage {
+    records: Vec<LogRecordDto>,
+    older_cursor: Option<String>,
+    newer_cursor: Option<String>,
+    has_older: bool,
+    has_newer: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -234,10 +258,70 @@ pub fn log_history_routes(store: Arc<dyn ExecutionLogStore>, scope: ExecutionSco
     Router::new()
         .route("/internal/logs/streams", get(list_streams))
         .route(
+            "/internal/logs/projected-records",
+            get(list_projected_records),
+        )
+        .route(
             "/internal/logs/streams/{runtime_host_id}/records",
             get(list_records),
         )
         .with_state(LogHistoryState { store, scope })
+}
+
+async fn list_projected_records(
+    State(state): State<LogHistoryState>,
+    query: Result<Query<ProjectedRecordQueryParams>, QueryRejection>,
+) -> Result<Json<ProjectedRecordPage>, LogHttpError> {
+    let Query(query) = query.map_err(|_| LogHttpError::InvalidQuery)?;
+    validate_limit(query.limit)?;
+    let action_key_id = required_value(query.action_key_id)?;
+    let action_revision = required_value(query.action_revision)?;
+    validate_optional_values([
+        query.execution_id.as_deref(),
+        query.attempt_id.as_deref(),
+        query.runtime_host_id.as_deref(),
+    ])?;
+    if query.older_cursor.is_some() && query.newer_cursor.is_some() {
+        return Err(LogHttpError::InvalidQuery);
+    }
+    let message_contains = normalize_search(query.search)?;
+    let cursor = match (query.older_cursor.as_deref(), query.newer_cursor.as_deref()) {
+        (Some(value), None) => Some((decode_cursor(value)?, LogProjectionDirection::Older)),
+        (None, Some(value)) => Some((decode_cursor(value)?, LogProjectionDirection::Newer)),
+        (None, None) => None,
+        (Some(_), Some(_)) => return Err(LogHttpError::InvalidQuery),
+    };
+    if cursor
+        .as_ref()
+        .is_some_and(|(cursor, direction): &(LogProjectedRecordCursor, _)| {
+            cursor.direction != *direction
+        })
+    {
+        return Err(LogHttpError::InvalidCursor);
+    }
+    let had_cursor = cursor.is_some();
+    let page = state
+        .store
+        .list_projected_records(LogProjectedRecordQuery {
+            execution_scope: state.scope,
+            action_key_id,
+            action_revision,
+            runtime_host_id: query.runtime_host_id.map(RuntimeHostId::from),
+            execution_id: query.execution_id.map(ExecutionId::from),
+            attempt_id: query.attempt_id.map(AttemptId::from),
+            severity: query.severity,
+            message_contains,
+            cursor: cursor.map(|(cursor, _)| cursor),
+            limit: query.limit.unwrap_or(DEFAULT_LIMIT),
+        })
+        .map_err(|error| LogHttpError::from_store(error, had_cursor))?;
+    Ok(Json(ProjectedRecordPage {
+        records: page.records.into_iter().map(Into::into).collect(),
+        older_cursor: page.older_cursor.map(encode_cursor).transpose()?,
+        newer_cursor: page.newer_cursor.map(encode_cursor).transpose()?,
+        has_older: page.has_older,
+        has_newer: page.has_newer,
+    }))
 }
 
 async fn list_streams(
@@ -367,6 +451,12 @@ fn validate_optional_values<const N: usize>(values: [Option<&str>; N]) -> Result
         return Err(LogHttpError::InvalidQuery);
     }
     Ok(())
+}
+
+fn required_value(value: Option<String>) -> Result<String, LogHttpError> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(LogHttpError::InvalidQuery)
 }
 
 fn normalize_search(search: Option<String>) -> Result<Option<String>, LogHttpError> {

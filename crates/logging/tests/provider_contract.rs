@@ -6,9 +6,9 @@ use std::{
 use ryvus_logging::{
     normalize_loss_ranges, AttributeValue, ExecutionLogCorrelation, ExecutionLogRecord,
     ExecutionLogStore, FilesystemExecutionLogStore, FilesystemLogStoreConfig,
-    InMemoryExecutionLogStore, LogBatch, LogLossCause, LogLossRange, LogRecordQuery, LogStoreError,
-    LogStreamCompleteness, LogStreamId, LogStreamMetadata, LogStreamQuery, LogStreamTransition,
-    MemoryLogStoreConfig,
+    InMemoryExecutionLogStore, LogBatch, LogLossCause, LogLossRange, LogProjectedRecordQuery,
+    LogRecordQuery, LogStoreError, LogStreamCompleteness, LogStreamId, LogStreamMetadata,
+    LogStreamQuery, LogStreamTransition, MemoryLogStoreConfig,
 };
 use ryvus_protocol::{
     AttemptId, ExecutionId, ExecutionScopeId, LogLevel, RuntimeHostId, RuntimeKind,
@@ -401,12 +401,102 @@ fn loss_ranges_are_canonical_and_summary_counts_are_derived(store: &dyn Executio
     assert_eq!(summary.loss_ranges, normalized);
 }
 
+fn projected_records_are_scoped_ordered_and_bidirectional(store: &dyn ExecutionLogStore) {
+    let host_a = metadata("scope", "host-a", 1);
+    let host_b = metadata("scope", "host-b", 1);
+    let foreign = metadata("foreign", "host-a", 1);
+    let mut first = batch(&host_a, "host-a", &[1, 2], Vec::new(), None);
+    first.records[0].observed_timestamp_unix_nanos = 10;
+    first.records[1].observed_timestamp_unix_nanos = 11;
+    let mut second = batch(&host_b, "host-b", &[1], Vec::new(), None);
+    second.records[0].observed_timestamp_unix_nanos = 10;
+    let mut foreign_batch = batch(&foreign, "foreign", &[1], Vec::new(), None);
+    foreign_batch.records[0].observed_timestamp_unix_nanos = 100;
+    store.append_batch(first).expect("host a");
+    store.append_batch(second).expect("host b");
+    store.append_batch(foreign_batch).expect("foreign");
+
+    let query = LogProjectedRecordQuery {
+        execution_scope: scope("scope"),
+        action_key_id: "action".into(),
+        action_revision: "revision".into(),
+        runtime_host_id: None,
+        execution_id: None,
+        attempt_id: None,
+        severity: None,
+        message_contains: None,
+        cursor: None,
+        limit: 2,
+    };
+    let latest = store
+        .list_projected_records(query.clone())
+        .expect("latest page");
+    assert_eq!(
+        latest
+            .records
+            .iter()
+            .map(|record| (
+                record.stream_id.runtime_host_id.as_ref(),
+                record.stream_sequence
+            ))
+            .collect::<Vec<_>>(),
+        [("host-b", 1), ("host-a", 2)]
+    );
+    assert!(latest.has_older);
+    assert!(!latest.has_newer);
+
+    let older = store
+        .list_projected_records(LogProjectedRecordQuery {
+            cursor: latest.older_cursor.clone(),
+            ..query.clone()
+        })
+        .expect("older page");
+    assert_eq!(older.records.len(), 1);
+    assert_eq!(
+        older.records[0].stream_id.runtime_host_id.as_ref(),
+        "host-a"
+    );
+    assert!(older.has_newer);
+
+    let newer = store
+        .list_projected_records(LogProjectedRecordQuery {
+            cursor: older.newer_cursor,
+            ..query.clone()
+        })
+        .expect("newer page");
+    assert_eq!(newer.records, latest.records);
+
+    let filtered = store
+        .list_projected_records(LogProjectedRecordQuery {
+            runtime_host_id: Some(RuntimeHostId::from("host-a")),
+            execution_id: Some(ExecutionId::from("execution")),
+            attempt_id: Some(AttemptId::from("attempt")),
+            severity: Some(LogLevel::Info),
+            message_contains: Some("record 2".into()),
+            cursor: None,
+            limit: 10,
+            ..query.clone()
+        })
+        .expect("filtered page");
+    assert_eq!(filtered.records.len(), 1);
+    assert_eq!(filtered.records[0].stream_sequence, 2);
+
+    let mut mismatched = query;
+    mismatched.action_revision = "other".into();
+    mismatched.cursor = latest.older_cursor;
+    assert!(matches!(
+        store.list_projected_records(mismatched),
+        Err(LogStoreError::InvalidQuery(_))
+    ));
+}
+
 fn run_provider_contract(make_store: impl Fn() -> Box<dyn ExecutionLogStore>) {
     replay_is_idempotent_and_conflicting_replay_is_rejected(make_store().as_ref());
     stream_identity_and_batch_identity_are_scope_local(make_store().as_ref());
     validates_sequences_metadata_loss_and_terminality(make_store().as_ref());
     filters_and_paginates_deterministically(make_store().as_ref());
     loss_ranges_are_canonical_and_summary_counts_are_derived(make_store().as_ref());
+    projected_records_are_scoped_ordered_and_bidirectional(make_store().as_ref());
 }
 
 #[test]

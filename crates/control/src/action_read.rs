@@ -448,9 +448,10 @@ mod tests {
         RetryPolicy, StateStoreError, StateStoreResult, TerminalState, TransitionResult,
     };
     use ryvus_logging::{
-        ExecutionLogRecord, ExecutionLogStore, InMemoryExecutionLogStore, LogBatch, LogRecordPage,
-        LogRecordQuery, LogStoreError, LogStreamId, LogStreamMetadata, LogStreamPage,
-        LogStreamTransition, MemoryLogStoreConfig,
+        ExecutionLogRecord, ExecutionLogStore, InMemoryExecutionLogStore, LogBatch,
+        LogProjectedRecordPage, LogProjectedRecordQuery, LogRecordPage, LogRecordQuery,
+        LogStoreError, LogStreamId, LogStreamMetadata, LogStreamPage, LogStreamTransition,
+        MemoryLogStoreConfig,
     };
     use ryvus_protocol::{
         ActionExecutionPolicy, ActionKind, ActionManifest, ApiAction, AttemptOutcome, ExecutionId,
@@ -780,6 +781,13 @@ mod tests {
         }
 
         fn list_records(&self, _: LogRecordQuery) -> Result<LogRecordPage, LogStoreError> {
+            Err(log_provider_error())
+        }
+
+        fn list_projected_records(
+            &self,
+            _: LogProjectedRecordQuery,
+        ) -> Result<LogProjectedRecordPage, LogStoreError> {
             Err(log_provider_error())
         }
     }

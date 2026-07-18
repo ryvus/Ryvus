@@ -74,6 +74,13 @@ export type LogRecordFilters = Pick<LogFilters, "execution_id" | "attempt_id"> &
 
 export type LogStreamPage = { streams: LogStreamSummary[]; next_cursor?: string | null };
 export type LogRecordPage = { records: LogRecord[]; next_cursor?: string | null };
+export type ProjectedLogRecordPage = {
+  records: LogRecord[];
+  older_cursor?: string | null;
+  newer_cursor?: string | null;
+  has_older: boolean;
+  has_newer: boolean;
+};
 
 export const logsApi = {
   streams: (filters: LogFilters, cursor?: string, limit = 50) => {
@@ -83,6 +90,21 @@ export const logsApi = {
   records: (runtimeHostId: string, filters: LogRecordFilters, cursor?: string, limit = 100) => {
     const query = queryParams(filters, cursor, limit);
     return requestJson<LogRecordPage>(`/internal/logs/streams/${encodeURIComponent(runtimeHostId)}/records?${query}`);
+  },
+  projectedRecords: (
+    actionKeyId: string,
+    actionRevision: string,
+    filters: LogRecordFilters & { runtime_host_id?: string },
+    cursor?: { direction: "older" | "newer"; value: string },
+    limit = 100,
+  ) => {
+    const query = queryParams(
+      { action_key_id: actionKeyId, action_revision: actionRevision, ...filters },
+      undefined,
+      limit,
+    );
+    if (cursor) query.set(`${cursor.direction}_cursor`, cursor.value);
+    return requestJson<ProjectedLogRecordPage>(`/internal/logs/projected-records?${query}`);
   },
 };
 

@@ -13,8 +13,9 @@ use axum::{
 use ryvus_logging::{
     http::log_history_routes, ExecutionLogCorrelation, ExecutionLogRecord, ExecutionLogStore,
     FilesystemExecutionLogStore, FilesystemLogStoreConfig, InMemoryExecutionLogStore, LogBatch,
-    LogLossCause, LogLossRange, LogRecordPage, LogRecordQuery, LogStoreError, LogStreamId,
-    LogStreamMetadata, LogStreamPage, LogStreamQuery, LogStreamTransition,
+    LogLossCause, LogLossRange, LogProjectedRecordPage, LogProjectedRecordQuery, LogRecordPage,
+    LogRecordQuery, LogStoreError, LogStreamId, LogStreamMetadata, LogStreamPage, LogStreamQuery,
+    LogStreamTransition,
 };
 use ryvus_protocol::{
     AttemptId, ExecutionId, ExecutionScopeId, LogLevel, RuntimeHostId, RuntimeKind,
@@ -103,10 +104,12 @@ async fn get(app: Router, uri: &str) -> (StatusCode, Value) {
 async fn run_contract(store: Arc<dyn ExecutionLogStore>) {
     let older = stream("scope-a", "host-a", "inventory", "r1", 1);
     let newer = stream("scope-a", "host-b", "orders", "r2", 2);
+    let projected = stream("scope-a", "host-d", "inventory", "r1", 0);
     let foreign = stream("scope-b", "host-a", "inventory", "r1", 3);
     let foreign_older = stream("scope-b", "host-c", "inventory", "r1", 2);
     append(store.as_ref(), &older, &[1, 2]);
     append(store.as_ref(), &newer, &[1]);
+    append(store.as_ref(), &projected, &[1]);
     append(store.as_ref(), &foreign, &[1, 2]);
     append(store.as_ref(), &foreign_older, &[1]);
 
@@ -130,6 +133,57 @@ async fn run_contract(store: Arc<dyn ExecutionLogStore>) {
     let (status, filtered) = get(app.clone(), filters).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(filtered["streams"].as_array().expect("streams").len(), 1);
+
+    let projected_uri =
+        "/internal/logs/projected-records?action_key_id=inventory&action_revision=r1&limit=2";
+    let (status, projected_page) = get(app.clone(), projected_uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        projected_page["records"].as_array().expect("records").len(),
+        2
+    );
+    assert_eq!(projected_page["records"][0]["runtime_host_id"], "host-d");
+    assert_eq!(projected_page["records"][1]["stream_sequence"], "2");
+    assert_eq!(projected_page["has_older"], true);
+    let older_cursor = projected_page["older_cursor"]
+        .as_str()
+        .expect("older cursor");
+    let (status, older_page) = get(
+        app.clone(),
+        &format!("{projected_uri}&older_cursor={older_cursor}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(older_page["records"][0]["stream_sequence"], "1");
+    let (status, body) = get(
+        app.clone(),
+        &format!("/internal/logs/projected-records?action_key_id=inventory&action_revision=other&older_cursor={older_cursor}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "log_invalid_cursor");
+    let (status, body) = get(
+        app.clone(),
+        &format!("/internal/logs/projected-records?action_key_id=inventory&action_revision=r1&newer_cursor={older_cursor}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "log_invalid_cursor");
+    let (status, body) = get(
+        log_history_routes(store.clone(), scope("scope-b")),
+        &format!("{projected_uri}&older_cursor={older_cursor}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "log_invalid_cursor");
+
+    for uri in [
+        "/internal/logs/projected-records?action_revision=r1",
+        "/internal/logs/projected-records?action_key_id=inventory",
+        "/internal/logs/projected-records?action_key_id=inventory&action_revision=r1&older_cursor=a&newer_cursor=b",
+    ] {
+        assert_eq!(get(app.clone(), uri).await.0, StatusCode::BAD_REQUEST);
+    }
 
     let records = "/internal/logs/streams/host-a/records?limit=1&execution_id=execution-1&attempt_id=attempt-1";
     let (status, first_records) = get(app.clone(), records).await;
@@ -408,6 +462,13 @@ impl ExecutionLogStore for FailingStore {
     fn list_records(&self, _: LogRecordQuery) -> Result<LogRecordPage, LogStoreError> {
         Err(LogStoreError::Corruption)
     }
+
+    fn list_projected_records(
+        &self,
+        _: LogProjectedRecordQuery,
+    ) -> Result<LogProjectedRecordPage, LogStoreError> {
+        Err(LogStoreError::Corruption)
+    }
 }
 
 #[tokio::test]
@@ -421,7 +482,7 @@ async fn provider_errors_are_stable_and_safe() {
         assert!(!body.to_string().contains("I/O"));
 
         let (status, body) = get(
-            app,
+            app.clone(),
             "/internal/logs/streams/host-a/records?severity=error&search=database",
         )
         .await;
@@ -429,6 +490,14 @@ async fn provider_errors_are_stable_and_safe() {
         assert_eq!(body["error"], "log_provider_unavailable");
         assert!(!body.to_string().contains("corrupt"));
         assert!(!body.to_string().contains("I/O"));
+
+        let (status, body) = get(
+            app,
+            "/internal/logs/projected-records?action_key_id=inventory&action_revision=r1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "log_provider_unavailable");
     }
 }
 
@@ -436,6 +505,7 @@ async fn provider_errors_are_stable_and_safe() {
 struct CapturingStore {
     stream_queries: Mutex<Vec<LogStreamQuery>>,
     record_queries: Mutex<Vec<LogRecordQuery>>,
+    projected_queries: Mutex<Vec<LogProjectedRecordQuery>>,
 }
 
 impl ExecutionLogStore for CapturingStore {
@@ -464,6 +534,23 @@ impl ExecutionLogStore for CapturingStore {
             next_cursor: None,
         })
     }
+
+    fn list_projected_records(
+        &self,
+        query: LogProjectedRecordQuery,
+    ) -> Result<LogProjectedRecordPage, LogStoreError> {
+        self.projected_queries
+            .lock()
+            .expect("projected query lock")
+            .push(query);
+        Ok(LogProjectedRecordPage {
+            records: Vec::new(),
+            older_cursor: None,
+            newer_cursor: None,
+            has_older: false,
+            has_newer: false,
+        })
+    }
 }
 
 #[tokio::test]
@@ -483,6 +570,12 @@ async fn severity_and_search_are_validated_and_forwarded() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    let (status, _) = get(
+        app.clone(),
+        "/internal/logs/projected-records?action_key_id=inventory&action_revision=r1&severity=error&search=DATABASE",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 
     {
         let stream_queries = store.stream_queries.lock().expect("stream queries");
@@ -495,6 +588,12 @@ async fn severity_and_search_are_validated_and_forwarded() {
         assert_eq!(record_queries[0].severity, Some(LogLevel::Error));
         assert_eq!(
             record_queries[0].message_contains.as_deref(),
+            Some("database")
+        );
+        let projected_queries = store.projected_queries.lock().expect("projected queries");
+        assert_eq!(projected_queries[0].severity, Some(LogLevel::Error));
+        assert_eq!(
+            projected_queries[0].message_contains.as_deref(),
             Some("database")
         );
     }

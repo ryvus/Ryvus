@@ -9,9 +9,9 @@ use std::{
 use async_trait::async_trait;
 use axum::{body::Body, http::Request};
 use ryvus_logging::{
-    ExecutionLogStore, InMemoryExecutionLogStore, LogBatch, LogRecordPage, LogRecordQuery,
-    LogStoreError, LogStreamCompleteness, LogStreamId, LogStreamPage, LogStreamQuery,
-    RuntimeLogContext,
+    ExecutionLogStore, InMemoryExecutionLogStore, LogBatch, LogProjectedRecordPage,
+    LogProjectedRecordQuery, LogRecordPage, LogRecordQuery, LogStoreError, LogStreamCompleteness,
+    LogStreamId, LogStreamPage, LogStreamQuery, RuntimeLogContext,
 };
 use ryvus_protocol::{
     ControlCommandOutcome, ControlMessageId, ExecutionScopeId, InvocationEvent, InvocationRequest,
@@ -239,6 +239,13 @@ impl ExecutionLogStore for ObservingStore {
     fn list_records(&self, query: LogRecordQuery) -> Result<LogRecordPage, LogStoreError> {
         self.inner.list_records(query)
     }
+
+    fn list_projected_records(
+        &self,
+        query: LogProjectedRecordQuery,
+    ) -> Result<LogProjectedRecordPage, LogStoreError> {
+        self.inner.list_projected_records(query)
+    }
 }
 
 #[tokio::test]
@@ -322,6 +329,18 @@ async fn streams_logs_keeps_metrics_and_preserves_one_sessionless_stream() {
         records.first().map(|record| record.message.as_str()),
         Some("runtime.startup")
     );
+    for message in [
+        "runtime.startup",
+        "runtime.ready",
+        "worker.initialized",
+        "worker.ready",
+    ] {
+        let record = records
+            .iter()
+            .find(|record| record.message == message)
+            .unwrap_or_else(|| panic!("missing {message}"));
+        assert_eq!(record.severity, LogLevel::Trace, "{message}");
+    }
     assert_eq!(
         records
             .first()
@@ -479,6 +498,8 @@ async fn control_and_direct_drain_emit_one_lifecycle_record_before_shutdown() {
         .iter()
         .find(|record| record.message == "runtime.shutdown")
         .expect("shutdown record");
+    assert_eq!(drain[0].severity, LogLevel::Trace);
+    assert_eq!(shutdown.severity, LogLevel::Trace);
     assert!(drain[0].stream_sequence < shutdown.stream_sequence);
 }
 
@@ -656,6 +677,7 @@ async fn logged_startup_enrollment_finishes_before_shutdown_terminalizes() {
     let host_id = RuntimeHostId::from("host-startup-race");
     let entered = Arc::new(tokio::sync::Notify::new());
     let config = RuntimeLogWriterConfig {
+        minimum_level: LogLevel::Trace,
         batch_size: 1,
         ..RuntimeLogWriterConfig::default()
     };
@@ -835,6 +857,7 @@ fn logged_host(
     context: RuntimeLogContext,
 ) -> RuntimeHost {
     let config = RuntimeLogWriterConfig {
+        minimum_level: LogLevel::Trace,
         batch_size: 1,
         flush_interval: Duration::from_millis(5),
         ..RuntimeLogWriterConfig::default()

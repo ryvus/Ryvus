@@ -6,8 +6,9 @@ use std::{
 };
 
 use crate::{
-    normalize_loss_ranges, projection::StoreProjection, ExecutionLogStore, LogBatch, LogRecordPage,
-    LogRecordQuery, LogStoreError, LogStreamPage, LogStreamQuery,
+    normalize_loss_ranges, projection::StoreProjection, ExecutionLogStore, LogBatch,
+    LogProjectedRecordPage, LogProjectedRecordQuery, LogRecordPage, LogRecordQuery, LogStoreError,
+    LogStreamPage, LogStreamQuery,
 };
 
 const DEFAULT_MAX_BATCH_BYTES: usize = 1024 * 1024;
@@ -122,6 +123,13 @@ impl ExecutionLogStore for FilesystemExecutionLogStore {
 
     fn list_records(&self, query: LogRecordQuery) -> Result<LogRecordPage, LogStoreError> {
         self.lock_state()?.projection.list_records(query)
+    }
+
+    fn list_projected_records(
+        &self,
+        query: LogProjectedRecordQuery,
+    ) -> Result<LogProjectedRecordPage, LogStoreError> {
+        self.lock_state()?.projection.list_projected_records(query)
     }
 }
 

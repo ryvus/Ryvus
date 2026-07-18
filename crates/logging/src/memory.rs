@@ -6,9 +6,10 @@ use std::{
 use crate::{projection::StoreProjection, LogStreamMetadata};
 use crate::{
     store::{record_matches_query, validate_query_limit},
-    ExecutionLogStore, LogBatch, LogLossCause, LogLossRange, LogRecordPage, LogRecordQuery,
-    LogStoreError, LogStreamCompleteness, LogStreamCursor, LogStreamId, LogStreamPage,
-    LogStreamQuery, LogStreamSummary, LogStreamTransition,
+    ExecutionLogStore, LogBatch, LogLossCause, LogLossRange, LogProjectedRecordPage,
+    LogProjectedRecordQuery, LogRecordPage, LogRecordQuery, LogStoreError, LogStreamCompleteness,
+    LogStreamCursor, LogStreamId, LogStreamPage, LogStreamQuery, LogStreamSummary,
+    LogStreamTransition,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +228,13 @@ impl ExecutionLogStore for InMemoryExecutionLogStore {
             records,
             next_cursor,
         })
+    }
+
+    fn list_projected_records(
+        &self,
+        query: LogProjectedRecordQuery,
+    ) -> Result<LogProjectedRecordPage, LogStoreError> {
+        self.lock_state()?.projection.list_projected_records(query)
     }
 }
 

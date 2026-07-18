@@ -54,6 +54,7 @@ impl Default for LogNormalizationLimits {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeLogWriterConfig {
+    pub minimum_level: LogLevel,
     pub capacity: usize,
     pub batch_size: usize,
     pub flush_interval: Duration,
@@ -69,6 +70,7 @@ pub struct RuntimeLogWriterConfig {
 impl Default for RuntimeLogWriterConfig {
     fn default() -> Self {
         Self {
+            minimum_level: LogLevel::Info,
             capacity: 1024,
             batch_size: 64,
             flush_interval: Duration::from_millis(250),
@@ -80,6 +82,16 @@ impl Default for RuntimeLogWriterConfig {
             cleanup_period: Duration::from_secs(1),
             normalization: LogNormalizationLimits::default(),
         }
+    }
+}
+
+fn severity_rank(level: &LogLevel) -> u8 {
+    match level {
+        LogLevel::Trace => 0,
+        LogLevel::Debug => 1,
+        LogLevel::Info => 2,
+        LogLevel::Warn => 3,
+        LogLevel::Error => 4,
     }
 }
 
@@ -193,7 +205,7 @@ impl RuntimeLogWriter {
         event: LogEvent,
         observed_timestamp_unix_nanos: i64,
         runtime_session_id: Option<RuntimeSessionId>,
-    ) -> Result<u64, RuntimeLogWriterError> {
+    ) -> Result<Option<u64>, RuntimeLogWriterError> {
         validate_event_identity(&event, runtime_session_id.as_ref())?;
         self.enqueue_event(
             event,
@@ -210,7 +222,7 @@ impl RuntimeLogWriter {
         fields: Value,
         observed_timestamp_unix_nanos: i64,
         runtime_session_id: Option<RuntimeSessionId>,
-    ) -> Result<u64, RuntimeLogWriterError> {
+    ) -> Result<Option<u64>, RuntimeLogWriterError> {
         validate_session_identity(runtime_session_id.as_ref())?;
         self.enqueue_event(
             LogEvent {
@@ -236,7 +248,10 @@ impl RuntimeLogWriter {
         observed_timestamp_unix_nanos: i64,
         runtime_session_id: Option<RuntimeSessionId>,
         correlated: bool,
-    ) -> Result<u64, RuntimeLogWriterError> {
+    ) -> Result<Option<u64>, RuntimeLogWriterError> {
+        if severity_rank(&event.level) < severity_rank(&self.config.minimum_level) {
+            return Ok(None);
+        }
         let _admission = lock(&self.admission)?;
         let sequence = self
             .sequence
@@ -269,7 +284,7 @@ impl RuntimeLogWriter {
                 LogOverflowPolicy::DropNewest => {
                     record_loss(&mut state, sequence, LogLossCause::IngestionOverflow)?;
                     self.shared.wake.notify_one();
-                    return Ok(sequence);
+                    return Ok(Some(sequence));
                 }
                 LogOverflowPolicy::DropOldest => {
                     if let Some(dropped) = state.queue.pop_front() {
@@ -284,7 +299,7 @@ impl RuntimeLogWriter {
         }
         state.queue.push_back(record);
         self.shared.wake.notify_one();
-        Ok(sequence)
+        Ok(Some(sequence))
     }
 
     pub fn writer_known_loss(&self) -> Result<Vec<LogLossRange>, RuntimeLogWriterError> {

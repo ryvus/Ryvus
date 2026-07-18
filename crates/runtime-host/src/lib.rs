@@ -196,12 +196,12 @@ impl RuntimeHost {
             Some(Arc::new(writer)),
         );
         host.state.log_lifecycle(
-            LogLevel::Info,
+            LogLevel::Trace,
             "runtime.startup",
             json!({"ryvus.lifecycle": "startup"}),
         );
         host.state.log_lifecycle(
-            LogLevel::Info,
+            LogLevel::Trace,
             "runtime.ready",
             json!({"ryvus.lifecycle": "readiness"}),
         );
@@ -595,7 +595,7 @@ impl HostState {
         self.accepting.store(false, Ordering::Release);
         if !self.draining.swap(true, Ordering::AcqRel) {
             self.log_lifecycle(
-                LogLevel::Info,
+                LogLevel::Trace,
                 "runtime.drain",
                 json!({"ryvus.lifecycle": "drain"}),
             );
@@ -773,7 +773,7 @@ impl HostState {
             return Err(RuntimeHostError::LoggingProducersActive);
         }
         self.log_lifecycle_final(
-            LogLevel::Info,
+            LogLevel::Trace,
             "runtime.shutdown",
             json!({"ryvus.lifecycle": "shutdown"}),
         );
@@ -1060,7 +1060,7 @@ async fn invoke(
             }
         }
     };
-    state.log_invocation(&request, LogLevel::Info, "worker.initialized");
+    state.log_invocation(&request, LogLevel::Trace, "worker.initialized");
     let ownership = ActiveAttemptOwnership {
         execution_id: request.execution_id.clone(),
         attempt_id: request.attempt_id.clone(),
@@ -1186,7 +1186,7 @@ async fn supervise_attempt(
             RuntimeHostError::Worker(error)
         });
     }
-    state.log_invocation(&request, LogLevel::Info, "worker.ready");
+    state.log_invocation(&request, LogLevel::Trace, "worker.ready");
 
     let invocation = tokio::select! {
         biased;
