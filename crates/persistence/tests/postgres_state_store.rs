@@ -8,9 +8,10 @@ use std::{
 use postgres::{error::SqlState, Client, NoTls};
 use ryvus_execution::{
     action_revision, ActorRef, AttemptOwnership, AttemptRecord, ExecutionAggregate,
-    ExecutionIdentityFactory, ExecutionMutation, ExecutionPolicy, ExecutionResult,
-    ExecutionScopeId, ExecutionState, ExecutionStateStore, MemoryExecutionStateStore, NewExecution,
-    RetryPolicy, ScheduleId, StateStoreError, TerminalState, TransitionResult,
+    ExecutionHistoryQuery, ExecutionIdentityFactory, ExecutionMutation, ExecutionPolicy,
+    ExecutionResult, ExecutionScopeId, ExecutionState, ExecutionStateStore, ExecutionTrigger,
+    ExecutionTriggerKind, ManualExecutionSource, MemoryExecutionStateStore, NewExecution,
+    RetryPolicy, ScheduleId, ScheduleTriggerId, StateStoreError, TerminalState, TransitionResult,
 };
 use ryvus_persistence::{migrate, PostgresExecutionStateStore, PostgresScheduleStore};
 use ryvus_protocol::{
@@ -162,6 +163,121 @@ fn postgres_integration_suite() {
 
     eprintln!("phase: rollback validation");
     validate_transaction_rollback(db.url());
+}
+
+#[test]
+fn postgres_history_filters() {
+    let db = TestDatabase::create().unwrap_or_else(|error| panic!("{error}"));
+    migrate(db.url()).unwrap();
+    let store = PostgresExecutionStateStore::connect(db.url()).unwrap();
+    validate_history_filters(&store);
+}
+
+fn validate_history_filters(store: &dyn ExecutionStateStore) {
+    let scope = unique_scope("history-filters");
+    let cases = [
+        (
+            "exec-succeeded",
+            11,
+            ExecutionState::Succeeded,
+            ExecutionTrigger::Api,
+        ),
+        (
+            "exec-failed",
+            10,
+            ExecutionState::Failed,
+            ExecutionTrigger::Api,
+        ),
+        (
+            "exec-running",
+            13,
+            ExecutionState::Running,
+            ExecutionTrigger::Api,
+        ),
+        (
+            "exec-schedule",
+            14,
+            ExecutionState::Failed,
+            ExecutionTrigger::Schedule {
+                schedule_id: ScheduleId::new("schedule-1").unwrap(),
+                schedule_revision: 1,
+                trigger_id: ScheduleTriggerId::new("trigger-1").unwrap(),
+                scheduled_for: SystemTime::UNIX_EPOCH,
+            },
+        ),
+        (
+            "exec-manual",
+            15,
+            ExecutionState::Failed,
+            ExecutionTrigger::Manual {
+                actor: ActorRef::new("tester").unwrap(),
+                source: ManualExecutionSource::Direct,
+            },
+        ),
+        (
+            "exec-late",
+            20,
+            ExecutionState::Failed,
+            ExecutionTrigger::Api,
+        ),
+    ];
+    for (id, created_at, state, trigger) in cases {
+        let mut execution = new_execution();
+        execution.request.execution_id = ExecutionId::from(id);
+        execution.execution_scope_id = scope.clone();
+        execution.action_id = "inventory".into();
+        execution.trigger = trigger;
+        execution.creation_fingerprint = format!("fingerprint-{id}");
+        execution.created_at = SystemTime::UNIX_EPOCH + Duration::from_secs(created_at);
+        let aggregate = store.create(execution).unwrap();
+        if state == ExecutionState::Running {
+            store
+                .compare_and_set(
+                    &aggregate.execution_id,
+                    0,
+                    ExecutionMutation::StartAttempt {
+                        attempt: attempt(&aggregate.execution_id, 1),
+                    },
+                )
+                .unwrap();
+        } else {
+            store
+                .compare_and_set(
+                    &aggregate.execution_id,
+                    0,
+                    ExecutionMutation::FinishExecution {
+                        terminal: TerminalState::new(state, None),
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    let query = |cursor| ExecutionHistoryQuery {
+        execution_scope_id: scope.clone(),
+        action_id: Some("inventory".into()),
+        action_revision: None,
+        state: Some(ExecutionState::Failed),
+        trigger: Some(ExecutionTriggerKind::Api),
+        created_after: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(10)),
+        created_before: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(20)),
+        execution_id_prefix: Some("exec-fail".into()),
+        cursor,
+        limit: 10,
+    };
+    let page = store.list_history(query(None)).unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|item| item.execution_id.as_ref())
+            .collect::<Vec<_>>(),
+        ["exec-failed"]
+    );
+    let cursor = ExecutionId::from("exec-running");
+    assert_eq!(
+        store.list_history(query(Some(cursor.clone()))),
+        Err(StateStoreError::InvalidHistoryCursor { cursor })
+    );
 }
 
 fn run_schedule_provider_contract(store: &dyn ScheduleStore) {
@@ -1710,6 +1826,7 @@ fn run_provider_contract(store: &dyn ExecutionStateStore) {
     validate_retry_contract(store);
     validate_log_rejection_contract(store);
     validate_structured_result_contract(store);
+    validate_history_filters(store);
 }
 
 fn validate_retry_contract(store: &dyn ExecutionStateStore) {

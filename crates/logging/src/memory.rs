@@ -5,10 +5,10 @@ use std::{
 
 use crate::{projection::StoreProjection, LogStreamMetadata};
 use crate::{
-    store::validate_query_limit, ExecutionLogRecord, ExecutionLogStore, LogBatch, LogLossCause,
-    LogLossRange, LogRecordPage, LogRecordQuery, LogStoreError, LogStreamCompleteness,
-    LogStreamCursor, LogStreamId, LogStreamPage, LogStreamQuery, LogStreamSummary,
-    LogStreamTransition,
+    store::{record_matches_query, validate_query_limit},
+    ExecutionLogStore, LogBatch, LogLossCause, LogLossRange, LogRecordPage, LogRecordQuery,
+    LogStoreError, LogStreamCompleteness, LogStreamCursor, LogStreamId, LogStreamPage,
+    LogStreamQuery, LogStreamSummary, LogStreamTransition,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,16 +214,10 @@ impl ExecutionLogStore for InMemoryExecutionLogStore {
             .streams
             .get(&query.stream_id)
             .ok_or(LogStoreError::NotFound)?;
-        let mut matching = stream.records.values().filter(|record| {
-            query
-                .cursor
-                .is_none_or(|cursor| record.stream_sequence > cursor)
-                && correlation_matches(
-                    record,
-                    query.execution_id.as_ref(),
-                    query.attempt_id.as_ref(),
-                )
-        });
+        let mut matching = stream
+            .records
+            .values()
+            .filter(|record| record_matches_query(record, &query));
         let records: Vec<_> = matching.by_ref().take(query.limit).cloned().collect();
         let has_more = matching.next().is_some();
         let next_cursor = has_more
@@ -253,14 +247,27 @@ fn stream_matches_query(
             .runtime_host_id
             .as_ref()
             .is_none_or(|value| &stream.metadata.stream_id.runtime_host_id == value)
-        && (query.execution_id.is_none() && query.attempt_id.is_none()
-            || stream.records.values().any(|record| {
-                correlation_matches(
-                    record,
-                    query.execution_id.as_ref(),
-                    query.attempt_id.as_ref(),
-                )
-            }))
+        && if query.execution_id.is_none()
+            && query.attempt_id.is_none()
+            && query.severity.is_none()
+            && query.message_contains.is_none()
+        {
+            true
+        } else {
+            let record_query = LogRecordQuery {
+                stream_id: stream.metadata.stream_id.clone(),
+                execution_id: query.execution_id.clone(),
+                attempt_id: query.attempt_id.clone(),
+                severity: query.severity.clone(),
+                message_contains: query.message_contains.clone(),
+                cursor: None,
+                limit: 1,
+            };
+            stream
+                .records
+                .values()
+                .any(|record| record_matches_query(record, &record_query))
+        }
 }
 
 fn tombstone_matches_query(tombstone: &LogStreamTombstone, query: &LogStreamQuery) -> bool {
@@ -279,17 +286,8 @@ fn tombstone_matches_query(tombstone: &LogStreamTombstone, query: &LogStreamQuer
             .is_none_or(|value| &tombstone.stream.stream_id.runtime_host_id == value)
         && query.execution_id.is_none()
         && query.attempt_id.is_none()
-}
-
-fn correlation_matches(
-    record: &ExecutionLogRecord,
-    execution_id: Option<&ryvus_protocol::ExecutionId>,
-    attempt_id: Option<&ryvus_protocol::AttemptId>,
-) -> bool {
-    record.correlation.as_ref().is_some_and(|correlation| {
-        execution_id.is_none_or(|value| &correlation.execution_id == value)
-            && attempt_id.is_none_or(|value| &correlation.attempt_id == value)
-    }) || (execution_id.is_none() && attempt_id.is_none())
+        && query.severity.is_none()
+        && query.message_contains.is_none()
 }
 
 fn total_records(projection: &StoreProjection) -> Result<usize, LogStoreError> {

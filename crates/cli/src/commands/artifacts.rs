@@ -17,7 +17,9 @@ pub fn write_portal_artifacts(project_root: &Path, manifest: &ActionManifest) ->
 
     fs::create_dir_all(&pages_dir).map_err(CliError::Io)?;
 
-    write_json(output_dir.join("catalog.json"), manifest)?;
+    let catalog = ryvus_control::catalog_document(&manifest.actions)
+        .map_err(|_| CliError::SerializationFailed)?;
+    write_json(output_dir.join("catalog.json"), &catalog)?;
     write_json(
         output_dir.join("openapi.json"),
         &build_public_openapi_json_from_actions(&manifest.actions),

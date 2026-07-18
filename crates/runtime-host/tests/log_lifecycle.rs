@@ -308,6 +308,8 @@ async fn streams_logs_keeps_metrics_and_preserves_one_sessionless_stream() {
             stream_id: LogStreamId::new(context.execution_scope, host_id),
             execution_id: None,
             attempt_id: None,
+            severity: None,
+            message_contains: None,
             cursor: None,
             limit: 100,
         })
@@ -353,6 +355,8 @@ async fn streams_logs_keeps_metrics_and_preserves_one_sessionless_stream() {
             runtime_host_id: None,
             execution_id: None,
             attempt_id: None,
+            severity: None,
+            message_contains: None,
             cursor: None,
             limit: 10,
         })
@@ -404,6 +408,8 @@ async fn retained_event_consumer_prevents_terminal_construction() {
             runtime_host_id: Some(host_id),
             execution_id: None,
             attempt_id: None,
+            severity: None,
+            message_contains: None,
             cursor: None,
             limit: 10,
         })
@@ -457,6 +463,8 @@ async fn control_and_direct_drain_emit_one_lifecycle_record_before_shutdown() {
             stream_id: LogStreamId::new(context.execution_scope, host_id),
             execution_id: None,
             attempt_id: None,
+            severity: None,
+            message_contains: None,
             cursor: None,
             limit: 100,
         })
@@ -521,6 +529,8 @@ async fn concurrent_direct_and_control_shutdown_share_one_terminal_owner() {
             stream_id: LogStreamId::new(context.execution_scope, host_id),
             execution_id: None,
             attempt_id: None,
+            severity: None,
+            message_contains: None,
             cursor: None,
             limit: 100,
         })
@@ -566,6 +576,8 @@ async fn supervision_panic_emits_correlated_error_finish_after_start() {
             stream_id: LogStreamId::new(context.execution_scope, host_id),
             execution_id: Some(request.execution_id.clone()),
             attempt_id: Some(request.attempt_id.clone()),
+            severity: None,
+            message_contains: None,
             cursor: None,
             limit: 100,
         })
@@ -618,6 +630,8 @@ async fn failing_terminate_still_emits_exactly_one_correlated_finish() {
             stream_id: LogStreamId::new(context.execution_scope, host_id),
             execution_id: Some(request.execution_id.clone()),
             attempt_id: Some(request.attempt_id.clone()),
+            severity: None,
+            message_contains: None,
             cursor: None,
             limit: 100,
         })
@@ -688,6 +702,8 @@ async fn logged_startup_enrollment_finishes_before_shutdown_terminalizes() {
             stream_id: LogStreamId::new(context.execution_scope, host_id),
             execution_id: Some(request.execution_id.clone()),
             attempt_id: Some(request.attempt_id.clone()),
+            severity: None,
+            message_contains: None,
             cursor: None,
             limit: 100,
         })
@@ -716,6 +732,8 @@ async fn logged_startup_enrollment_finishes_before_shutdown_terminalizes() {
             stream_id: finish.stream_id.clone(),
             execution_id: None,
             attempt_id: None,
+            severity: None,
+            message_contains: None,
             cursor: None,
             limit: 100,
         })
@@ -785,6 +803,8 @@ async fn panic_recovery_guard_keeps_finish_before_concurrent_shutdown() {
             stream_id: LogStreamId::new(context.execution_scope, host_id),
             execution_id: None,
             attempt_id: None,
+            severity: None,
+            message_contains: None,
             cursor: None,
             limit: 100,
         })

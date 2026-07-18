@@ -63,6 +63,13 @@ export type LogFilters = {
   runtime_host_id?: string;
   execution_id?: string;
   attempt_id?: string;
+  severity?: string;
+  search?: string;
+};
+
+export type LogRecordFilters = Pick<LogFilters, "execution_id" | "attempt_id"> & {
+  severity?: string;
+  search?: string;
 };
 
 export type LogStreamPage = { streams: LogStreamSummary[]; next_cursor?: string | null };
@@ -73,7 +80,7 @@ export const logsApi = {
     const query = queryParams(filters, cursor, limit);
     return requestJson<LogStreamPage>(`/internal/logs/streams?${query}`);
   },
-  records: (runtimeHostId: string, filters: Pick<LogFilters, "execution_id" | "attempt_id">, cursor?: string, limit = 100) => {
+  records: (runtimeHostId: string, filters: LogRecordFilters, cursor?: string, limit = 100) => {
     const query = queryParams(filters, cursor, limit);
     return requestJson<LogRecordPage>(`/internal/logs/streams/${encodeURIComponent(runtimeHostId)}/records?${query}`);
   },

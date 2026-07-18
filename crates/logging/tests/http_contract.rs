@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::SystemTime};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::SystemTime,
+};
 
 use axum::{
     body::{to_bytes, Body},
@@ -409,12 +414,107 @@ impl ExecutionLogStore for FailingStore {
 async fn provider_errors_are_stable_and_safe() {
     for error in [LogStoreError::Io, LogStoreError::Corruption] {
         let app = log_history_routes(Arc::new(FailingStore(error)), scope("scope-a"));
-        let (status, body) = get(app, "/internal/logs/streams").await;
+        let (status, body) = get(app.clone(), "/internal/logs/streams").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "log_provider_unavailable");
+        assert!(!body.to_string().contains("corrupt"));
+        assert!(!body.to_string().contains("I/O"));
+
+        let (status, body) = get(
+            app,
+            "/internal/logs/streams/host-a/records?severity=error&search=database",
+        )
+        .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"], "log_provider_unavailable");
         assert!(!body.to_string().contains("corrupt"));
         assert!(!body.to_string().contains("I/O"));
     }
+}
+
+#[derive(Default)]
+struct CapturingStore {
+    stream_queries: Mutex<Vec<LogStreamQuery>>,
+    record_queries: Mutex<Vec<LogRecordQuery>>,
+}
+
+impl ExecutionLogStore for CapturingStore {
+    fn append_batch(&self, _: LogBatch) -> Result<(), LogStoreError> {
+        Ok(())
+    }
+
+    fn list_streams(&self, query: LogStreamQuery) -> Result<LogStreamPage, LogStoreError> {
+        self.stream_queries
+            .lock()
+            .expect("stream query lock")
+            .push(query);
+        Ok(LogStreamPage {
+            streams: Vec::new(),
+            next_cursor: None,
+        })
+    }
+
+    fn list_records(&self, query: LogRecordQuery) -> Result<LogRecordPage, LogStoreError> {
+        self.record_queries
+            .lock()
+            .expect("record query lock")
+            .push(query);
+        Ok(LogRecordPage {
+            records: Vec::new(),
+            next_cursor: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn severity_and_search_are_validated_and_forwarded() {
+    let store = Arc::new(CapturingStore::default());
+    let app = log_history_routes(store.clone(), scope("scope-a"));
+
+    let (status, _) = get(
+        app.clone(),
+        "/internal/logs/streams?severity=error&search=DATABASE",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = get(
+        app.clone(),
+        "/internal/logs/streams/host-a/records?severity=error&search=DATABASE",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    {
+        let stream_queries = store.stream_queries.lock().expect("stream queries");
+        assert_eq!(stream_queries[0].severity, Some(LogLevel::Error));
+        assert_eq!(
+            stream_queries[0].message_contains.as_deref(),
+            Some("database")
+        );
+        let record_queries = store.record_queries.lock().expect("record queries");
+        assert_eq!(record_queries[0].severity, Some(LogLevel::Error));
+        assert_eq!(
+            record_queries[0].message_contains.as_deref(),
+            Some("database")
+        );
+    }
+
+    for uri in [
+        "/internal/logs/streams?severity=critical",
+        "/internal/logs/streams?search=%20",
+    ] {
+        let (status, body) = get(app.clone(), uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "log_invalid_query");
+    }
+    let oversized = "a".repeat(257);
+    let (status, body) = get(
+        app,
+        &format!("/internal/logs/streams/host-a/records?search={oversized}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "log_invalid_query");
 }
 
 struct TempDir(PathBuf);

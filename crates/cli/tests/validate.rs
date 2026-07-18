@@ -347,6 +347,35 @@ def sync_inventory(context):
     assert!(project.root.join(".ryvus/flows.json").is_file());
     assert!(project.root.join(".ryvus/docs/registry.json").is_file());
 
+    let manifest: ryvus_protocol::ActionManifest = serde_json::from_str(
+        &fs::read_to_string(project.root.join(".ryvus/action-manifest.json"))
+            .expect("manifest should be written"),
+    )
+    .expect("manifest should parse");
+    let catalog: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project.root.join(".ryvus/catalog.json"))
+            .expect("catalog should be written"),
+    )
+    .expect("catalog should parse");
+    assert_eq!(
+        catalog["actions"][0]["action_revision"],
+        ryvus_execution::action_revision(&manifest.actions[0])
+            .expect("action revision should compute")
+    );
+    assert_eq!(catalog["actions"][0]["effective_policy"]["timeout"], "3s");
+    assert_eq!(
+        catalog["actions"][0]["effective_policy"]["retry"]["max_attempts"],
+        1
+    );
+    assert_eq!(
+        catalog["actions"][0]["effective_policy"]["retry"]["initial_delay"],
+        "1s"
+    );
+    assert_eq!(
+        catalog["actions"][0]["effective_policy"]["retry"]["backoff"],
+        2.0
+    );
+
     let openapi: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(project.root.join(".ryvus/openapi.json"))
             .expect("openapi should be written"),

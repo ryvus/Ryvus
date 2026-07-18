@@ -48,13 +48,35 @@ export type ExecutionAggregate = {
   attempts: Array<{
     attempt: { attempt_id: string; attempt_number: number };
     state: string;
+    outcome?: string | null;
+    started_at?: unknown;
+    finished_at?: unknown;
     result?: {
-      invocation_result: { output?: unknown; error?: unknown };
+      invocation_result: {
+        output?: unknown;
+        error?: {
+          code: string;
+          message: string;
+          retryable: boolean;
+          details?: unknown;
+        } | null;
+      };
       duration: { secs: number; nanos: number };
     } | null;
   }>;
-  terminal_state?: { state: string } | null;
+  cancellation_intent?: { requested_at: unknown } | null;
+  terminal_state?: { state: string; attempt_id?: string | null; accepted_at: unknown } | null;
   data_refs: Record<string, string | null>;
+};
+
+export type ExecutionFilters = {
+  action_id?: string;
+  action_revision?: string;
+  state?: string;
+  trigger?: string;
+  created_after_unix_ms?: string;
+  created_before_unix_ms?: string;
+  search?: string;
 };
 
 export type RunScheduleResponse = {
@@ -79,10 +101,9 @@ export const historyApi = {
   run: (id: string) => requestJson<RunScheduleResponse>(`/internal/scheduler/schedules/${encodeURIComponent(id)}/run`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }),
   enable: (id: string) => requestJson<ScheduleRecord>(`/internal/scheduler/schedules/${encodeURIComponent(id)}/enable`, { method: "POST" }),
   disable: (id: string) => requestJson<ScheduleRecord>(`/internal/scheduler/schedules/${encodeURIComponent(id)}/disable`, { method: "POST" }),
-  executions: (actionId?: string, actionRevision?: string, cursor?: string, limit = 50) => {
+  executions: (filters: ExecutionFilters, cursor?: string, limit = 50) => {
     const query = pageParams(cursor, limit);
-    if (actionId) query.set("action_id", actionId);
-    if (actionRevision) query.set("action_revision", actionRevision);
+    for (const [key, value] of Object.entries(filters)) if (value?.trim()) query.set(key, value);
     return requestJson<Page<ExecutionAggregate>>(`/internal/executions?${query}`);
   },
   execution: (id: string) => requestJson<ExecutionAggregate>(`/internal/executions/${encodeURIComponent(id)}`),

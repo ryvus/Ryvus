@@ -123,7 +123,7 @@ export function ApiActions({ artifacts }: { artifacts: Artifacts }) {
           rel="noreferrer"
         >
           openapi.json
-        </a>{selectedAction && <a className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-3 font-mono text-xs font-bold text-slate-300 hover:text-white" href={`#execution-preview?action_id=${encodeURIComponent(selectedAction.name ?? selectedAction.entrypoint)}&action_revision=${encodeURIComponent(actionRevision(selectedAction))}`}>History</a>}</div>
+        </a>{selectedAction && <a className="inline-flex min-h-9 items-center rounded-md border border-white/10 px-3 font-mono text-xs font-bold text-slate-300 hover:text-white" href={`#actions?action_id=${encodeURIComponent(selectedAction.name ?? selectedAction.entrypoint)}&tab=executions&revision=${encodeURIComponent(selectedAction.action_revision)}`}>History</a>}</div>
       }
     >
       <div className="grid min-w-0 gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
@@ -168,13 +168,6 @@ export function ApiActions({ artifacts }: { artifacts: Artifacts }) {
       </div>
     </Page>
   );
-}
-
-function actionRevision(action: Artifacts["catalog"]["actions"][number]) {
-  const bytes = new TextEncoder().encode(JSON.stringify(action));
-  let hash = 0xcbf29ce484222325n;
-  for (const byte of bytes) hash = ((hash ^ BigInt(byte)) * 0x100000001b3n) & 0xffffffffffffffffn;
-  return `action-definition-v1:${hash.toString(16).padStart(16, "0")}`;
 }
 
 function groupRoutes(operations: Operation[]) {

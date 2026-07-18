@@ -101,6 +101,8 @@ fn stream_query(scope_name: &str) -> LogStreamQuery {
         runtime_host_id: None,
         execution_id: Some(ExecutionId::from("execution")),
         attempt_id: Some(AttemptId::from("attempt")),
+        severity: None,
+        message_contains: None,
         cursor: None,
         limit: 10,
     }
@@ -111,6 +113,8 @@ fn record_query(stream_id: LogStreamId) -> LogRecordQuery {
         stream_id,
         execution_id: Some(ExecutionId::from("execution")),
         attempt_id: Some(AttemptId::from("attempt")),
+        severity: None,
+        message_contains: None,
         cursor: None,
         limit: 10,
     }

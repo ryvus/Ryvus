@@ -174,16 +174,10 @@ impl StoreProjection {
             .streams
             .get(&query.stream_id)
             .ok_or(LogStoreError::NotFound)?;
-        let mut matching = stream.records.values().filter(|record| {
-            query
-                .cursor
-                .is_none_or(|cursor| record.stream_sequence > cursor)
-                && correlation_matches(
-                    record,
-                    query.execution_id.as_ref(),
-                    query.attempt_id.as_ref(),
-                )
-        });
+        let mut matching = stream
+            .records
+            .values()
+            .filter(|record| crate::store::record_matches_query(record, &query));
         let records = matching
             .by_ref()
             .take(query.limit)
@@ -212,25 +206,27 @@ fn stream_matches_query(stream: &StreamProjection, query: &LogStreamQuery) -> bo
             .runtime_host_id
             .as_ref()
             .is_none_or(|value| &stream.metadata.stream_id.runtime_host_id == value)
-        && (query.execution_id.is_none() && query.attempt_id.is_none()
-            || stream.records.values().any(|record| {
-                correlation_matches(
-                    record,
-                    query.execution_id.as_ref(),
-                    query.attempt_id.as_ref(),
-                )
-            }))
-}
-
-fn correlation_matches(
-    record: &ExecutionLogRecord,
-    execution_id: Option<&ryvus_protocol::ExecutionId>,
-    attempt_id: Option<&ryvus_protocol::AttemptId>,
-) -> bool {
-    record.correlation.as_ref().is_some_and(|correlation| {
-        execution_id.is_none_or(|value| &correlation.execution_id == value)
-            && attempt_id.is_none_or(|value| &correlation.attempt_id == value)
-    }) || (execution_id.is_none() && attempt_id.is_none())
+        && if query.execution_id.is_none()
+            && query.attempt_id.is_none()
+            && query.severity.is_none()
+            && query.message_contains.is_none()
+        {
+            true
+        } else {
+            let record_query = LogRecordQuery {
+                stream_id: stream.metadata.stream_id.clone(),
+                execution_id: query.execution_id.clone(),
+                attempt_id: query.attempt_id.clone(),
+                severity: query.severity.clone(),
+                message_contains: query.message_contains.clone(),
+                cursor: None,
+                limit: 1,
+            };
+            stream
+                .records
+                .values()
+                .any(|record| crate::store::record_matches_query(record, &record_query))
+        }
 }
 
 impl StreamProjection {

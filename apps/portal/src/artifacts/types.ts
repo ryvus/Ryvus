@@ -4,9 +4,12 @@ export type ApiActionKind = {
   Api: {
     method: string;
     path: string;
+    consumes?: string[];
+    produces?: string[];
     request_schema?: unknown;
     response_schema?: unknown;
     query_params?: Array<{ name: string; required: boolean; schema: unknown }>;
+    authorizer?: string;
   };
 };
 
@@ -17,17 +20,58 @@ export type ScheduleActionKind = {
   };
 };
 
+export type AuthorizerActionKind = {
+  Authorizer: {
+    security?: Array<Record<string, unknown>>;
+    parameters?: Array<Record<string, unknown>>;
+    cache?: { ttl_seconds: number };
+  };
+};
+
+export type FlowActionKind = { Flow: Record<string, never> };
+
+export type QueueActionKind = { Queue: { queue: string } };
+
+export type ActionExecutionPolicy = {
+  timeout?: string;
+  retry?: {
+    max_attempts?: number;
+    initial_delay?: string;
+    backoff?: number;
+  };
+};
+
 export type ActionDefinition = {
   runtime: RuntimeKind;
-  kind: ApiActionKind | ScheduleActionKind | Record<string, unknown>;
+  kind:
+    | ApiActionKind
+    | ScheduleActionKind
+    | AuthorizerActionKind
+    | FlowActionKind
+    | QueueActionKind
+    | Record<string, unknown>;
   source: string;
   entrypoint: string;
   name?: string;
-  policy?: unknown;
+  policy?: ActionExecutionPolicy;
+};
+
+export type EffectiveActionPolicy = {
+  timeout: string;
+  retry: {
+    max_attempts: number;
+    initial_delay: string;
+    backoff: number;
+  };
+};
+
+export type CatalogAction = ActionDefinition & {
+  action_revision: string;
+  effective_policy: EffectiveActionPolicy;
 };
 
 export type Catalog = {
-  actions: ActionDefinition[];
+  actions: CatalogAction[];
 };
 
 export type ScheduleArtifact = {
@@ -106,9 +150,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function isApiAction(
-  action: ActionDefinition,
-): action is ActionDefinition & { kind: ApiActionKind } {
+export function isApiAction<T extends ActionDefinition>(
+  action: T,
+): action is T & { kind: ApiActionKind } {
   const kind = action.kind as Record<string, unknown>;
   return (
     isRecord(kind) &&

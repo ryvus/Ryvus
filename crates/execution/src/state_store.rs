@@ -151,8 +151,37 @@ pub struct ExecutionHistoryQuery {
     pub execution_scope_id: ExecutionScopeId,
     pub action_id: Option<String>,
     pub action_revision: Option<String>,
+    pub state: Option<ExecutionState>,
+    pub trigger: Option<ExecutionTriggerKind>,
+    pub created_after: Option<SystemTime>,
+    pub created_before: Option<SystemTime>,
+    pub execution_id_prefix: Option<String>,
     pub cursor: Option<ExecutionId>,
     pub limit: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionTriggerKind {
+    Api,
+    Schedule,
+    Flow,
+    Manual,
+    Queue,
+    Unknown,
+}
+
+impl From<&ExecutionTrigger> for ExecutionTriggerKind {
+    fn from(trigger: &ExecutionTrigger) -> Self {
+        match trigger {
+            ExecutionTrigger::Api => Self::Api,
+            ExecutionTrigger::Schedule { .. } => Self::Schedule,
+            ExecutionTrigger::Flow { .. } => Self::Flow,
+            ExecutionTrigger::Manual { .. } => Self::Manual,
+            ExecutionTrigger::Queue { .. } => Self::Queue,
+            ExecutionTrigger::Unknown => Self::Unknown,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
@@ -301,24 +330,37 @@ impl ExecutionStateStore for MemoryExecutionStateStore {
     }
 
     fn list_history(&self, query: ExecutionHistoryQuery) -> StateStoreResult<ExecutionHistoryPage> {
-        let mut executions = self
-            .executions
-            .lock()
-            .map_err(|_| StateStoreError::LockPoisoned)?
-            .values()
-            .filter(|aggregate| {
-                aggregate.execution_scope_id == query.execution_scope_id
-                    && query
-                        .action_id
-                        .as_ref()
-                        .is_none_or(|action_id| action_id == &aggregate.action_id)
-                    && query
-                        .action_revision
-                        .as_ref()
-                        .is_none_or(|revision| revision == &aggregate.action_revision)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut executions =
+            self.executions
+                .lock()
+                .map_err(|_| StateStoreError::LockPoisoned)?
+                .values()
+                .filter(|aggregate| {
+                    aggregate.execution_scope_id == query.execution_scope_id
+                        && query
+                            .action_id
+                            .as_ref()
+                            .is_none_or(|action_id| action_id == &aggregate.action_id)
+                        && query
+                            .action_revision
+                            .as_ref()
+                            .is_none_or(|revision| revision == &aggregate.action_revision)
+                        && query.state.is_none_or(|state| state == aggregate.state)
+                        && query.trigger.is_none_or(|trigger| {
+                            trigger == ExecutionTriggerKind::from(&aggregate.trigger)
+                        })
+                        && query
+                            .created_after
+                            .is_none_or(|after| aggregate.created_at >= after)
+                        && query
+                            .created_before
+                            .is_none_or(|before| aggregate.created_at < before)
+                        && query.execution_id_prefix.as_ref().is_none_or(|prefix| {
+                            aggregate.execution_id.as_ref().starts_with(prefix)
+                        })
+                })
+                .cloned()
+                .collect::<Vec<_>>();
         executions.sort_by(|left, right| {
             right
                 .created_at

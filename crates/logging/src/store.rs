@@ -1,4 +1,4 @@
-use ryvus_protocol::{AttemptId, ExecutionId, ExecutionScopeId, RuntimeHostId};
+use ryvus_protocol::{AttemptId, ExecutionId, ExecutionScopeId, LogLevel, RuntimeHostId};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -27,6 +27,8 @@ pub struct LogStreamQuery {
     pub runtime_host_id: Option<RuntimeHostId>,
     pub execution_id: Option<ExecutionId>,
     pub attempt_id: Option<AttemptId>,
+    pub severity: Option<LogLevel>,
+    pub message_contains: Option<String>,
     pub cursor: Option<LogStreamCursor>,
     pub limit: usize,
 }
@@ -36,6 +38,8 @@ pub struct LogRecordQuery {
     pub stream_id: LogStreamId,
     pub execution_id: Option<ExecutionId>,
     pub attempt_id: Option<AttemptId>,
+    pub severity: Option<LogLevel>,
+    pub message_contains: Option<String>,
     pub cursor: Option<u64>,
     pub limit: usize,
 }
@@ -84,4 +88,36 @@ pub(crate) fn validate_query_limit(limit: usize) -> Result<(), LogStoreError> {
         )));
     }
     Ok(())
+}
+
+fn correlation_matches(
+    record: &ExecutionLogRecord,
+    execution_id: Option<&ExecutionId>,
+    attempt_id: Option<&AttemptId>,
+) -> bool {
+    record.correlation.as_ref().is_some_and(|correlation| {
+        execution_id.is_none_or(|value| &correlation.execution_id == value)
+            && attempt_id.is_none_or(|value| &correlation.attempt_id == value)
+    }) || (execution_id.is_none() && attempt_id.is_none())
+}
+
+pub(crate) fn record_matches_query(record: &ExecutionLogRecord, query: &LogRecordQuery) -> bool {
+    query
+        .cursor
+        .is_none_or(|cursor| record.stream_sequence > cursor)
+        && correlation_matches(
+            record,
+            query.execution_id.as_ref(),
+            query.attempt_id.as_ref(),
+        )
+        && query
+            .severity
+            .as_ref()
+            .is_none_or(|level| &record.severity == level)
+        && query.message_contains.as_ref().is_none_or(|needle| {
+            record
+                .message
+                .to_lowercase()
+                .contains(&needle.to_lowercase())
+        })
 }

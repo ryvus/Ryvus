@@ -20,7 +20,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::ControlService;
+use crate::{catalog_document, ControlService};
 
 #[derive(Clone)]
 pub struct ControlState {
@@ -70,15 +70,12 @@ pub async fn serve_with_routes(
     Ok(())
 }
 
-async fn catalog(State(state): State<ControlState>) -> Json<Value> {
-    Json(json!({
-        "actions": state
-            .control_service
-            .action_catalog()
-            .all()
-            .cloned()
-            .collect::<Vec<_>>()
-    }))
+async fn catalog(State(state): State<ControlState>) -> Result<Json<Value>, StatusCode> {
+    let document = catalog_document(state.control_service.action_catalog().all())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    serde_json::to_value(document)
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn openapi(State(state): State<ControlState>) -> Result<Json<Value>, StatusCode> {
@@ -275,6 +272,14 @@ mod tests {
             })
             .expect("control should load"),
         );
+        let canonical_revision = ryvus_execution::action_revision(
+            control_service
+                .action_catalog()
+                .all()
+                .next()
+                .expect("catalog should contain an action"),
+        )
+        .expect("action revision should compute");
         let app = control_app(control_service);
 
         let catalog = request_json(app.clone(), "/control/catalog").await;
@@ -284,6 +289,20 @@ mod tests {
                 .expect("actions should be array")
                 .len(),
             2
+        );
+        assert_eq!(catalog["actions"][0]["action_revision"], canonical_revision);
+        assert_eq!(catalog["actions"][0]["effective_policy"]["timeout"], "3s");
+        assert_eq!(
+            catalog["actions"][0]["effective_policy"]["retry"]["max_attempts"],
+            1
+        );
+        assert_eq!(
+            catalog["actions"][0]["effective_policy"]["retry"]["initial_delay"],
+            "1s"
+        );
+        assert_eq!(
+            catalog["actions"][0]["effective_policy"]["retry"]["backoff"],
+            2.0
         );
 
         let openapi = request_json(app.clone(), "/control/specs/openapi").await;

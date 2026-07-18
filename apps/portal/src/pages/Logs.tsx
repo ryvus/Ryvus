@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { historyApi, type ExecutionAggregate } from "../api/history";
 import {
   logsApi,
@@ -8,11 +8,23 @@ import {
   type LogLossCause,
   type LogLossRange,
   type LogRecord,
+  type LogRecordFilters,
   type LogStreamSummary,
 } from "../api/logs";
 import { Badge, Button, EmptyState, Page, Panel, cn } from "../components/ui";
 
-export function Logs() {
+export type LogViewContext = {
+  actionId?: string;
+  actionRevision?: string;
+  executionId?: string;
+  attemptId?: string;
+  runtimeHostId?: string;
+  withinAction?: boolean;
+};
+
+type LogGroupMode = "runtime_host" | "execution" | "time";
+
+export function Logs({ context }: { context?: LogViewContext }) {
   const [hash, setHash] = useState(window.location.hash);
   useEffect(() => {
     const update = () => setHash(window.location.hash);
@@ -21,7 +33,9 @@ export function Logs() {
   }, []);
 
   const params = new URLSearchParams(hash.split("?")[1] ?? "");
-  const filters = logFilters(params);
+  const withinAction = Boolean(context?.withinAction && context.actionId);
+  const filters = logFilters(params, context);
+  const groupMode = logGroupMode(params);
   const runtimeHostId = filters.runtime_host_id;
   const execution = useQuery({
     queryKey: ["execution", filters.execution_id],
@@ -41,8 +55,8 @@ export function Logs() {
     getNextPageParam: (page) => page.next_cursor ?? undefined,
   });
   const records = useInfiniteQuery({
-    queryKey: ["log-records", runtimeHostId, filters.execution_id, filters.attempt_id],
-    queryFn: ({ pageParam }) => logsApi.records(runtimeHostId!, filters, pageParam),
+    queryKey: ["log-records", runtimeHostId, filters.execution_id, filters.attempt_id, filters.severity, filters.search],
+    queryFn: ({ pageParam }) => logsApi.records(runtimeHostId!, recordFilters(filters), pageParam),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (page) => page.next_cursor ?? undefined,
     enabled: Boolean(runtimeHostId),
@@ -51,17 +65,15 @@ export function Logs() {
   const selectedStream = streamItems.find((stream) => stream.runtime_host_id === runtimeHostId);
   const recordItems = records.data?.pages.flatMap((page) => page.records) ?? [];
 
-  return (
-    <Page
-      eyebrow="Runtime observability"
-      title="Logs"
-      actions={filters.execution_id && (
-        <a className="font-mono text-xs text-cyan-300 hover:text-cyan-100" href={`#execution-preview?id=${encodeURIComponent(filters.execution_id)}`}>
-          Execution {filters.execution_id}
-        </a>
+  const content = (
+    <>
+      <LogFiltersForm params={params} context={context} groupMode={groupMode} />
+      {groupMode === "execution" && !filters.execution_id && (
+        <p className="text-sm text-amber-200">Set an exact execution ID to group matching Runtime Host streams by execution.</p>
       )}
-    >
-      <LogFiltersForm params={params} />
+      {groupMode === "time" && (
+        <p className="text-xs text-slate-500">Stream summaries are ordered by start time. Records remain sequence-ordered within the selected Runtime Host.</p>
+      )}
       {execution.isError && filters.execution_id && (
         <p className="text-sm text-amber-200">Execution state unavailable; active streams are shown as unknown.</p>
       )}
@@ -74,12 +86,19 @@ export function Logs() {
       ) : (
         <div className="grid gap-4 xl:grid-cols-[minmax(280px,380px)_minmax(0,1fr)]">
           <div className="grid content-start gap-2">
+            {groupMode === "execution" && filters.execution_id && (
+              <div className="mb-1 border-l-2 border-cyan-300/40 pl-3">
+                <p className="font-mono text-[10px] font-bold uppercase text-slate-600">Execution</p>
+                <p className="truncate font-mono text-xs text-cyan-200" title={filters.execution_id}>{filters.execution_id}</p>
+              </div>
+            )}
             {streamItems.map((stream) => (
               <StreamCard
                 key={stream.runtime_host_id}
                 stream={stream}
                 selected={stream.runtime_host_id === runtimeHostId}
                 params={params}
+                context={context}
                 completeness={projectLogCompleteness(
                   stream,
                   execution.data,
@@ -89,6 +108,14 @@ export function Logs() {
                 )}
               />
             ))}
+            {streams.isError && (
+              <div role="alert" className="grid gap-2 rounded-md border border-red-400/20 bg-red-500/[0.05] p-3 text-sm text-red-200">
+                <span>Could not load more Runtime Host streams: {errorMessage(streams.error)}</span>
+                <Button type="button" className="justify-self-start" onClick={() => void (streams.hasNextPage ? streams.fetchNextPage() : streams.refetch())} disabled={streams.isFetching}>
+                  Retry
+                </Button>
+              </div>
+            )}
             {streams.hasNextPage && (
               <Button type="button" className="justify-self-start" onClick={() => void streams.fetchNextPage()} disabled={streams.isFetchingNextPage}>
                 {streams.isFetchingNextPage ? "Loading…" : "Load more"}
@@ -99,46 +126,88 @@ export function Logs() {
             stream={selectedStream}
             records={recordItems}
             query={records}
+            context={context}
           />
         </div>
       )}
+    </>
+  );
+
+  if (withinAction) return content;
+  return (
+    <Page
+      eyebrow="Runtime observability"
+      title="Logs"
+      actions={filters.execution_id && (
+        <a className="font-mono text-xs text-cyan-300 hover:text-cyan-100" href={`#execution-preview?id=${encodeURIComponent(filters.execution_id)}`}>
+          Execution {filters.execution_id}
+        </a>
+      )}
+    >
+      {content}
     </Page>
   );
 }
 
-function LogFiltersForm({ params }: { params: URLSearchParams }) {
+function LogFiltersForm({ params, context, groupMode }: { params: URLSearchParams; context?: LogViewContext; groupMode: LogGroupMode }) {
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const next = new URLSearchParams(params);
-    for (const name of ["action_key_id", "action_revision"] as const) {
+    const revisionParameter = context?.withinAction ? "revision" : "action_revision";
+    const currentAction = params.get("action_key_id") ?? "";
+    const currentRevision = params.get(revisionParameter) ?? context?.actionRevision ?? "";
+    const currentExecution = params.get("execution_id") ?? context?.executionId ?? "";
+    const currentAttempt = params.get("attempt_id") ?? context?.attemptId ?? "";
+    const action = String(form.get("action_key_id") ?? "").trim();
+    const revision = String(form.get("action_revision") ?? "").trim();
+    const execution = String(form.get("execution_id") ?? "").trim();
+    const attempt = String(form.get("attempt_id") ?? "").trim();
+    for (const name of ["action_key_id", "action_revision", "execution_id", "attempt_id", "runtime_host_id", "severity", "search", "group"] as const) {
+      if (name === "action_key_id" && context?.withinAction) continue;
       const value = String(form.get(name) ?? "").trim();
-      value ? next.set(name, value) : next.delete(name);
+      const parameter = name === "action_revision" ? revisionParameter : name;
+      value ? next.set(parameter, value) : next.delete(parameter);
     }
-    next.delete("runtime_host_id");
-    window.location.hash = `logs?${next}`;
+    if (!context?.withinAction && action !== currentAction) {
+      next.delete("action_revision");
+      next.delete("execution_id");
+      next.delete("attempt_id");
+      next.delete("runtime_host_id");
+    } else if (revision !== currentRevision) {
+      next.delete("execution_id");
+      next.delete("attempt_id");
+      next.delete("runtime_host_id");
+    } else if (execution !== currentExecution) {
+      next.delete("attempt_id");
+      next.delete("runtime_host_id");
+    } else if (attempt !== currentAttempt) {
+      next.delete("runtime_host_id");
+    }
+    if (context?.withinAction) next.delete("action_revision");
+    navigateLogs(next, context);
   }
 
-  const cleared = new URLSearchParams(params);
-  cleared.delete("action_key_id");
-  cleared.delete("action_revision");
-  cleared.delete("runtime_host_id");
+  const cleared = baseLogParams(context);
 
   return (
     <Panel className="p-3">
-      <form key={params.toString()} className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto] sm:items-end" onSubmit={submit}>
-        <label className="grid gap-1 font-mono text-[11px] font-bold uppercase text-slate-500">
+      <form key={params.toString()} className="grid gap-3 md:grid-cols-2 xl:grid-cols-4 xl:items-end" onSubmit={submit}>
+        {!context?.withinAction && <label className="grid gap-1 font-mono text-[11px] font-bold uppercase text-slate-500">
           Action key
           <input name="action_key_id" defaultValue={params.get("action_key_id") ?? ""} placeholder="Exact action key" />
-        </label>
+        </label>}
         <label className="grid gap-1 font-mono text-[11px] font-bold uppercase text-slate-500">
           Revision
-          <input name="action_revision" defaultValue={params.get("action_revision") ?? ""} placeholder="Exact revision" />
+          <input name="action_revision" defaultValue={params.get(context?.withinAction ? "revision" : "action_revision") ?? context?.actionRevision ?? ""} placeholder="Exact revision" />
         </label>
-        <Button type="submit">Filter</Button>
-        <a className="inline-flex min-h-9 items-center justify-center rounded-md border border-white/10 px-3 text-sm font-semibold text-slate-400 hover:bg-white/[0.04] hover:text-white" href={`#logs?${cleared}`}>
-          Clear
-        </a>
+        <FilterLabel label="Execution"><input name="execution_id" defaultValue={params.get("execution_id") ?? context?.executionId ?? ""} placeholder="Exact execution ID" /></FilterLabel>
+        <FilterLabel label="Attempt"><input name="attempt_id" defaultValue={params.get("attempt_id") ?? context?.attemptId ?? ""} placeholder="Exact attempt ID" /></FilterLabel>
+        <FilterLabel label="Runtime Host"><input name="runtime_host_id" defaultValue={params.get("runtime_host_id") ?? context?.runtimeHostId ?? ""} placeholder="Exact host ID" /></FilterLabel>
+        <FilterLabel label="Severity"><select name="severity" defaultValue={params.get("severity") ?? ""}><option value="">All severities</option>{["trace", "debug", "info", "warn", "error"].map((severity) => <option key={severity} value={severity}>{severity}</option>)}</select></FilterLabel>
+        <FilterLabel label="Text"><input name="search" type="search" defaultValue={params.get("search") ?? ""} maxLength={256} placeholder="Message contains" /></FilterLabel>
+        <FilterLabel label="Group"><select name="group" defaultValue={groupMode}><option value="runtime_host">Runtime Host</option><option value="execution">Execution</option><option value="time">Time</option></select></FilterLabel>
+        <div className="flex gap-2 md:col-span-2 xl:col-span-4"><Button type="submit">Filter</Button><a className="inline-flex min-h-9 items-center justify-center rounded-md border border-white/10 px-3 text-sm font-semibold text-slate-400 hover:bg-white/[0.04] hover:text-white" href={logHref(cleared, context)}>Clear</a></div>
       </form>
     </Panel>
   );
@@ -148,11 +217,13 @@ function StreamCard({
   stream,
   selected,
   params,
+  context,
   completeness,
 }: {
   stream: LogStreamSummary;
   selected: boolean;
   params: URLSearchParams;
+  context?: LogViewContext;
   completeness: LogCompleteness;
 }) {
   const next = new URLSearchParams(params);
@@ -160,7 +231,7 @@ function StreamCard({
   const loss = lossCount(stream);
 
   return (
-    <a href={`#logs?${next}`} className="rounded-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-300">
+    <a href={logHref(next, context)} className="rounded-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-300">
       <Panel className={cn("grid gap-3 p-3 transition-colors hover:border-white/20", selected && "border-violet-400/40 bg-violet-500/[0.06]")}>
         <div className="flex min-w-0 items-start justify-between gap-3">
           <div className="min-w-0">
@@ -196,6 +267,7 @@ function RecordPanel({
   stream,
   records,
   query,
+  context,
 }: {
   stream?: LogStreamSummary;
   records: LogRecord[];
@@ -207,6 +279,7 @@ function RecordPanel({
     isFetchingNextPage: boolean;
     fetchNextPage: () => Promise<unknown>;
   };
+  context?: LogViewContext;
 }) {
   if (!stream) return <EmptyState title="Select a Runtime Host" message="Choose one stream to inspect its sequence-ordered records." />;
   if (query.isError && !query.data) return <EmptyState title="Log records unavailable" message={errorMessage(query.error)} />;
@@ -230,7 +303,7 @@ function RecordPanel({
           {entries.map((entry) => entry.kind === "loss" ? (
             <LossMarker key={`loss-${entry.range.cause}-${entry.range.first_sequence}-${entry.range.last_sequence}`} range={entry.range} />
           ) : (
-            <RecordRow key={`record-${entry.record.stream_sequence}`} record={entry.record} />
+            <RecordRow key={`record-${entry.record.stream_sequence}`} record={entry.record} context={context} />
           ))}
         </ol>
       )}
@@ -245,7 +318,7 @@ function RecordPanel({
   );
 }
 
-function RecordRow({ record }: { record: LogRecord }) {
+function RecordRow({ record, context }: { record: LogRecord; context?: LogViewContext }) {
   const attributes = Object.keys(record.attributes).length;
   return (
     <li className="grid grid-cols-[72px_12px_minmax(0,1fr)] gap-2 px-3 py-3 sm:grid-cols-[96px_12px_minmax(0,1fr)]">
@@ -255,17 +328,18 @@ function RecordRow({ record }: { record: LogRecord }) {
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge tone={record.correlation ? "violet" : "slate"}>{record.correlation ? "application" : "lifecycle"}</Badge>
           <Badge tone={severityTone(record.severity)}>{record.severity}</Badge>
-          <span className="font-mono text-[11px] text-slate-600">{formatInteger(record.timestamp_unix_nanos)} ns</span>
+          <span className="font-mono text-[11px] text-slate-600" title={`${record.timestamp_unix_nanos} ns`}>{formatUnixNanos(record.timestamp_unix_nanos)}</span>
         </div>
         <p className="whitespace-pre-wrap break-words font-mono text-xs leading-5 text-slate-200">{record.message || "(empty message)"}</p>
         <div className="flex flex-wrap gap-x-3 gap-y-1 font-mono text-[11px] text-slate-500">
           {record.runtime_session_id && <span>session {record.runtime_session_id}</span>}
           {record.correlation && (
             <>
-              <a className="text-cyan-300 hover:text-cyan-100" href={`#execution-preview?id=${encodeURIComponent(record.correlation.execution_id)}`}>execution {record.correlation.execution_id}</a>
-              <a className="text-violet-300 hover:text-violet-100" href={`#logs?execution_id=${encodeURIComponent(record.correlation.execution_id)}&attempt_id=${encodeURIComponent(record.correlation.attempt_id)}&runtime_host_id=${encodeURIComponent(record.runtime_host_id)}`}>attempt {record.correlation.attempt_number}</a>
+              <a className="text-cyan-300 hover:text-cyan-100" href={executionHref(record, context)}>execution {record.correlation.execution_id}</a>
+              <a className="text-violet-300 hover:text-violet-100" href={attemptHref(record, context)}>attempt {record.correlation.attempt_number} · {record.correlation.attempt_id}</a>
             </>
           )}
+          <span>host {record.runtime_host_id}</span>
           {record.trace_id && <span>trace {record.trace_id}{record.span_id ? ` / ${record.span_id}` : ""}</span>}
         </div>
         {attributes > 0 && (
@@ -328,13 +402,85 @@ async function loadAttemptRuntimeHosts(executionId: string, attemptId: string) {
   return hosts;
 }
 
-function logFilters(params: URLSearchParams): LogFilters {
-  const filters: LogFilters = {};
-  for (const key of ["action_key_id", "action_revision", "runtime_host_id", "execution_id", "attempt_id"] as const) {
+function logFilters(params: URLSearchParams, context?: LogViewContext): LogFilters {
+  const filters: LogFilters = context?.actionId ? { action_key_id: context.actionId } : {};
+  for (const key of ["action_key_id", "runtime_host_id", "execution_id", "attempt_id", "severity", "search"] as const) {
+    if (key === "action_key_id" && context?.withinAction) continue;
     const value = params.get(key);
     if (value) filters[key] = value;
   }
+  const revision = params.get(context?.withinAction ? "revision" : "action_revision") ?? context?.actionRevision;
+  if (revision) filters.action_revision = revision;
+  if (context?.executionId && !filters.execution_id) filters.execution_id = context.executionId;
+  if (context?.attemptId && !filters.attempt_id) filters.attempt_id = context.attemptId;
+  if (context?.runtimeHostId && !filters.runtime_host_id) filters.runtime_host_id = context.runtimeHostId;
   return filters;
+}
+
+function recordFilters(filters: LogFilters): LogRecordFilters {
+  const { execution_id, attempt_id, severity, search } = filters;
+  return { execution_id, attempt_id, severity, search };
+}
+
+function logGroupMode(params: URLSearchParams): LogGroupMode {
+  const value = params.get("group");
+  return value === "execution" || value === "time" ? value : "runtime_host";
+}
+
+function baseLogParams(context?: LogViewContext) {
+  return context?.withinAction && context.actionId
+    ? new URLSearchParams({ action_id: context.actionId, tab: "logs" })
+    : new URLSearchParams();
+}
+
+function logHref(params: URLSearchParams, context?: LogViewContext) {
+  const next = new URLSearchParams(params);
+  if (context?.withinAction && context.actionId) {
+    next.set("action_id", context.actionId);
+    next.set("tab", "logs");
+    next.delete("action_key_id");
+    return `#actions?${next}`;
+  }
+  return next.size ? `#logs?${next}` : "#logs";
+}
+
+function navigateLogs(params: URLSearchParams, context?: LogViewContext) {
+  window.location.hash = logHref(params, context).slice(1);
+}
+
+function executionHref(record: LogRecord, context?: LogViewContext) {
+  if (context?.withinAction && context.actionId && record.correlation) {
+    const query = new URLSearchParams({
+      action_id: context.actionId,
+      tab: "executions",
+      revision: record.action_revision,
+      execution_id: record.correlation.execution_id,
+    });
+    return `#actions?${query}`;
+  }
+  return `#execution-preview?id=${encodeURIComponent(record.correlation?.execution_id ?? "")}`;
+}
+
+function attemptHref(record: LogRecord, context?: LogViewContext) {
+  const query = baseLogParams(context);
+  if (context?.withinAction) query.set("revision", record.action_revision);
+  query.set("execution_id", record.correlation?.execution_id ?? "");
+  query.set("attempt_id", record.correlation?.attempt_id ?? "");
+  query.set("runtime_host_id", record.runtime_host_id);
+  return logHref(query, context);
+}
+
+function FilterLabel({ label, children }: { label: string; children: ReactNode }) {
+  return <label className="grid gap-1 font-mono text-[11px] font-bold uppercase text-slate-500">{label}{children}</label>;
+}
+
+function formatUnixNanos(value: string) {
+  try {
+    const date = new Date(Number(BigInt(value) / 1_000_000n));
+    return Number.isNaN(date.getTime()) ? `${formatInteger(value)} ns` : date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium" });
+  } catch {
+    return `${value} ns`;
+  }
 }
 
 function lossCount(stream: LogStreamSummary) {

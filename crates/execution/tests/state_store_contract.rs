@@ -1,15 +1,17 @@
 use std::time::{Duration, SystemTime};
 
 use ryvus_execution::{
-    execution_creation_fingerprint, AttemptOwnership, AttemptRecord, CreateExecutionResult,
-    ExecutionHistoryQuery, ExecutionMutation, ExecutionPolicy, ExecutionResult, ExecutionState,
-    ExecutionStateStore, MemoryExecutionStateStore, NewExecution, RetryPolicy, StateStoreError,
-    TerminalState, TransitionResult,
+    execution_creation_fingerprint, ActorRef, AttemptOwnership, AttemptRecord,
+    CreateExecutionResult, ExecutionHistoryQuery, ExecutionMutation, ExecutionPolicy,
+    ExecutionResult, ExecutionState, ExecutionStateStore, ExecutionTrigger, ExecutionTriggerKind,
+    ManualExecutionSource, MemoryExecutionStateStore, NewExecution, RetryPolicy, ScheduleId,
+    ScheduleTriggerId, StateStoreError, TerminalState, TransitionResult,
 };
 use ryvus_protocol::{
     ActionDefinition, ActionExecutionPolicy, ActionKind, ApiAction, AttemptId, AttemptOutcome,
-    ExecutionAttempt, InvocationContext, InvocationEvent, InvocationRequest, InvocationResult,
-    LogEvent, LogLevel, MetricEvent, RuntimeHostId, RuntimeKind, RuntimeSessionId, WorkerId,
+    ExecutionAttempt, ExecutionId, InvocationContext, InvocationEvent, InvocationRequest,
+    InvocationResult, LogEvent, LogLevel, MetricEvent, RuntimeHostId, RuntimeKind,
+    RuntimeSessionId, WorkerId,
 };
 use serde_json::json;
 
@@ -49,6 +51,21 @@ fn new_execution() -> NewExecution {
             },
         },
         created_at: SystemTime::now(),
+    }
+}
+
+fn history_query(execution_scope_id: ryvus_execution::ExecutionScopeId) -> ExecutionHistoryQuery {
+    ExecutionHistoryQuery {
+        execution_scope_id,
+        action_id: None,
+        action_revision: None,
+        state: None,
+        trigger: None,
+        created_after: None,
+        created_before: None,
+        execution_id_prefix: None,
+        cursor: None,
+        limit: 10,
     }
 }
 
@@ -109,11 +126,10 @@ fn memory_store_idempotently_creates_and_lists_execution_history() {
 
     let first = store
         .list_history(ExecutionHistoryQuery {
-            execution_scope_id: execution.execution_scope_id.clone(),
             action_id: Some(execution.action_id.clone()),
             action_revision: Some(execution.action_revision.clone()),
-            cursor: None,
             limit: 2,
+            ..history_query(execution.execution_scope_id.clone())
         })
         .unwrap();
     assert_eq!(first.items.len(), 2);
@@ -121,11 +137,11 @@ fn memory_store_idempotently_creates_and_lists_execution_history() {
 
     let second = store
         .list_history(ExecutionHistoryQuery {
-            execution_scope_id: execution.execution_scope_id.clone(),
             action_id: Some(execution.action_id.clone()),
             action_revision: Some(execution.action_revision.clone()),
             cursor: first.next_cursor,
             limit: 2,
+            ..history_query(execution.execution_scope_id.clone())
         })
         .unwrap();
     assert_eq!(second.items.len(), 1);
@@ -185,11 +201,9 @@ fn memory_history_uses_id_tiebreaker_and_rejects_filtered_cursor() {
 
     let page = store
         .list_history(ExecutionHistoryQuery {
-            execution_scope_id: executions[0].execution_scope_id.clone(),
             action_id: Some(executions[0].action_id.clone()),
             action_revision: Some(executions[0].action_revision.clone()),
-            cursor: None,
-            limit: 10,
+            ..history_query(executions[0].execution_scope_id.clone())
         })
         .unwrap();
     assert_eq!(
@@ -206,13 +220,124 @@ fn memory_history_uses_id_tiebreaker_and_rejects_filtered_cursor() {
     let cursor = executions[0].request.execution_id.clone();
     assert_eq!(
         store.list_history(ExecutionHistoryQuery {
-            execution_scope_id: executions[0].execution_scope_id.clone(),
             action_id: Some("different-action".into()),
-            action_revision: None,
             cursor: Some(cursor.clone()),
-            limit: 10,
+            ..history_query(executions[0].execution_scope_id.clone())
         }),
         Err(StateStoreError::InvalidHistoryCursor { cursor })
+    );
+}
+
+#[test]
+fn execution_history_filters_before_cursor_pagination() {
+    let store = MemoryExecutionStateStore::default();
+    let scope = ryvus_execution::ExecutionScopeId::new("history-filters").unwrap();
+    let cases = [
+        (
+            "exec-succeeded",
+            11,
+            ExecutionState::Succeeded,
+            ExecutionTrigger::Api,
+        ),
+        (
+            "exec-failed",
+            10,
+            ExecutionState::Failed,
+            ExecutionTrigger::Api,
+        ),
+        (
+            "exec-running",
+            13,
+            ExecutionState::Running,
+            ExecutionTrigger::Api,
+        ),
+        (
+            "exec-schedule",
+            14,
+            ExecutionState::Failed,
+            ExecutionTrigger::Schedule {
+                schedule_id: ScheduleId::new("schedule-1").unwrap(),
+                schedule_revision: 1,
+                trigger_id: ScheduleTriggerId::new("trigger-1").unwrap(),
+                scheduled_for: SystemTime::UNIX_EPOCH,
+            },
+        ),
+        (
+            "exec-manual",
+            15,
+            ExecutionState::Failed,
+            ExecutionTrigger::Manual {
+                actor: ActorRef::new("tester").unwrap(),
+                source: ManualExecutionSource::Direct,
+            },
+        ),
+        (
+            "exec-late",
+            20,
+            ExecutionState::Failed,
+            ExecutionTrigger::Api,
+        ),
+    ];
+    for (id, created_at, state, trigger) in cases {
+        let mut execution = new_execution();
+        execution.request.execution_id = ExecutionId::from(id);
+        execution.execution_scope_id = scope.clone();
+        execution.action_id = "inventory".into();
+        execution.trigger = trigger;
+        execution.creation_fingerprint = format!("fingerprint-{id}");
+        execution.created_at = SystemTime::UNIX_EPOCH + Duration::from_secs(created_at);
+        let aggregate = store.create(execution).unwrap();
+        if state == ExecutionState::Running {
+            store
+                .compare_and_set(
+                    &aggregate.execution_id,
+                    0,
+                    ExecutionMutation::StartAttempt {
+                        attempt: attempt(&aggregate.execution_id, 1),
+                    },
+                )
+                .unwrap();
+        } else {
+            store
+                .compare_and_set(
+                    &aggregate.execution_id,
+                    0,
+                    ExecutionMutation::FinishExecution {
+                        terminal: TerminalState::new(state, None),
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    let page = store
+        .list_history(ExecutionHistoryQuery {
+            action_id: Some("inventory".into()),
+            state: Some(ExecutionState::Failed),
+            trigger: Some(ExecutionTriggerKind::Api),
+            created_after: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(10)),
+            created_before: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(20)),
+            execution_id_prefix: Some("exec-fail".into()),
+            ..history_query(scope.clone())
+        })
+        .unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|item| item.execution_id.as_ref())
+            .collect::<Vec<_>>(),
+        ["exec-failed"]
+    );
+
+    assert_eq!(
+        store.list_history(ExecutionHistoryQuery {
+            state: Some(ExecutionState::Failed),
+            cursor: Some(ExecutionId::from("exec-running")),
+            ..history_query(scope)
+        }),
+        Err(StateStoreError::InvalidHistoryCursor {
+            cursor: ExecutionId::from("exec-running")
+        })
     );
 }
 

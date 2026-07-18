@@ -82,6 +82,8 @@ fn stream_query(scope_name: &str, limit: usize) -> LogStreamQuery {
         runtime_host_id: None,
         execution_id: None,
         attempt_id: None,
+        severity: None,
+        message_contains: None,
         cursor: None,
         limit,
     }
@@ -92,6 +94,8 @@ fn record_query(stream_id: LogStreamId, limit: usize) -> LogRecordQuery {
         stream_id,
         execution_id: None,
         attempt_id: None,
+        severity: None,
+        message_contains: None,
         cursor: None,
         limit,
     }
@@ -236,6 +240,114 @@ fn filters_and_paginates_deterministically(store: &dyn ExecutionLogStore) {
         .is_empty());
 }
 
+fn record_filters(store: &dyn ExecutionLogStore) {
+    let stream = metadata("scope", "host", 1);
+    let mut records = vec![
+        record(&stream, 1, "execution", "attempt"),
+        record(&stream, 2, "execution", "attempt"),
+        record(&stream, 3, "execution", "attempt"),
+    ];
+    records[0].message = "database connected".into();
+    records[1].severity = LogLevel::Error;
+    records[1].message = "cache failed".into();
+    records[2].severity = LogLevel::Error;
+    records[2].message = "Database unavailable".into();
+    store
+        .append_batch(LogBatch {
+            stream: stream.clone(),
+            batch_id: "filters".into(),
+            records,
+            loss_ranges: Vec::new(),
+            transition: None,
+        })
+        .expect("filtered records");
+    let mismatch = metadata("scope", "mismatch", 2);
+    let mut mismatch_records = vec![
+        record(&mismatch, 1, "execution", "attempt"),
+        record(&mismatch, 2, "execution", "attempt"),
+    ];
+    mismatch_records[0].severity = LogLevel::Error;
+    mismatch_records[0].message = "cache failed".into();
+    mismatch_records[1].message = "database connected".into();
+    store
+        .append_batch(LogBatch {
+            stream: mismatch,
+            batch_id: "mismatch".into(),
+            records: mismatch_records,
+            loss_ranges: Vec::new(),
+            transition: None,
+        })
+        .expect("nonmatching stream records");
+
+    let page = store
+        .list_records(LogRecordQuery {
+            stream_id: stream.stream_id.clone(),
+            execution_id: None,
+            attempt_id: None,
+            severity: Some(LogLevel::Error),
+            message_contains: Some("DATABASE".into()),
+            cursor: None,
+            limit: 10,
+        })
+        .expect("record filters");
+    assert_eq!(
+        page.records
+            .iter()
+            .map(|record| record.stream_sequence)
+            .collect::<Vec<_>>(),
+        [3]
+    );
+
+    let streams = store
+        .list_streams(LogStreamQuery {
+            execution_scope: scope("scope"),
+            action_key_id: Some("action".into()),
+            action_revision: None,
+            runtime_host_id: None,
+            execution_id: None,
+            attempt_id: None,
+            severity: Some(LogLevel::Error),
+            message_contains: Some("DATABASE".into()),
+            cursor: None,
+            limit: 10,
+        })
+        .expect("stream filters");
+    assert_eq!(streams.streams.len(), 1);
+
+    let first = store
+        .list_records(LogRecordQuery {
+            stream_id: stream.stream_id.clone(),
+            execution_id: None,
+            attempt_id: None,
+            severity: None,
+            message_contains: Some("DATABASE".into()),
+            cursor: None,
+            limit: 1,
+        })
+        .expect("first filtered page");
+    assert_eq!(first.records[0].stream_sequence, 1);
+    let second = store
+        .list_records(LogRecordQuery {
+            stream_id: stream.stream_id,
+            execution_id: None,
+            attempt_id: None,
+            severity: None,
+            message_contains: Some("DATABASE".into()),
+            cursor: first.next_cursor,
+            limit: 1,
+        })
+        .expect("second filtered page");
+    assert_eq!(
+        second
+            .records
+            .iter()
+            .map(|record| record.stream_sequence)
+            .collect::<Vec<_>>(),
+        [3]
+    );
+    assert_eq!(second.next_cursor, None);
+}
+
 fn loss_ranges_are_canonical_and_summary_counts_are_derived(store: &dyn ExecutionLogStore) {
     let normalized = normalize_loss_ranges(vec![
         LogLossRange {
@@ -295,6 +407,27 @@ fn run_provider_contract(make_store: impl Fn() -> Box<dyn ExecutionLogStore>) {
     validates_sequences_metadata_loss_and_terminality(make_store().as_ref());
     filters_and_paginates_deterministically(make_store().as_ref());
     loss_ranges_are_canonical_and_summary_counts_are_derived(make_store().as_ref());
+}
+
+#[test]
+fn memory_record_filters() {
+    record_filters(&InMemoryExecutionLogStore::default());
+}
+
+#[test]
+fn filesystem_record_filters() {
+    let root = std::env::temp_dir().join(format!(
+        "ryvus-logging-record-filter-contract-{}",
+        std::process::id()
+    ));
+    let store = FilesystemExecutionLogStore::new(FilesystemLogStoreConfig {
+        root: root.clone(),
+        ..FilesystemLogStoreConfig::default()
+    })
+    .expect("filesystem store");
+    record_filters(&store);
+    drop(store);
+    std::fs::remove_dir_all(root).expect("remove contract files");
 }
 
 #[test]
@@ -387,6 +520,17 @@ fn memory_retention_is_bounded_and_accounts_exact_eviction() {
                 && summary.completeness == LogStreamCompleteness::Incomplete
                 && summary.evicted_from == Some(LogStreamCompleteness::Complete)
         }));
+    let mut content_query = stream_query("scope", 10);
+    content_query.severity = Some(LogLevel::Info);
+    content_query.message_contains = Some("RECORD".into());
+    let content_filtered = store
+        .list_streams(content_query)
+        .expect("content filtered streams")
+        .streams;
+    assert!(!content_filtered.is_empty());
+    assert!(content_filtered
+        .iter()
+        .all(|summary| summary.evicted_from.is_none()));
 }
 
 #[test]

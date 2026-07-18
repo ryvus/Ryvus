@@ -56,7 +56,14 @@ function validateCatalog(value: unknown): asserts value is Artifacts["catalog"] 
         !isString(action.runtime) ||
         !isString(action.source) ||
         !isString(action.entrypoint) ||
-        !isRecord(action.kind),
+        !isRecord(action.kind) ||
+        !isString(action.action_revision) ||
+        !isRecord(action.effective_policy) ||
+        !isString(action.effective_policy.timeout) ||
+        !isRecord(action.effective_policy.retry) ||
+        typeof action.effective_policy.retry.max_attempts !== "number" ||
+        !isString(action.effective_policy.retry.initial_delay) ||
+        typeof action.effective_policy.retry.backoff !== "number",
     )
   ) {
     throw new Error("Invalid catalog artifact: expected { actions: [] }");

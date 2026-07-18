@@ -12,8 +12,8 @@ use ryvus_execution::{
     aggregate_from_new, apply_mutation, validate_execution_aggregate, validate_execution_result,
     validate_new_execution, AttemptRecord, CancellationIntent, CreateExecutionResult,
     ExecutionAggregate, ExecutionHistoryPage, ExecutionHistoryQuery, ExecutionMutation,
-    ExecutionState, ExecutionStateStore, NewExecution, StateStoreError, StateStoreResult,
-    TerminalState, TransitionResult,
+    ExecutionState, ExecutionStateStore, ExecutionTriggerKind, NewExecution, StateStoreError,
+    StateStoreResult, TerminalState, TransitionResult,
 };
 use ryvus_protocol::{AttemptId, AttemptOutcome, ExecutionAttempt, ExecutionId};
 use serde::{de::DeserializeOwned, Serialize};
@@ -243,6 +243,10 @@ impl ExecutionStateStore for PostgresExecutionStateStore {
     }
 
     fn list_history(&self, query: ExecutionHistoryQuery) -> StateStoreResult<ExecutionHistoryPage> {
+        let state = query.state.map(state_name);
+        let trigger = query.trigger.map(trigger_kind_name);
+        let created_after = optional_system_time_to_i64(query.created_after)?;
+        let created_before = optional_system_time_to_i64(query.created_before)?;
         self.run(move |client| {
             transaction(client, |transaction| {
                 let limit = query.limit.clamp(1, 100);
@@ -256,12 +260,22 @@ impl ExecutionStateStore for PostgresExecutionStateStore {
                             "SELECT created_at_unix_ns FROM ryvus_executions \
                              WHERE execution_id = $1 AND execution_scope_id = $2 \
                                AND ($3::TEXT IS NULL OR action_id = $3) \
-                               AND ($4::TEXT IS NULL OR action_revision = $4)",
+                               AND ($4::TEXT IS NULL OR action_revision = $4) \
+                               AND ($5::TEXT IS NULL OR state = $5) \
+                               AND ($6::TEXT IS NULL OR trigger ->> 'type' = $6) \
+                               AND ($7::BIGINT IS NULL OR created_at_unix_ns >= $7) \
+                               AND ($8::BIGINT IS NULL OR created_at_unix_ns < $8) \
+                               AND ($9::TEXT IS NULL OR left(execution_id, length($9)) = $9)",
                             &[
                                 &cursor_id,
                                 &query.execution_scope_id.as_ref(),
                                 &query.action_id,
                                 &query.action_revision,
+                                &state,
+                                &trigger,
+                                &created_after,
+                                &created_before,
+                                &query.execution_id_prefix,
                             ],
                         )
                         .map_err(|error| backend("validate execution history cursor", error))?
@@ -277,13 +291,23 @@ impl ExecutionStateStore for PostgresExecutionStateStore {
                            AND ($2::TEXT IS NULL OR action_id = $2) \
                            AND ($3::TEXT IS NULL OR action_revision = $3) \
                            AND ($4::BIGINT IS NULL OR (created_at_unix_ns, execution_id) < ($4, $5)) \
-                         ORDER BY created_at_unix_ns DESC, execution_id DESC LIMIT $6",
+                           AND ($6::TEXT IS NULL OR state = $6) \
+                           AND ($7::TEXT IS NULL OR trigger ->> 'type' = $7) \
+                           AND ($8::BIGINT IS NULL OR created_at_unix_ns >= $8) \
+                           AND ($9::BIGINT IS NULL OR created_at_unix_ns < $9) \
+                           AND ($10::TEXT IS NULL OR left(execution_id, length($10)) = $10) \
+                         ORDER BY created_at_unix_ns DESC, execution_id DESC LIMIT $11",
                         &[
                             &query.execution_scope_id.as_ref(),
                             &query.action_id,
                             &query.action_revision,
                             &cursor_created_at,
                             &cursor_id,
+                            &state,
+                            &trigger,
+                            &created_after,
+                            &created_before,
+                            &query.execution_id_prefix,
                             &fetch_limit,
                         ],
                     )
@@ -683,6 +707,17 @@ fn state_name(state: ExecutionState) -> &'static str {
         ExecutionState::Failed => "failed",
         ExecutionState::Cancelled => "cancelled",
         ExecutionState::TimedOut => "timed_out",
+    }
+}
+
+fn trigger_kind_name(trigger: ExecutionTriggerKind) -> &'static str {
+    match trigger {
+        ExecutionTriggerKind::Api => "api",
+        ExecutionTriggerKind::Schedule => "schedule",
+        ExecutionTriggerKind::Flow => "flow",
+        ExecutionTriggerKind::Manual => "manual",
+        ExecutionTriggerKind::Queue => "queue",
+        ExecutionTriggerKind::Unknown => "unknown",
     }
 }
 

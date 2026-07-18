@@ -10,11 +10,13 @@ import { Dashboard } from "../pages/Dashboard";
 import { Schedules } from "../pages/Schedules";
 import { Executions } from "../pages/Executions";
 import { Logs } from "../pages/Logs";
+import { Actions } from "../pages/Actions";
 
 const Flows = lazy(() => import("../pages/Flows").then((module) => ({ default: module.Flows })));
 
 const routes = [
   ["dashboard", "Dashboard"],
+  ["actions", "Actions"],
   ["gateway", "Gateway"],
   ["schedules", "Schedules"],
   ["flows", "Flows"],
@@ -129,6 +131,8 @@ function renderRoute(route: RouteId, artifacts: Artifacts) {
   switch (route) {
     case "dashboard":
       return <Dashboard artifacts={artifacts} />;
+    case "actions":
+      return <Actions artifacts={artifacts} />;
     case "gateway":
       return <ApiActions artifacts={artifacts} />;
     case "schedules":

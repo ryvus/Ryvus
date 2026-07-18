@@ -21,6 +21,7 @@ use crate::{
 
 const DEFAULT_LIMIT: usize = 100;
 const MAX_CURSOR_BYTES: usize = 4_096;
+const MAX_SEARCH_BYTES: usize = 256;
 
 #[derive(Clone)]
 struct LogHistoryState {
@@ -35,6 +36,8 @@ struct StreamQueryParams {
     runtime_host_id: Option<String>,
     execution_id: Option<String>,
     attempt_id: Option<String>,
+    severity: Option<LogLevel>,
+    search: Option<String>,
     cursor: Option<String>,
     limit: Option<usize>,
 }
@@ -43,6 +46,8 @@ struct StreamQueryParams {
 struct RecordQueryParams {
     execution_id: Option<String>,
     attempt_id: Option<String>,
+    severity: Option<LogLevel>,
+    search: Option<String>,
     cursor: Option<String>,
     limit: Option<usize>,
 }
@@ -248,6 +253,7 @@ async fn list_streams(
         query.execution_id.as_deref(),
         query.attempt_id.as_deref(),
     ])?;
+    let message_contains = normalize_search(query.search)?;
     let cursor = query
         .cursor
         .as_deref()
@@ -269,6 +275,8 @@ async fn list_streams(
             runtime_host_id: query.runtime_host_id.map(RuntimeHostId::from),
             execution_id: query.execution_id.map(ExecutionId::from),
             attempt_id: query.attempt_id.map(AttemptId::from),
+            severity: query.severity,
+            message_contains,
             cursor: cursor.map(|cursor| LogStreamCursor {
                 stream_id: cursor.stream_id,
                 started_at_unix_nanos: cursor.started_at_unix_nanos,
@@ -303,6 +311,7 @@ async fn list_records(
         query.execution_id.as_deref(),
         query.attempt_id.as_deref(),
     ])?;
+    let message_contains = normalize_search(query.search)?;
     let stream_id = LogStreamId::new(state.scope, RuntimeHostId::from(runtime_host_id));
     let cursor = query
         .cursor
@@ -321,6 +330,8 @@ async fn list_records(
             stream_id: stream_id.clone(),
             execution_id: query.execution_id.map(ExecutionId::from),
             attempt_id: query.attempt_id.map(AttemptId::from),
+            severity: query.severity,
+            message_contains,
             cursor: cursor.map(|cursor| cursor.sequence),
             limit: query.limit.unwrap_or(DEFAULT_LIMIT),
         })
@@ -356,6 +367,16 @@ fn validate_optional_values<const N: usize>(values: [Option<&str>; N]) -> Result
         return Err(LogHttpError::InvalidQuery);
     }
     Ok(())
+}
+
+fn normalize_search(search: Option<String>) -> Result<Option<String>, LogHttpError> {
+    match search {
+        Some(search) if search.trim().is_empty() || search.len() > MAX_SEARCH_BYTES => {
+            Err(LogHttpError::InvalidQuery)
+        }
+        Some(search) => Ok(Some(search.to_lowercase())),
+        None => Ok(None),
+    }
 }
 
 fn encode_cursor<T: Serialize>(cursor: T) -> Result<String, LogHttpError> {
